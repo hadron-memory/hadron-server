@@ -23,6 +23,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { maybeAdvanceOwnChannelRead } from '../../../lib/ownWorkerSessions.js';
 import { recordMentionsWorker } from '../../../lib/mentionsReadResolution.js';
 import { waitForLockWaiters } from '../../../test/lockWait.js';
+import { joinHostForKey } from '../../../test/agentTeamHost.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -100,7 +101,11 @@ beforeEach(async () => {
   bareKey = await mkKey(app.id, 'bare');
   opOnlyKey = await mkKey(app.id, 'op-only');
   foreignKey = await mkKey(otherApp.id, 'foreign');
-  const grant = (k: { id: string }, scope: string, hostId?: string) => M.grantAppKeyScope({}, { id: k.id, scope, ...(hostId ? { hostId } : {}) }, ctx(manager.id));
+  // #5259: a host key is granted only for a host joined to the App.
+  const grant = async (k: { id: string }, scope: string, hostId?: string) => {
+    if (hostId) await joinHostForKey(db, k.id, hostId);
+    return M.grantAppKeyScope({}, { id: k.id, scope, ...(hostId ? { hostId } : {}) }, ctx(manager.id));
+  };
   await grant(hostKey, 'attention:deliver'); await grant(hostKey, 'host:operate', 'orca1');
   await grant(otherHostKey, 'attention:deliver'); await grant(otherHostKey, 'host:operate', 'orca2');
   await grant(bareKey, 'attention:deliver');
@@ -161,12 +166,12 @@ describe('#2018 S2: a text-batch ack', () => {
     for (const t of ['a', 'b', 'c']) await say(`@kit ${t}`, { mentions: ['kit'] });
     await aged();
     const b = (await read(hostKey)).batches[0];
-    await M.acknowledgeDeliveryBatches({}, { batchIds: [b.id], through: [{ channelId: channel.id, seq: 2 }] }, keyCtx(hostKey));
+    await M.acknowledgeDeliveryBatches({}, { batchIds: [b.id], through: [{ channelRef: channel.id, seq: 2 }] }, keyCtx(hostKey));
     expect(await marks()).toEqual({ delivered: 2, read: 2 });
     // The full ack afterwards raises both to 3; an older partial replayed never lowers them.
     await M.acknowledgeDeliveryBatches({}, { batchIds: [b.id] }, keyCtx(hostKey));
     expect(await marks()).toEqual({ delivered: 3, read: 3 });
-    await M.acknowledgeDeliveryBatches({}, { batchIds: [b.id], through: [{ channelId: channel.id, seq: 2 }] }, keyCtx(hostKey));
+    await M.acknowledgeDeliveryBatches({}, { batchIds: [b.id], through: [{ channelRef: channel.id, seq: 2 }] }, keyCtx(hostKey));
     expect(await marks()).toEqual({ delivered: 3, read: 3 });
   });
 });
@@ -331,7 +336,7 @@ describe('#2018 S2: authority, exclusions, atomicity', () => {
     await aged();
     const b = (await read(hostKey)).batches[0];
     const park = parkAfterWakeLock();
-    const ack = (d = db) => M.acknowledgeDeliveryBatches({}, { batchIds: [b.id], through: [{ channelId: channel.id, seq: 2 }] }, keyCtx(hostKey, app.id, { db: d as never }));
+    const ack = (d = db) => M.acknowledgeDeliveryBatches({}, { batchIds: [b.id], through: [{ channelRef: channel.id, seq: 2 }] }, keyCtx(hostKey, app.id, { db: d as never }));
     const own = (d = db) => Q.channelMessages({}, { channelRef: channel.id, mentionsRef: kit.id, sinceSeq: 0, limit: 20 }, selfCtx(s, { db: d as never }));
     const first = order === 'read first' ? own(park.db) : ack(park.db);
     await park.reached;

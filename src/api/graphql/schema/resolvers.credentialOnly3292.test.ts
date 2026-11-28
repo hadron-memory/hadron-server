@@ -32,10 +32,8 @@ async function seed() {
   });
   const team = await db.memory.create({ data: { name: 'team', urn: `${root}:team`, organizationId: org.id, appId: app.id, class: 'app' } });
   const nodes = [
-    { loc: 'conversations', name: 'conversations' },
     { loc: 'conversations:research', name: 'research', data: { stageOrder: ['scope'], isSetup: false } },
     { loc: 'conversations:research:scope', name: 'scope', data: { promptRef: 'prompts:research:scope' } },
-    { loc: 'prompts', name: 'prompts' },
     { loc: 'prompts:research', name: 'research' },
     { loc: 'prompts:research:scope', name: 'scope', content: 'Scope the research.' },
   ];
@@ -92,7 +90,7 @@ describe('#3292 legacy chat item target (direct hypothetical context, not run tr
     expect(await db.agentSubscription.count({ where: { agentId: fixture.agent.id } })).toBe(0);
   });
   it('CONTROL: an ordinary user still starts a private chat outside item-only knowledge', async () => {
-    const out = await mutations.startChat({}, { agentRef: fixture.agent.id }, fixture.userContext);
+    const out = await mutations.startChat({}, { agentRef: fixture.agent.id, appRef: fixture.app.id }, fixture.userContext);
     expect(out.chatId).toMatch(/^chats:/);
     const chat = await db.node.findFirstOrThrow({ where: { loc: out.chatId, memoryId: out.memoryId } });
     expect(chat.memoryId).not.toBe(fixture.knowledge.id);

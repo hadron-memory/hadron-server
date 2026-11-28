@@ -244,7 +244,7 @@ describe('item 3: the missing cases', () => {
     expect(await call('hadron_delete_edge', { edgeRef: e1.id })).toMatch(/deleted|removed/i);
     expect(await db.edge.count({ where: { id: e1.id } })).toBe(0);
     const unknown = generateId();
-    expect(await call('hadron_delete_edge', { edgeRef: unknown })).toBe(`Edge not found: "${unknown}"`);
+    expect(await call('hadron_delete_edge', { edgeRef: unknown })).toBe('Edge not found');
     const inc = await edgeFrom(source, t4, 'include', { governedKind: 'INCLUDE' });
     expect(await call('hadron_delete_edge', { edgeRef: inc.id })).toMatch(/include/i);
     expect(await db.edge.count({ where: { id: inc.id } })).toBe(1);

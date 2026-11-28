@@ -90,7 +90,7 @@ describe('a create onto a worker waits for a claim in flight (#3269)', () => {
     const parent = await parentTask();
     const before = await realTasks();
     const out = await raceClaim(s.resetId, () => M.createAgentTask({}, {
-      input: { parentTaskId: parent.id, title: 'Child onto Kit', source: 'https://example.test/c', assignee: { worker: f.kit.id } },
+      input: { parentTaskRef: parent.id, title: 'Child onto Kit', source: 'https://example.test/c', assignee: { worker: f.kit.id } },
     }, ctx(f.manager.id)));
     expect(ext(out).code).toBe('WORKER_RESETTING');
     expect(ext(out).workerId).toBe(f.kit.id);
@@ -117,7 +117,7 @@ describe('a create onto a worker waits for a claim in flight (#3269)', () => {
     const s = await f.collectedReset();
     const parent = await parentTask();
     await raceClaim(s.resetId, () => M.createAgentTask({}, {
-      input: { parentTaskId: parent.id, title: 'Child onto Kit', source: 'https://example.test/c', assignee: { worker: f.kit.id } },
+      input: { parentTaskRef: parent.id, title: 'Child onto Kit', source: 'https://example.test/c', assignee: { worker: f.kit.id } },
     }, ctx(f.manager.id)));
     expect(await isWorkerResetting(db, f.kit.id, f.app.id, new Date())).toBe(true);
   });

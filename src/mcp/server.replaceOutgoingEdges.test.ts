@@ -152,7 +152,7 @@ describe('resolveEdgeRefs — canonical `::` URN inputs (#183)', () => {
 describe('resolveEdgeRefs — error handling', () => {
   it('returns an error for an unresolvable short loc and writes nothing', async () => {
     const r = await resolveEdgeRefs([{ targetId: 'does-not-exist', name: 'x' }], memory.id, adminAuth());
-    expect('error' in r && r.error).toMatch(/Edge target not found.*does-not-exist/);
+    expect('error' in r && r.error).toBe('Edge target not found'); // #5168: the ref is not quoted back
     // Caller would not call replaceOutgoingEdges in this branch, so no
     // edges or pending_edges should ever appear.
     expect(await db.edge.count({ where: { sourceId: source.id } })).toBe(0);
@@ -281,7 +281,7 @@ describe('replaceOutgoingEdges — replacement semantics', () => {
       resolved: [{ targetNodeId: ghost.id, targetLoc: 'ghost', targetMemoryId: memory.id, name: 'will-fk-error', loc: null, description: null, isRunnable: null }],
       createdBy: admin.id,
     });
-    expect(error).toBe(`Edge target not found: "${ghost.id}"`);
+    expect(error).toBe('Edge target not found');
     // The missing endpoint did not remove the original edge.
     const edges = await db.edge.findMany({ where: { sourceId: source.id } });
     expect(edges).toHaveLength(1);
@@ -369,7 +369,7 @@ describe('resolveEdgeRefs — foreign-memory target gate (#755)', () => {
     const shape = (msg: string | false, ref: string) => msg && msg.replace(ref, '<REF>');
     expect(shape('error' in real ? real.error : false, victimNode.id))
       .toBe(shape('error' in bogus ? bogus.error : false, bogusId));
-    expect('error' in real && real.error).toBe(`Edge target not found: "${victimNode.id}"`);
+    expect('error' in real && real.error).toBe('Edge target not found');
   });
 
   it('a caller who CAN read the target still resolves it (no regression)', async () => {

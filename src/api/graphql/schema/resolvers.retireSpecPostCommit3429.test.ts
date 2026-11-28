@@ -29,7 +29,7 @@ let admin: { id: string };
 let memoryId: string;
 const ctx = (): Context => ({ db, userId: admin.id, roles: [] });
 const spec = async (loc: string) => (await resolvers.Mutation.createSpecNode(null, { input: {
-  memoryId, loc, name: loc, role: 'spec', content: '# T\n\nBody.', abstract: `About ${loc}.`, tags: ['spec'],
+  memoryRef: memoryId, loc, name: loc, role: 'spec', content: '# T\n\nBody.', abstract: `About ${loc}.`, tags: ['spec'],
 } } as never, ctx())) as { id: string };
 
 beforeEach(async () => {

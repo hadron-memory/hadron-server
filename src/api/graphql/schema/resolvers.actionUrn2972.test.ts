@@ -93,7 +93,7 @@ describe('#2972 — write surfaces (evidence, green on main): nested register: l
   it('createNode accepts register:a:b (the :440 seam — reading (i): nested locs are writable)', async () => {
     const made = await M.createNode(
       {},
-      { input: { memoryId: teamMemoryId, loc: 'register:a:b', name: 'nested', content: '# x' } },
+      { input: { memoryRef: teamMemoryId, loc: 'register:a:b', name: 'nested', content: '# x' } },
       ctx(admin.id),
     );
     expect(await db.node.findUnique({ where: { id: made.id } })).not.toBeNull();
@@ -102,10 +102,10 @@ describe('#2972 — write surfaces (evidence, green on main): nested register: l
   it('createNode refuses a 65-char register: atom and a bad-charset register: atom with the one BAD_USER_INPUT answer (#4461)', async () => {
     const tooLong = 'x'.repeat(65);
     await expect(
-      M.createNode({}, { input: { memoryId: teamMemoryId, loc: `register:${tooLong}`, name: 'l', content: '# x' } }, ctx(admin.id)),
+      M.createNode({}, { input: { memoryRef: teamMemoryId, loc: `register:${tooLong}`, name: 'l', content: '# x' } }, ctx(admin.id)),
     ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT', reason: expect.any(String) } });
     await expect(
-      M.createNode({}, { input: { memoryId: teamMemoryId, loc: 'register:a!b', name: 'c', content: '# x' } }, ctx(admin.id)),
+      M.createNode({}, { input: { memoryRef: teamMemoryId, loc: 'register:a!b', name: 'c', content: '# x' } }, ctx(admin.id)),
     ).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT', reason: expect.any(String) } });
   });
 
@@ -115,11 +115,11 @@ describe('#2972 — write surfaces (evidence, green on main): nested register: l
       {},
       {
         input: {
-          memoryId: teamMemoryId,
+          memoryRef: teamMemoryId,
           loc: 'edge-host',
           name: 'host',
           content: '# x',
-          edges: [{ loc: 'register:a:b', targetId: target.id }],
+          edges: [{ loc: 'register:a:b', targetRef: target.id }],
         },
       },
       ctx(admin.id),
@@ -130,11 +130,11 @@ describe('#2972 — write surfaces (evidence, green on main): nested register: l
         {},
         {
           input: {
-            memoryId: teamMemoryId,
+            memoryRef: teamMemoryId,
             loc: 'edge-host-2',
             name: 'host2',
             content: '# x',
-            edges: [{ loc: 'register:a!b', targetId: target.id }],
+            edges: [{ loc: 'register:a!b', targetRef: target.id }],
           },
         },
         ctx(admin.id),

@@ -1,3 +1,4 @@
+import { assertMoveWithinSizeLimit, mapMoveExpiry, SubtreeMoveTimedOutError, SubtreeMoveTooLargeError } from '../../../lib/moveSizeLimit.js';
 import { safeNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { assertNoGenericMessageSeqWrite } from '../../../lib/legacyMessageSeq.js';
@@ -134,6 +135,7 @@ import {
   lockLocForWrite,
   lockNodeForDelete,
 } from '../../../lib/nodeSubtreeLock.js';
+import { createChatbotContainers, missingChatbotContainers } from '../../../lib/chatbotAncestors.js';
 import {
   mergeNodeFields,
   ALL_NODE_MERGE_FIELDS,
@@ -142,6 +144,7 @@ import {
 import { mapChatSeqConflict } from '../../../lib/prismaErrors.js';
 import { assertStorableText, edgeTextFields } from '../../../lib/unstorableTextInput.js';
 import {
+  requireCallerIdentity,
   type Context,
   getAccessibleMemoryIds,
   mapToolDriveFile,
@@ -162,7 +165,11 @@ import {
   type NodeInput,
   type NodeEdgeInput,
   type CreateNodeInput,
+  type CreateNodeDoorInput,
   type UpdateNodeInput,
+  type UpdateNodeDoorInput,
+  toCreateNodeInput,
+  toUpdateNodeInput,
   type SearchReplaceInNodesInput,
   type MergeNodesInput,
 } from './resolvers.helpers.js';
@@ -175,6 +182,8 @@ import { attachIncludePinWarnings, carryIncludePinWarnings, captureIncludePinWar
 import { assertIncludesWritable, includeRefusal, syncDerivedIncludesEdges } from '../../../lib/includes/writeIncludes.js';
 import { deletePendingEdgesTargetingNodes, reconcilePendingEdgeCounts } from '../../../lib/pendingEdgePromotion.js';
 import { memoryIsVectorIndexed } from '../../../lib/embedding/indexing.js';
+import { ownerLimitCaller, requireNodeHeadroom, type NodeOwnerLimit } from '../../../lib/ownerLimits/nodes.js';
+import { assertNodeContentSize, resultingNodeContent, withEncryptedSizes, type NodeContentFields, type NodeSizeCeiling } from '../../../lib/nodeContentLimit.js';
 
 
 /**
@@ -254,20 +263,20 @@ export async function deleteEdgeInDoorTx(
 ): Promise<void> {
   const { edgeId, edgeRef, memoryId, expectedSourceId } = args;
   if (!(await isMemoryReadableCached(txCtx, memoryId))) {
-    throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
-      extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+    throw new GraphQLError('Edge not found', {
+      extensions: { code: 'EDGE_NOT_FOUND' },
     });
   }
   await requireMemoryWriteAccess(txCtx, memoryId);
   // Writer level of the edge's current source, locked before the edge.
   const lockedEdge = await lockEdgeUnderSourceWriters(tx, txCtx, edgeId);
   if (!lockedEdge || lockedEdge.deleted_at) {
-    throw new GraphQLError(`Edge not found: "${edgeRef}"`, { extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef } });
+    throw new GraphQLError('Edge not found', { extensions: { code: 'EDGE_NOT_FOUND' } });
   }
   // #860: a caller scoped to one source's own edges (hadron_update_node removeEdges) re-checks it on the LOCKED edge: the
   // preflight read it without a lock, and an edge re-sourced since then is another node's, so not found here.
   if (expectedSourceId !== undefined && lockedEdge.source_id !== expectedSourceId) {
-    throw new GraphQLError(`Edge not found: "${edgeRef}"`, { extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef } });
+    throw new GraphQLError('Edge not found', { extensions: { code: 'EDGE_NOT_FOUND' } });
   }
   await assertEdgeWriteMemory(tx, edgeId, memoryId);
   await assertNoBootPromptRows(tx, [lockedEdge.source_id], 'update');
@@ -358,6 +367,18 @@ async function writeNodeCoreRaw(
      * omission (`src/lib/authoringAttestation.ts`).
      */
     authoring: AuthoringContext;
+    /**
+     * #5015 (Billing A7b, cor:acl:150:04) — what this write does at the memory owner's `nodes` limit when it adds a live
+     * node (a fresh insert, or a create that revives a tombstone): `'refuse'` or `'count-only'`. REQUIRED like
+     * `authoring`, so a new call site states it; never read on an update or on an upsert onto an existing row.
+     */
+    ownerLimit: NodeOwnerLimit;
+    /**
+     * #5019 (Billing A11, cor:dmo:060:19) — whether this write is judged by the deployment's ceiling on one node's content:
+     * `'check'` for caller content (the RESULTING node is measured, in plaintext), `'skip'` for what the platform composed or
+     * copied. REQUIRED like `ownerLimit`, so a new call site states it.
+     */
+    sizeCeiling: NodeSizeCeiling;
     /** Reuse a caller's lock transaction; effects wait for its commit. */
     transaction?: {
       tx: Prisma.TransactionClient;
@@ -464,7 +485,7 @@ async function writeNodeCoreRaw(
       // #2044: CreateNodeInput.memoryId is nullable on the wire (the other target is an App's
       // install memory, handled by createNode before it gets here), so every other door refuses a miss.
       if (!input.memoryId) {
-        throw new GraphQLError('A node write needs `memoryId`.', { extensions: { code: 'BAD_USER_INPUT' } });
+        throw new GraphQLError('A node write needs `memoryRef`.', { extensions: { code: 'BAD_USER_INPUT' } });
       }
       const rawMemoryRef = input.memoryId;
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, rawMemoryRef);
@@ -832,8 +853,8 @@ async function writeNodeCoreRaw(
             // The denial reuses the not-found wording so it can't be used as a
             // cross-memory existence oracle.
             if (!tgt || !(await isMemoryReadableCached(ctx, tgt.memoryId))) {
-              throw new GraphQLError(`Edge target not found: "${e.targetId}"`, {
-                extensions: { code: 'NODE_NOT_FOUND', ref: e.targetId },
+              throw new GraphQLError('Edge target not found', {
+                extensions: { code: 'NODE_NOT_FOUND' },
               });
             }
             resolvedEdges.push({
@@ -847,8 +868,8 @@ async function writeNodeCoreRaw(
             });
           } catch (err) {
             if (err instanceof NodeNotFoundError) {
-              throw new GraphQLError(`Edge target not found: "${err.ref}"`, {
-                extensions: { code: err.name, ref: err.ref },
+              throw new GraphQLError('Edge target not found', {
+                extensions: { code: err.name }, // #5168: the caller's ref is not relayed
               });
             }
             throw err;
@@ -961,6 +982,11 @@ async function writeNodeCoreRaw(
       if (nextAbstractOriginHash !== undefined) {
         suppliedForDiff.abstractOriginHash = nextAbstractOriginHash;
       }
+
+      // #5019 — judged on the locked, decrypted row, before the revision snapshot and the write. `input` is the caller's plaintext.
+      const assertSizeCeiling = (stored: NodeContentFields | null): void => {
+        if (opts.sizeCeiling === 'check') assertNodeContentSize(() => resultingNodeContent(input as NodeContentFields, stored));
+      };
 
       /** Recompute against the locked row when an abstract-only write follows a concurrent body edit. */
       const hashAgainstLockedContent = (lockedContent: string | null): string | null | undefined => {
@@ -1163,14 +1189,14 @@ async function writeNodeCoreRaw(
         };
         const live = await liveEdgeEndpointSet(tx, [sourceSnapshot, ...inlineEdgeTargets]);
         if (!live.has(sourceSnapshot.id)) {
-          throw new GraphQLError(`Source node not found: "${writtenNode.id}"`, {
+          throw new GraphQLError('Source node not found', {
             extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
         const missing = resolvedEdges.find((edge) => !live.has(edge.targetNodeId));
         if (missing) {
-          throw new GraphQLError(`Edge target not found: "${missing.targetNodeId}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: missing.targetNodeId },
+          throw new GraphQLError('Edge target not found', {
+            extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
 
@@ -1266,12 +1292,10 @@ async function writeNodeCoreRaw(
         const movedMemory = currentMemoryId !== input.memoryId;
         return new GraphQLError(
           movedMemory
-            ? `Node "${opts?.targetNodeId ?? input.loc}" moved since it was read — it is no ` +
-              `longer in memory "${input.memoryId}", and this write was authorized against ` +
-              `"${input.loc}". Re-read and retry.`
-            : `Node "${opts?.targetNodeId ?? input.loc}" moved since it was read — it is now ` +
-              `at "${currentLoc}", and this write was authorized against "${input.loc}". ` +
-              `Re-read and retry.`,
+            ? 'The node moved since it was read: it is no longer in the memory this write was ' +
+              'authorized against. Re-read and retry.'
+            : `The node moved since it was read: it is now at "${currentLoc}", not at the loc this ` +
+              'write was authorized against. Re-read and retry.',
           {
             extensions: {
               code: 'NODE_WRITE_CONFLICT',
@@ -1506,6 +1530,11 @@ async function writeNodeCoreRaw(
               mintHuman: true, authoredChange: authoredContentChanged(changes),
             }, opts.authoring);
 
+            // #5019 — an edit that leaves the node over the ceiling is refused, whichever field it changes; inline edges
+            // are not node content. #5223: after the role and authoring gates — a size refusal counts stored fields, so a
+            // writer those gates refuse must not learn the over/under bit.
+            if (changes.length > 0 || changesUnversionedField) assertSizeCeiling(currentForDiff);
+
             // A guarded claim happens only after the no-op decision and inside
             // this transaction. Since revSeq names the CURRENT state, the
             // snapshot uses the anchor and the live row advances to anchor+1.
@@ -1727,6 +1756,7 @@ async function writeNodeCoreRaw(
             let authoritativeChanges: string[] = [];
             let storedForIncludes: string | null = null;
             let authoritativeAbstractHash = nextAbstractOriginHash;
+            let sizedAgainst: NodeContentFields | null = null;
             if (authoritative) {
               // Row lock + drift reconciled as its own revision BEFORE this
               // snapshot (@copilot, PR #1339): the address lock binds only
@@ -1748,6 +1778,7 @@ async function writeNodeCoreRaw(
               const authoritativeForDiff = memEncInfo.isEncrypted
                 ? decryptNodeFields({ ...authoritative }, memEncInfo)
                 : authoritative;
+              sizedAgainst = authoritativeForDiff; // #5019 — a revive keeps the fields it omits
               // A tombstone's text is not the includer's stored text (#2041 S2b).
               if (!authoritative.deletedAt) storedForIncludes = authoritativeForDiff.content ?? null;
               authoritativeAbstractHash = hashAgainstLockedContent(authoritative.content);
@@ -1796,6 +1827,9 @@ async function writeNodeCoreRaw(
               runnable: mergedGovernedState(authoritative, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
               mintHuman: true, authoredChange: authoredByWrite,
             }, opts.authoring);
+            // #5019, #5160 — after the role and authoring gates: a size refusal counts stored fields, so a writer those gates
+            // refuse must not learn it. The revision above rolls back with it.
+            assertSizeCeiling(sizedAgainst);
 
             // #1460 — a tombstone still owns its old abstract and chunk
             // vectors. Remove them in this transaction before making the row
@@ -1837,6 +1871,19 @@ async function writeNodeCoreRaw(
             const isRoot = !input.loc.includes(':');
             if (autoSeq && isRoot) await lockRootSiblings(tx, input.memoryId);
             const nestedSeq = autoSeq ? await nextSiblingSeq(tx, input.memoryId, input.loc) : null;
+            // #5015 — a fresh insert or a revive adds a live node to the memory's owner. The owner is read under the
+            // memory row lock `assertMemoryWriteStateStable` holds, and the owner-limit key is the LAST lock this write
+            // takes (gate ruling 5): after it the write only touches the row it holds and the loc whose key it holds.
+            // #5390 — a conversation, stage or prompt node that this write adds also gets its missing container parents
+            // (`conversations`, `prompts`, `prompts:<name>`), under the ancestor keys held above. They are live nodes, so
+            // the owner-limit check counts them with this one (cor:acl:150:04, FIT pin (a)).
+            const containers = !authoritative || reviving ? await missingChatbotContainers(tx, input.memoryId, [input.loc]) : [];
+            if ((!authoritative || reviving) && opts.ownerLimit === 'refuse') {
+              await requireNodeHeadroom(tx, {
+                memoryId: input.memoryId, amount: 1n + BigInt(containers.length), caller: ownerLimitCaller(opts?.transaction?.requestContext ?? ctx),
+              });
+            }
+            await createChatbotContainers(tx, input.memoryId, containers, createdBy ?? null);
             const upserted = await tx.node.upsert({
               ...upsertArgs,
               create: { ...upsertArgs.create, ...(authoredStamp ?? {}), ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
@@ -1975,15 +2022,15 @@ async function resolveExistingNode(ctx: Context, ref: string, opts?: { forWrite?
     ({ id } = await resolveNodeRefForCaller(ctx, ref));
   } catch (e) {
     if (e instanceof NodeNotFoundError)
-      throw new GraphQLError(`Node not found: "${ref}"`, {
-        extensions: { code: 'NODE_NOT_FOUND', ref },
+      throw new GraphQLError('Node not found', {
+        extensions: { code: 'NODE_NOT_FOUND' },
       });
     throw e;
   }
   const node = await ctx.db.node.findUnique({ where: { id } });
   if (!node || node.deletedAt)
-    throw new GraphQLError(`Node not found: "${ref}"`, {
-      extensions: { code: 'NODE_NOT_FOUND', ref },
+    throw new GraphQLError('Node not found', {
+      extensions: { code: 'NODE_NOT_FOUND' },
     });
   // #1381: a node the caller will WRITE, in a memory it can neither write nor
   // read, answers here — at resolution — exactly as a missing one. Refusing at
@@ -2096,14 +2143,14 @@ async function updateNodeCore(
   const hasId = id != null && id !== '';
   if (hasId && (memoryId != null || loc != null)) {
     throw new GraphQLError(
-      `${op}: identify the node by \`id\` OR by \`memoryId\` + \`loc\`, not both. ` +
-        '(`loc`/`memoryId` are selectors, not writable fields — moveNode relocates.)',
+      `${op}: identify the node by \`ref\` OR by \`memoryRef\` + \`loc\`, not both. ` +
+        '(`loc`/`memoryRef` are selectors, not writable fields — moveNode relocates.)',
       { extensions: { code: 'BAD_USER_INPUT' } },
     );
   }
   if (!hasId && (memoryId == null || loc == null)) {
     throw new GraphQLError(
-      `${op}: supply \`id\` (PK or fully-qualified node URN) or both \`memoryId\` and \`loc\`.`,
+      `${op}: supply \`ref\` (PK or fully-qualified node URN) or both \`memoryRef\` and \`loc\`.`,
       { extensions: { code: 'BAD_USER_INPUT' } },
     );
   }
@@ -2118,8 +2165,8 @@ async function updateNodeCore(
       ({ id: targetNodeId } = await resolveNodeRefForCaller(ctx, id));
     } catch (e) {
       if (e instanceof NodeNotFoundError) {
-        throw new GraphQLError(`Node not found: "${id}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: id },
+        throw new GraphQLError('Node not found', {
+          extensions: { code: 'NODE_NOT_FOUND' },
         });
       }
       throw e;
@@ -2133,8 +2180,8 @@ async function updateNodeCore(
     // already says (it requires a live memory); falling through would answer
     // MEMORY_NOT_FOUND with the memory's own id (#1316, @copilot PR #1319).
     if (!row || row.memory.deletedAt) {
-      throw new GraphQLError(`Node not found: "${id}"`, {
-        extensions: { code: 'NODE_NOT_FOUND', ref: id },
+      throw new GraphQLError('Node not found', {
+        extensions: { code: 'NODE_NOT_FOUND' },
       });
     }
     targetMemoryId = row.memoryId;
@@ -2159,6 +2206,8 @@ async function updateNodeCore(
   // move (which frees the loc for reuse) can't make the loc-keyed
   // write hit a different node.
   return writeNodeCore({ ...fields, memoryId: targetMemoryId, loc: targetLoc }, ctx, 'update', {
+    ownerLimit: 'count-only',
+    sizeCeiling: 'check',
     authoring: authoringFromRequest(ctx, input.authoredWith),
     targetNodeId,
     guardRevSeq: expectedRevision ?? undefined,
@@ -2184,16 +2233,16 @@ async function nodeWriteCoordinationMemories(ctx: Context, memoryId: string, inp
     } catch (err) {
       // The transaction-entry scope pass must preserve the shared inline-edge refusal shape.
       if (err instanceof NodeNotFoundError) {
-        throw new GraphQLError(`Edge target not found: "${err.ref}"`, {
-          extensions: { code: err.name, ref: err.ref },
+        throw new GraphQLError('Edge target not found', {
+          extensions: { code: err.name }, // #5168: the caller's ref is not relayed
         });
       }
       throw err;
     }
     const target = await ctx.db.node.findUnique({ where: { id }, select: { memoryId: true } });
     if (!target || !(await isMemoryReadableCached(ctx, target.memoryId))) {
-      throw new GraphQLError(`Edge target not found: "${edge.targetId}"`, {
-        extensions: { code: 'NODE_NOT_FOUND', ref: edge.targetId },
+      throw new GraphQLError('Edge target not found', {
+        extensions: { code: 'NODE_NOT_FOUND' },
       });
     }
     ids.add(target.memoryId);
@@ -2245,8 +2294,8 @@ async function mergePropertiesAndWrite(a: {
   }
 
   const notFound = () =>
-    new GraphQLError(`Node not found: "${a.ref}"`, {
-      extensions: { code: 'NODE_NOT_FOUND', ...(a.hasId ? { ref: a.ref } : { loc: a.targetLoc, memoryId: resolvedMemoryId }) },
+    new GraphQLError('Node not found', {
+      extensions: { code: 'NODE_NOT_FOUND', ...(a.hasId ? {} : { loc: a.targetLoc, memoryId: resolvedMemoryId }) },
     });
   // An id selector is anchored on the PK, as the plain door is: one attempt. A loc selector names whatever lives at
   // (memory, loc) NOW, so the id it resolved to before the lock can be stale when the lock is granted (the node moved
@@ -2280,6 +2329,8 @@ async function mergePropertiesAndWrite(a: {
           withoutRequestCaches(ctx, lockTx),
           'update',
           {
+            ownerLimit: 'count-only',
+            sizeCeiling: 'check',
             authoring: authoringFromRequest(ctx, fields.authoredWith),
             targetNodeId: nodeId,
             guardRevSeq: a.expectedRevision ?? undefined,
@@ -2324,6 +2375,7 @@ export async function updateNodePropertiesWith(
   // PR #1305).
   opts: { mergeExports: boolean; governedContext?: GovernedContext },
 ) {
+  requireCallerIdentity(ctx);
   // The patch must be a JSON object — the operation merges keys, so an
   // array / scalar / null has no sensible "apply onto existing properties"
   // meaning (mirrors updateNodeData's `data` contract).
@@ -2340,8 +2392,8 @@ export async function updateNodePropertiesWith(
     ({ id: resolvedId } = await resolveNodeRefForCaller(ctx, nodeRef));
   } catch (e) {
     if (e instanceof NodeNotFoundError) {
-      throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-        extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+      throw new GraphQLError('Node not found', {
+        extensions: { code: 'NODE_NOT_FOUND' },
       });
     }
     throw e;
@@ -2353,8 +2405,8 @@ export async function updateNodePropertiesWith(
     select: { id: true, memoryId: true, deletedAt: true },
   });
   if (!meta || meta.deletedAt) {
-    throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-      extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+    throw new GraphQLError('Node not found', {
+      extensions: { code: 'NODE_NOT_FOUND' },
     });
   }
   // #1316: a node in a memory the caller cannot read answers as a missing one.
@@ -2410,8 +2462,8 @@ export async function updateNodePropertiesWith(
     });
     if (!fresh) {
       // Lost a race with a concurrent delete.
-      throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-        extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+      throw new GraphQLError('Node not found', {
+        extensions: { code: 'NODE_NOT_FOUND' },
       });
     }
 
@@ -2441,6 +2493,8 @@ export async function updateNodePropertiesWith(
       withoutRequestCaches(ctx, lockTx),
       'update',
       {
+        ownerLimit: 'count-only',
+        sizeCeiling: 'check',
         authoring: authoringFromRequest(ctx, authoredWith),
         targetNodeId: meta.id,
         governedMerge: 'properties',
@@ -2475,17 +2529,26 @@ export async function nodeDoorTxContext(ctx: Context, tx: Prisma.TransactionClie
   return preview ? { ...fresh, installWritePreview: true } : fresh;
 }
 
-/** #2734: conceal an install-memory preflight denial without changing the
- * established refusal of ordinary-memory doors. This permission is provisional:
- * only the door's own fenced transaction makes its write decision.
+/**
+ * The pre-lock write check of the merge and history doors, answering by cor:api:140:03: `notFound` is the door's own
+ * missing-node answer. This permission is provisional: only the door's own fenced transaction makes its write decision.
  */
 async function nodeDoorWritePreflight(ctx: Context, memoryId: string, notFound: () => Error): Promise<void> {
-  const memory = await ctx.db.memory.findUnique({ where: { id: memoryId }, select: { class: true, isInstallMemory: true } });
   const gate = () => requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, memoryId);
-  if (memory?.class === 'system' && memory.isInstallMemory) {
-    return concealUnreadableNodeDenial(ctx, memoryId, notFound, gate);
-  }
-  return gate();
+  return concealUnreadableNodeDenial(ctx, memoryId, notFound, gate);
+}
+
+/**
+ * cor:api:140:03 for the `mergeNodes` source, settled before the target is looked at. True when it answers as an
+ * unknown reference: the caller can neither write the node's memory nor read it (by the node gate, or by
+ * `canReadMemory`, which is all a merge that only reads its source asks), or may write it without reading it (#2206).
+ */
+async function isMergeSourceHidden(ctx: Context, nodeId: string): Promise<boolean> {
+  const node = await ctx.db.node.findUnique({ where: { id: nodeId }, select: { memoryId: true, deletedAt: true } });
+  if (!node || node.deletedAt) return true;
+  if (await isWriteBeyondRead(ctx.db, ctx, node.memoryId)) return true;
+  if (!(await isMemoryHiddenForWrite({ ...ctx, installWritePreflight: true }, node.memoryId, 'node'))) return false;
+  return !(await canReadMemory(ctx.db, ctx, node.memoryId));
 }
 
 /** #2734: history edits are memory writes, with authority held through the
@@ -2544,6 +2607,7 @@ export const nodeMoveOps = {
       expectedSource?: { memoryId: string; loc: string };
     },
   ) {
+      requireCallerIdentity(ctx);
       const source = await resolveExistingNode(ctx, sourceRef, { forWrite: true, movesContent: true });
       if (expectedSource && (source.memoryId !== expectedSource.memoryId || source.loc !== expectedSource.loc)) {
         throw new GraphQLError('The node moved since it was read, so nothing was moved. Re-read and retry.', {
@@ -2582,7 +2646,7 @@ export const nodeMoveOps = {
         // #2622: a move rebases whole loc subtrees, so it is a chat-message
         // writer like any other — the #992 conflict surfaces typed here, once,
         // for every move caller (moveNode + the spec-corpus relocation).
-        const moved = await mapChatSeqConflict(() => ctx.db.$transaction(
+        const moved = await mapMoveExpiry(() => mapChatSeqConflict(() => ctx.db.$transaction(
           async (tx) => {
             if (planOnly) await tx.$executeRaw`SET TRANSACTION READ ONLY`;
             // #2206 (#2233): an Agent definition's authority, at either end, before any loc or row lock.
@@ -2596,6 +2660,9 @@ export const nodeMoveOps = {
             // #3031: moving content requires the source read reach again after the authority wait.
             // Match resolveExistingNode's refusal; install-memory audiences remain in their own gate.
             if (await isWriteBeyondRead(tx as never, txCtx, source.memoryId)) throw nodeNotFoundError(sourceRef);
+            // #5128 (cor:api:190:01): an over-limit subtree is refused here, after every gate above (so the count tells a
+            // caller nothing about a subtree they could not move) and before any lock or write.
+            if (!isSameSlot) await assertMoveWithinSizeLimit(tx, source);
             // #1187 — DECLARE the complete key set first, in the one global
             // order: the destination ancestor path AND the source path that
             // `lockSourceForMove` takes further down. Previously those were two
@@ -2648,6 +2715,7 @@ export const nodeMoveOps = {
               authorizeLockedMemory: (memoryId) =>
                 requireMemoryWriteAccess(txCtx, memoryId),
               principal: txCtx,
+              ownerLimitCaller: ownerLimitCaller(ctx),
             });
             relocated = result.moved;
             linkWarnings = result.linkWarnings;
@@ -2657,7 +2725,7 @@ export const nodeMoveOps = {
           // A large subtree touches many rows; the default 5s interactive-txn
           // timeout is too tight (mirrors extractParentNodeGraph / cloneMemory).
           { timeout: 120_000, ...(planOnly ? { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead } : {}) },
-        ));
+        )));
         if (planOnly) {
           const urns = planMemoryUrns;
           const ordered = relocated.sort((a, b) => a.previousLoc < b.previousLoc ? -1 : a.previousLoc > b.previousLoc ? 1 : 0);
@@ -2705,6 +2773,12 @@ export const nodeMoveOps = {
         if (e instanceof SubtreeMoveIntoSelfError) {
           throw new GraphQLError(e.message, { extensions: { code: 'BAD_USER_INPUT', loc: e.loc } });
         }
+        if (e instanceof SubtreeMoveTooLargeError) {
+          throw new GraphQLError(e.message, { extensions: { code: 'MOVE_TOO_LARGE', limit: e.limit, count: e.count } });
+        }
+        if (e instanceof SubtreeMoveTimedOutError) {
+          throw new GraphQLError(e.message, { extensions: { code: 'MOVE_TIMED_OUT' } });
+        }
         if (e instanceof SubtreeMoveMintedError) {
           throw new GraphQLError(e.message, {
             extensions: { code: 'NODE_MINTED', memoryId: e.memoryId, locs: e.locs.slice(0, 10), count: e.locs.length },
@@ -2724,13 +2798,13 @@ export const nodeMoveOps = {
   },
 };
 
-/** #2044: `createNode` / `updateNode` take an App's install memory as the target instead of `memoryId`. */
-type CreateNodeArgs = Omit<CreateNodeInput, 'memoryId'> & { memoryId?: string | null; install?: InstallTarget | null };
-type UpdateNodeArgs = Omit<UpdateNodeInput, 'memoryId'> & { memoryId?: string | null; install?: InstallTarget | null };
+/** #2044: `createNode` / `updateNode` take an App's install memory as the target instead of `memoryRef` (#5080: the wire names). */
+type CreateNodeArgs = CreateNodeDoorInput & { install?: InstallTarget | null };
+type UpdateNodeArgs = UpdateNodeDoorInput & { install?: InstallTarget | null };
 
 function assertMemoryTargeted(memoryId: string | null | undefined, op: string): void {
   if (!memoryId) {
-    throw new GraphQLError(`${op}: supply \`memoryId\` or \`install\` (an App's install memory).`,
+    throw new GraphQLError(`${op}: supply \`memoryRef\` or \`install\` (an App's install memory).`,
       { extensions: { code: 'BAD_USER_INPUT' } });
   }
 }
@@ -2740,13 +2814,15 @@ function assertMemoryTargeted(memoryId: string | null | undefined, op: string): 
  * node in the SAME transaction, so a refused write leaves no memory behind.
  */
 async function createNodeInInstallMemory(input: CreateNodeArgs, ctx: Context) {
-  const { install, memoryId, ...rest } = input;
-  if (memoryId != null) {
-    throw new GraphQLError('createNode: supply `memoryId` OR `install`, not both.', { extensions: { code: 'BAD_USER_INPUT' } });
+  const { install, memoryRef, ...rest } = input;
+  if (memoryRef != null) {
+    throw new GraphQLError('createNode: supply `memoryRef` OR `install`, not both.', { extensions: { code: 'BAD_USER_INPUT' } });
   }
   const effects: Array<() => void> = [];
   const written = await withInstallMemory(ctx, install!, (tx, txCtx, memory) =>
-    writeNodeCore({ ...rest, memoryId: memory.id } as CreateNodeInput, txCtx, 'create', {
+    writeNodeCore({ ...toCreateNodeInput(rest), memoryId: memory.id } as CreateNodeInput, txCtx, 'create', {
+      ownerLimit: 'refuse',
+      sizeCeiling: 'check',
       authoring: authoringFromRequest(ctx, input.authoredWith),
       governedContext: 'node-write',
       // #3651: response-only state (the include-pin warnings) is keyed by the exact request Context, and `txCtx`
@@ -2799,13 +2875,17 @@ export const nodeMutations = {
     // soft-deleted one is resurrected. `input.id` is a forced create-PK
     // (importer/sync), never a selector.
     createNode: async (_: unknown, { input }: { input: CreateNodeArgs }, ctx: Context) => {
+      requireCallerIdentity(ctx);
       // #2044: the target is a memory OR an App's install memory (cor:agt:040:06).
       if (input.install) return createNodeInInstallMemory(input, ctx);
-      assertMemoryTargeted(input.memoryId, 'createNode');
-      return writeNodeCore(input as CreateNodeInput, ctx, 'create', {
+      assertMemoryTargeted(input.memoryRef, 'createNode');
+      const core = toCreateNodeInput(input) as CreateNodeInput;
+      return writeNodeCore(core, ctx, 'create', {
+        ownerLimit: 'refuse',
+        sizeCeiling: 'check',
         authoring: authoringFromRequest(ctx, input.authoredWith),
         governedContext: 'node-write',
-        concealUnreadable: { entity: 'memory', ref: input.memoryId! },
+        concealUnreadable: { entity: 'memory', ref: core.memoryId },
       });
     },
 
@@ -2846,9 +2926,11 @@ export const nodeMutations = {
           entry.doors.create,
           async (
             _: unknown,
-            { input, index, skill }: { input: CreateNodeInput; index?: TaskIndexInput | null; skill?: TaskSkillExportInput | null },
+            { input: wire, index, skill }: { input: CreateNodeDoorInput; index?: TaskIndexInput | null; skill?: TaskSkillExportInput | null },
             ctx: Context,
           ) => {
+            requireCallerIdentity(ctx);
+            const input = toCreateNodeInput(wire) as CreateNodeInput;
             // #4864: only the task door declares `index` and `skill` in the SDL; this keeps a direct call from
             // smuggling them onto another kind's door.
             const task = entry.kind === 'task';
@@ -2856,6 +2938,8 @@ export const nodeMutations = {
               ? { ...input, properties: withClaudeSkillExport(input.properties, skill, { loc: input.loc, content: input.content ?? '' }) }
               : input;
             return writeNodeCore(written, ctx, 'create', {
+              ownerLimit: 'refuse',
+              sizeCeiling: 'check',
               authoring: authoringFromRequest(ctx, input.authoredWith),
               ownsKind: entry.kind,
               governedContext: 'node-write',
@@ -2866,14 +2950,16 @@ export const nodeMutations = {
         ],
         [
           entry.doors.update,
-          async (_: unknown, { input, mergeExports }: { input: UpdateNodeInput; mergeExports?: boolean | null }, ctx: Context) =>
-            updateNodeCore(input, ctx, entry.doors.update, {
+          async (_: unknown, { input, mergeExports }: { input: UpdateNodeDoorInput; mergeExports?: boolean | null }, ctx: Context) => {
+            requireCallerIdentity(ctx);
+            return updateNodeCore(toUpdateNodeInput(input) as UpdateNodeInput, ctx, entry.doors.update, {
               ownsKind: entry.kind,
               governedContext: 'node-write',
               // #1291: only the task door declares the argument in the SDL; the others never see one, and this
               // keeps a direct call from smuggling it onto a different kind's door.
               ...(entry.kind === 'task' && mergeExports === true ? { mergeProperties: true } : {}),
-            }),
+            });
+          },
         ],
       ]),
     ),
@@ -2883,24 +2969,25 @@ export const nodeMutations = {
     // never moves. All content fields preserve-on-omit.
     // #3823: the one GraphQL door whose update writes may spend a worker session's boot-prompt edit grant.
     updateNode: (_: unknown, { input }: { input: UpdateNodeArgs }, ctx: Context) => withUpdateNodeDoor(async () => {
+      requireCallerIdentity(ctx);
       if (input.install) {
         // #3628 / ruling0234: shared participant/manager gates and live-install
         // refusals, with no lazy creation. The update uses the same held transaction.
-        const { install, memoryId, id, ...rest } = input;
-        if (memoryId != null || id != null) {
-          throw new GraphQLError('updateNode: identify the node by `install` + `loc`, not also by `id` or `memoryId`.',
+        const { install, memoryRef, ref, ...rest } = input;
+        if (memoryRef != null || ref != null) {
+          throw new GraphQLError('updateNode: identify the node by `install` + `loc`, not also by `ref` or `memoryRef`.',
             { extensions: { code: 'BAD_USER_INPUT' } });
         }
         const effects: Array<() => void> = [];
         const written = await withInstallMemory(ctx, install, (tx, txCtx, memory) =>
-          updateNodeCore({ ...rest, memoryId: memory.id } as UpdateNodeInput, txCtx, 'updateNode', {
+          updateNodeCore({ ...toUpdateNodeInput(rest), memoryId: memory.id } as UpdateNodeInput, txCtx, 'updateNode', {
             governedContext: 'node-write',
             transaction: { tx, pooledDb: ctx.db, requestContext: ctx, afterCommit: effect => effects.push(effect) },
           }), { create: false });
         for (const effect of effects) effect();
         return written;
       }
-      return updateNodeCore(input as UpdateNodeInput, ctx, 'updateNode', { governedContext: 'node-write' });
+      return updateNodeCore(toUpdateNodeInput(input) as UpdateNodeInput, ctx, 'updateNode', { governedContext: 'node-write' });
     }),
 
 
@@ -2917,6 +3004,7 @@ export const nodeMutations = {
       { nodeRef, data, reason, authoredWith }: { nodeRef: string; data: unknown; reason?: string | null; authoredWith?: AuthoredWith | null },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // The patch must be a JSON object — the operation merges keys, so an
       // array / scalar / null has no sensible "apply onto existing data"
       // meaning (matches the mergeJson contract used by mergeNodes).
@@ -2934,8 +3022,8 @@ export const nodeMutations = {
         ({ id: resolvedId } = await resolveNodeRefForCaller(ctx, nodeRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError) {
-          throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+          throw new GraphQLError('Node not found', {
+            extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
         throw e;
@@ -2949,8 +3037,8 @@ export const nodeMutations = {
         select: { id: true, memoryId: true, deletedAt: true },
       });
       if (!meta || meta.deletedAt) {
-        throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+        throw new GraphQLError('Node not found', {
+          extensions: { code: 'NODE_NOT_FOUND' },
         });
       }
       // #1316: a node in a memory the caller cannot read answers as a missing one.
@@ -2987,8 +3075,8 @@ export const nodeMutations = {
       });
       if (!row) {
         // Lost a race with a concurrent delete between the two reads.
-        throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+        throw new GraphQLError('Node not found', {
+          extensions: { code: 'NODE_NOT_FOUND' },
         });
       }
       const fields: { abstract: null; content: null; data: unknown } = {
@@ -3030,7 +3118,7 @@ export const nodeMutations = {
         },
         ctx,
         'update',
-        { authoring: authoringFromRequest(ctx, authoredWith), targetNodeId: meta.id, governedMerge: 'data', governedContext: 'node-write' },
+        { ownerLimit: 'count-only', sizeCeiling: 'check', authoring: authoringFromRequest(ctx, authoredWith), targetNodeId: meta.id, governedMerge: 'data', governedContext: 'node-write' },
       );
     },
 
@@ -3057,18 +3145,19 @@ export const nodeMutations = {
     // single-write invariants from upsertNode (per-memory write auth,
     // decrypt→replace→re-encrypt, NodeRevision snapshot, abstractOriginHash
     // recompute, re-embed, git mirror) but keyed off existing node rows rather
-    // than a full NodeInput. Selection is the union of nodeIds + (memoryIds,
+    // than a full NodeInput. Selection is the union of nodeRefs + (memoryRefs,
     // optionally narrowed by a loc `prefix`). See SearchReplaceInNodesInput.
     searchReplaceInNodes: async (
       _: unknown,
       { input }: { input: SearchReplaceInNodesInput },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       const {
         oldText,
         newText,
-        nodeIds,
-        memoryIds,
+        nodeRefs: nodeIds,
+        memoryRefs: memoryIds,
         prefix,
         fields,
         caseInsensitive = false,
@@ -3084,13 +3173,13 @@ export const nodeMutations = {
 
       if (!hasNodeIds && !hasMemoryIds) {
         throw new GraphQLError(
-          'searchReplaceInNodes requires at least one of `nodeIds` or `memoryIds`.',
+          'searchReplaceInNodes requires at least one of `nodeRefs` or `memoryRefs`.',
           { extensions: { code: 'SEARCH_REPLACE_NO_SELECTION' } },
         );
       }
       if (usePrefix && !hasMemoryIds) {
         throw new GraphQLError(
-          'searchReplaceInNodes: `prefix` requires `memoryIds` (loc is only unique within a memory).',
+          'searchReplaceInNodes: `prefix` requires `memoryRefs` (loc is only unique within a memory).',
           { extensions: { code: 'SEARCH_REPLACE_PREFIX_WITHOUT_MEMORY' } },
         );
       }
@@ -3229,6 +3318,16 @@ export const nodeMutations = {
         plaintext: { content: string | null; abstract: string | null };
         /** #2041 S2b — content before the replace; the row lock below revalidates it (revisionStateMatches). */
         storedContent: string | null;
+        /**
+         * #5223 — the decrypted row the ceiling is measured against. The size check no longer runs in the planning
+         * pass (a dry run cannot run the authoring gate, so it must not answer the size bit at all); the write pass
+         * measures from this. Freshness: `revisionStateMatches` compares every `TRACKED_NODE_FIELDS` entry — the
+         * four size-counted fields (content, description, data, properties) among them — between this plan's raw row
+         * and the FOR UPDATE-locked row, so any concurrent change to a size-counted field refuses the batch
+         * (NODE_WRITE_CONFLICT) instead of being measured stale; the one deliberately unversioned field, ownerRepo,
+         * is not size-counted. (The spec door instead re-snapshots under its row locks — see searchReplaceSpec.ts.)
+         */
+        sizeBasis: NodeContentFields;
         fieldResults: Array<{ field: string; matches: number }>;
         total: number;
         abstractChanged: boolean;
@@ -3356,6 +3455,7 @@ export const nodeMutations = {
               abstract: abstractChanged ? (changed.abstract as string | null) : pt.abstract,
             },
             storedContent: pt.content ?? null,
+            sizeBasis: pt,
             fieldResults,
             total,
             abstractChanged,
@@ -3522,7 +3622,7 @@ export const nodeMutations = {
         for (const id of [...planMemory.keys()].sort()) {
           await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: planMemory.get(id)! });
         }
-        const authoredStamps = new Map<string, NodeAuthorshipStamp | null>();
+        const authored: Array<{ plan: Plan; stamp: NodeAuthorshipStamp | null }> = [];
         for (const p of plans) {
           const locked = await tx.node.findUnique({ where: { id: p.raw.id } });
           // deletedAt is not a revisioned field, so a delete that committed
@@ -3537,12 +3637,23 @@ export const nodeMutations = {
           // and on what the row changes (compared on plaintext in the plan, which
           // the check above just proved current); one refusal refuses the batch,
           // like every check here.
-          authoredStamps.set(p.raw.id, await assertAuthoring(tx, p.raw.memoryId, {
-            priorRole: locked.role, priorRunnable: locked.isRunnable,
-            role: locked.role, runnable: locked.isRunnable, mintHuman: true, authoredChange: p.authoredChange,
-          }, authoring));
+          authored.push({
+            plan: p,
+            stamp: await assertAuthoring(tx, p.raw.memoryId, {
+              priorRole: locked.role, priorRunnable: locked.isRunnable,
+              role: locked.role, runnable: locked.isRunnable, mintHuman: true, authoredChange: p.authoredChange,
+            }, authoring),
+          });
         }
-        for (const p of plans) {
+        // #5019 (moved here by #5223): the whole batch's authoring gates have run; now every size check, then the
+        // writes. A size refusal counts stored fields, so a writer the authoring gate refuses (on this row or any
+        // other) must not learn the over/under bit — a batch whose row 1 is over-size and whose row 2 the gate
+        // refuses answers authoring, never the size bit. The dry run above never answers it either. A thunk, like
+        // every #5223 door: the ceiling costs nothing when none is set.
+        for (const { plan: p } of authored) {
+          assertNodeContentSize(() => resultingNodeContent(p.changed, p.sizeBasis));
+        }
+        for (const { plan: p, stamp } of authored) {
           const raw = p.raw;
           // #88: the bulk-edit rationale rides in revLabel (#620); `changes`
           // is exactly the field set the replace pass rewrote on this node.
@@ -3585,7 +3696,7 @@ export const nodeMutations = {
           }
           data.revisionContentHash = revisionStateHashRefreshMarker();
 
-          if (p.authoredChange) Object.assign(data, authoredStamps.get(raw.id) ?? clearNodeAuthorship());
+          if (p.authoredChange) Object.assign(data, stamp ?? clearNodeAuthorship());
           await tx.node.update({ where: { id: raw.id }, data });
           if (p.contentChanged || p.abstractChanged) {
             raw.embeddingWorkToken = await stampEmbeddingObligation(tx, raw.id, raw.memoryId);
@@ -3651,6 +3762,7 @@ export const nodeMutations = {
       },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // #542 — a single 'nodeRef' (ID or fully-qualified URN) identifies the
       // node, resolved by the shared resolveNodeRef. includeDeleted so a
       // re-delete of an already soft-deleted node stays idempotent (its ref
@@ -3663,8 +3775,8 @@ export const nodeMutations = {
         }));
       } catch (e) {
         if (e instanceof NodeNotFoundError) {
-          throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+          throw new GraphQLError('Node not found', {
+            extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
         throw e;
@@ -3674,8 +3786,8 @@ export const nodeMutations = {
         select: { memoryId: true, loc: true, deletedAt: true },
       });
       if (!node) {
-        throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+        throw new GraphQLError('Node not found', {
+          extensions: { code: 'NODE_NOT_FOUND' },
         });
       }
       // One check covers the subtree too: every descendant shares this memory.
@@ -3761,11 +3873,11 @@ export const nodeMutations = {
           if (!current || current.memoryId !== memoryId || current.loc !== node.loc) {
             const movedMemory = !!current && current.memoryId !== memoryId;
             throw new GraphQLError(
-              `Node "${nodeRef}" moved while this delete waited — re-read it and retry.`,
+              'The node moved while this delete waited — re-read it and retry.',
               {
                 extensions: {
+                  // #5225: no `ref`; the caller's own reference is not relayed (cor:api:140:01).
                   code: 'NODE_WRITE_CONFLICT',
-                  ref: nodeRef,
                   memoryId,
                   movedMemory,
                   ...(!movedMemory && current ? { currentLoc: current.loc } : {}),
@@ -3787,8 +3899,8 @@ export const nodeMutations = {
             });
             if (descendantCount > 0) {
               throw new GraphQLError(
-                `Node "${nodeRef}" has ${descendantCount} descendant(s). Pass recursive: true to delete the whole subtree.`,
-                { extensions: { code: 'NODE_HAS_DESCENDANTS', count: descendantCount, ref: nodeRef } },
+                `The node has ${descendantCount} descendant(s). Pass recursive: true to delete the whole subtree.`,
+                { extensions: { code: 'NODE_HAS_DESCENDANTS', count: descendantCount } },
               );
             }
           }
@@ -3867,8 +3979,8 @@ export const nodeMutations = {
               // 0 rows → NODE_NOT_FOUND rather than a cross-memory write (TOCTOU).
               const res = await tx.node.deleteMany({ where: { id: resolvedId, memoryId } });
               if (res.count === 0) {
-                throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-                  extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+                throw new GraphQLError('Node not found', {
+                  extensions: { code: 'NODE_NOT_FOUND' },
                 });
               }
             }
@@ -3890,8 +4002,8 @@ export const nodeMutations = {
               data: { deletedAt: now, deletedBy },
             });
             if (res.count === 0) {
-              throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-                extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+              throw new GraphQLError('Node not found', {
+                extensions: { code: 'NODE_NOT_FOUND' },
               });
             }
           }
@@ -3911,8 +4023,8 @@ export const nodeMutations = {
         // typed NODE_NOT_FOUND instead of leaking as INTERNAL_SERVER_ERROR
         // (mirrors moveNode; issue #100).
         if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
-          throw new GraphQLError(`Node not found: "${nodeRef}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: nodeRef },
+          throw new GraphQLError('Node not found', {
+            extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
         throw e;
@@ -3958,6 +4070,7 @@ export const nodeMutations = {
       },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // #1300 (Holger, 2026-09-24): NO platform-role gate here. The global
       // `requireRole(ctx, 'CONTRIBUTOR')` this opened with refused every
       // self-signed-up user (default roles [READER]) on ANY node, even as OWNER
@@ -3991,14 +4104,14 @@ export const nodeMutations = {
         ({ id: resolvedSourceId } = await resolveNodeRefForCaller(ctx, sourceRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError)
-          throw new GraphQLError(`Source node not found: "${sourceRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+          throw new GraphQLError('Source node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
         throw e;
       }
       // Spec 037: an edge carries a memory-unique `loc` (its identity + URN
       // suffix), with `memoryId` denormalized from the source node.
       const src = await ctx.db.node.findUnique({ where: { id: resolvedSourceId }, select: { loc: true, memoryId: true } });
       if (!src || !(await isMemoryReadableCached(ctx, src.memoryId))) {
-        throw new GraphQLError(`Source node not found: "${sourceRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+        throw new GraphQLError('Source node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
       }
       // PR-348 (Gemini, critical): write access to the SOURCE memory is the
       // authorization — since #1300 there is no platform-role gate in front.
@@ -4010,7 +4123,7 @@ export const nodeMutations = {
         ({ id: resolvedTargetId } = await resolveNodeRefForCaller(ctx, targetRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError)
-          throw new GraphQLError(`Target node not found: "${targetRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+          throw new GraphQLError('Target node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
         throw e;
       }
       const tgt = await ctx.db.node.findUnique({ where: { id: resolvedTargetId }, select: { loc: true, memoryId: true } });
@@ -4020,7 +4133,7 @@ export const nodeMutations = {
       // `canReadMemory` it used ignored MemoryShare, so a share grantee who
       // could read a node back through an edge could not create that edge.
       if (!tgt || !(await isMemoryReadableCached(ctx, tgt.memoryId))) {
-        throw new GraphQLError(`Target node not found: "${targetRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+        throw new GraphQLError('Target node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
       }
       // #4106: caller text a NUL or lone surrogate would make Postgres reject (22021 / 22P05 in jsonb) is refused typed,
       // after the gates above and before the loc derives from `name` or anything is written. `loc` and `condition`
@@ -4042,12 +4155,12 @@ export const nodeMutations = {
           { id: resolvedTargetId, ...tgt },
         );
         if (!locked.source) {
-          throw new GraphQLError(`Source node not found: "${sourceRef}"`, {
+          throw new GraphQLError('Source node not found', {
             extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
         if (!locked.target) {
-          throw new GraphQLError(`Target node not found: "${targetRef}"`, {
+          throw new GraphQLError('Target node not found', {
             extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
@@ -4058,13 +4171,13 @@ export const nodeMutations = {
         }
         const txCtx = await nodeDoorTxContext(ctx, tx, [src.memoryId, tgt.memoryId]);
         if (!(await isMemoryReadableCached(txCtx, src.memoryId))) {
-          throw new GraphQLError(`Source node not found: "${sourceRef}"`, {
+          throw new GraphQLError('Source node not found', {
             extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
         await requireMemoryWriteAccess(txCtx, src.memoryId);
         if (!(await isMemoryReadableCached(txCtx, tgt.memoryId))) {
-          throw new GraphQLError(`Target node not found: "${targetRef}"`, {
+          throw new GraphQLError('Target node not found', {
             extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
@@ -4138,6 +4251,7 @@ export const nodeMutations = {
       },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // #1300 (Holger, 2026-09-24): NO platform-role gate here. The global
       // `requireRole(ctx, 'CONTRIBUTOR')` this opened with refused every
       // self-signed-up user (default roles [READER]) on ANY node, even as OWNER
@@ -4176,8 +4290,8 @@ export const nodeMutations = {
         ({ id: resolvedEdgeId } = await resolveEdgeRef(ctx.db, edgeRef));
       } catch (e) {
         if (e instanceof EdgeNotFoundError) {
-          throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
-            extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+          throw new GraphQLError('Edge not found', {
+            extensions: { code: 'EDGE_NOT_FOUND' },
           });
         }
         throw e;
@@ -4192,16 +4306,16 @@ export const nodeMutations = {
         select: { memoryId: true },
       });
       if (!edgeMem) {
-        throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
-          extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+        throw new GraphQLError('Edge not found', {
+          extensions: { code: 'EDGE_NOT_FOUND' },
         });
       }
       // #1300 / @codex P2 on PR #1307: a caller who cannot READ the edge's
       // memory gets the same EDGE_NOT_FOUND as a missing edge, so the refusal
       // is not an existence oracle; a reader who may not write gets Forbidden.
       if (!(await isMemoryReadableCached(ctx, edgeMem.memoryId))) {
-        throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
-          extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+        throw new GraphQLError('Edge not found', {
+          extensions: { code: 'EDGE_NOT_FOUND' },
         });
       }
       await requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, edgeMem.memoryId);
@@ -4211,8 +4325,8 @@ export const nodeMutations = {
         await tx.$queryRaw`SELECT id FROM memories WHERE id = ${edgeMem.memoryId} FOR SHARE`;
         const txCtx = await nodeDoorTxContext(ctx, tx, [edgeMem.memoryId]);
         if (!(await isMemoryReadableCached(txCtx, edgeMem.memoryId))) {
-          throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
-            extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+          throw new GraphQLError('Edge not found', {
+            extensions: { code: 'EDGE_NOT_FOUND' },
           });
         }
         await requireMemoryWriteAccess(txCtx, edgeMem.memoryId);
@@ -4222,8 +4336,8 @@ export const nodeMutations = {
         // Source node first, then the edge row (the order node writes take); the source is revalidated under the edge lock.
         const current = await lockEdgeUnderSourceWriters(tx, txCtx, resolvedEdgeId);
         if (!current || current.deleted_at) {
-          throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
-            extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+          throw new GraphQLError('Edge not found', {
+            extensions: { code: 'EDGE_NOT_FOUND' },
           });
         }
         await assertEdgeWriteMemory(tx, resolvedEdgeId, edgeMem.memoryId);
@@ -4256,6 +4370,7 @@ export const nodeMutations = {
       { edgeRef }: { edgeRef: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // #1300 (Holger, 2026-09-24): NO platform-role gate here. The global
       // `requireRole(ctx, 'CONTRIBUTOR')` this opened with refused every
       // self-signed-up user (default roles [READER]) on ANY node, even as OWNER
@@ -4270,8 +4385,8 @@ export const nodeMutations = {
         ({ id: resolvedEdgeId } = await resolveEdgeRef(ctx.db, edgeRef));
       } catch (e) {
         if (e instanceof EdgeNotFoundError) {
-          throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
-            extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+          throw new GraphQLError('Edge not found', {
+            extensions: { code: 'EDGE_NOT_FOUND' },
           });
         }
         throw e;
@@ -4289,16 +4404,16 @@ export const nodeMutations = {
         },
       });
       if (!edgeMem) {
-        throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
-          extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+        throw new GraphQLError('Edge not found', {
+          extensions: { code: 'EDGE_NOT_FOUND' },
         });
       }
       // #1300 / @codex P2 on PR #1307: a caller who cannot READ the edge's
       // memory gets the same EDGE_NOT_FOUND as a missing edge, so the refusal
       // is not an existence oracle; a reader who may not write gets Forbidden.
       if (!(await isMemoryReadableCached(ctx, edgeMem.memoryId))) {
-        throw new GraphQLError(`Edge not found: "${edgeRef}"`, {
-          extensions: { code: 'EDGE_NOT_FOUND', ref: edgeRef },
+        throw new GraphQLError('Edge not found', {
+          extensions: { code: 'EDGE_NOT_FOUND' },
         });
       }
       await requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, edgeMem.memoryId);
@@ -4357,13 +4472,14 @@ export const nodeMutations = {
       { sourceRef, targetUrn, targetMemoryRef }: { sourceRef: string; targetUrn?: string | null; targetMemoryRef?: string | null },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       const selectedSource = await resolveExistingNode(ctx, sourceRef);
       // Cloning READS the source's content — require read access to the source
       // memory, or the URN-widened input becomes a cross-tenant exfiltration
       // path (review:entity-ref-args #3). Denial reads as not-found (no oracle).
       if (!(await canReadMemory(ctx.db, ctx, selectedSource.memoryId))) {
-        throw new GraphQLError(`Node not found: "${sourceRef}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: sourceRef },
+        throw new GraphQLError('Node not found', {
+          extensions: { code: 'NODE_NOT_FOUND' },
         });
       }
       const { destMemoryId, destLoc } = await resolveRelocationTarget(ctx, selectedSource, targetUrn, targetMemoryRef);
@@ -4388,8 +4504,8 @@ export const nodeMutations = {
           return current && !current.deletedAt && current.loc === selectedSource.loc ? current : null;
         })();
         if (!source) {
-          throw new GraphQLError(`Node not found: "${sourceRef}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: sourceRef },
+          throw new GraphQLError('Node not found', {
+            extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
 
@@ -4472,7 +4588,7 @@ export const nodeMutations = {
           srcPlain.abstract == null ||
           srcPlain.abstractOriginHash === computeContentHash(srcPlain.content)
         ) ? carryNodeAuthorship(source) : clearNodeAuthorship();
-        return writeNodeCore(input, txCtx, 'create', { authoring: { kind: 'carry' }, copiedAuthorship, copiesSeq: true,
+        return writeNodeCore(input, txCtx, 'create', { ownerLimit: 'refuse', authoring: { kind: 'carry' }, sizeCeiling: 'skip', copiedAuthorship, copiesSeq: true,
           transaction: { tx, pooledDb: ctx.db, coordinationMemories: [selectedSource.memoryId, destMemoryId], afterCommit: effect => effects.push(effect) },
         });
       });
@@ -4490,32 +4606,31 @@ export const nodeMutations = {
       { input }: { input: MergeNodesInput },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       const { source: rawSource, target: rawTarget } = input;
       const deleteSource = input.deleteSource ?? false;
       // Omitted/null `include` = merge every mergeable field.
       const fields = new Set<NodeMergeField>(input.include ?? ALL_NODE_MERGE_FIELDS);
 
+      const sourceNotFound = () => new GraphQLError('Source node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
+      const targetNotFound = () => new GraphQLError('Target node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
       // Resolve both endpoints (ID or fully-qualified URN — same dispatch as
       // createEdge). A genuine miss maps to NODE_NOT_FOUND; a malformed
-      // relative URN propagates as UrnNotQualifiedError (spec 022).
+      // relative URN propagates as UrnNotQualifiedError (spec 022). The source
+      // is settled before the target is looked at.
       let sourceId: string;
       let targetId: string;
       try {
         ({ id: sourceId } = await resolveNodeRefForCaller(ctx, rawSource));
       } catch (e) {
-        if (e instanceof NodeNotFoundError)
-          throw new GraphQLError(`Source node not found: "${rawSource}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: rawSource },
-          });
+        if (e instanceof NodeNotFoundError) throw sourceNotFound();
         throw e;
       }
+      if (await isMergeSourceHidden(ctx, sourceId)) throw sourceNotFound();
       try {
         ({ id: targetId } = await resolveNodeRefForCaller(ctx, rawTarget));
       } catch (e) {
-        if (e instanceof NodeNotFoundError)
-          throw new GraphQLError(`Target node not found: "${rawTarget}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: rawTarget },
-          });
+        if (e instanceof NodeNotFoundError) throw targetNotFound();
         throw e;
       }
       if (sourceId === targetId) {
@@ -4528,24 +4643,12 @@ export const nodeMutations = {
         ctx.db.node.findUnique({ where: { id: sourceId } }),
         ctx.db.node.findUnique({ where: { id: targetId } }),
       ]);
-      if (!source || source.deletedAt)
-        throw new GraphQLError(`Source node not found: "${rawSource}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: rawSource },
-        });
-      if (!target || target.deletedAt)
-        throw new GraphQLError(`Target node not found: "${rawTarget}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: rawTarget },
-        });
+      if (!source || source.deletedAt) throw sourceNotFound();
+      if (!target || target.deletedAt) throw targetNotFound();
       // #2206 (B): a merge folds one node's content into the other and returns the result, so a node in a memory the
       // caller may write but not read answers exactly as a missing one, on either end, before any gate.
-      if (await isWriteBeyondRead(ctx.db, ctx, source.memoryId))
-        throw new GraphQLError(`Source node not found: "${rawSource}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: rawSource },
-        });
-      if (await isWriteBeyondRead(ctx.db, ctx, target.memoryId))
-        throw new GraphQLError(`Target node not found: "${rawTarget}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: rawTarget },
-        });
+      if (await isWriteBeyondRead(ctx.db, ctx, source.memoryId)) throw sourceNotFound();
+      if (await isWriteBeyondRead(ctx.db, ctx, target.memoryId)) throw targetNotFound();
 
       // Auth. The target is mutated → write access always. The source is
       // read to fold its fields; it's mutated only when we delete it or
@@ -4553,7 +4656,7 @@ export const nodeMutations = {
       // A source read-denial returns the same NODE_NOT_FOUND wording as a
       // genuine miss so it can't be used as a cross-memory existence oracle
       // (mirrors createEdge's target-denial posture).
-      await nodeDoorWritePreflight(ctx, target.memoryId, () => nodeNotFoundError(rawTarget));
+      await nodeDoorWritePreflight(ctx, target.memoryId, targetNotFound);
       // #1606 (cor:dmo:110:01/04) — a comment never merges, and a merge that
       // moves the source's incoming edges or deletes it would retarget or
       // strand the threads anchored to the source's identity. The comment path
@@ -4573,14 +4676,13 @@ export const nodeMutations = {
       const authedMemories = new Set<string>([target.memoryId]);
       const writeMemories = new Set<string>([target.memoryId]);
       if (source.memoryId !== target.memoryId) {
+        // The source is only read unless the merge deletes it or moves its edges.
         const touchesSource = deleteSource || fields.has('EDGES');
         if (touchesSource) {
           writeMemories.add(source.memoryId);
-          await nodeDoorWritePreflight(ctx, source.memoryId, () => nodeNotFoundError(rawSource));
+          await nodeDoorWritePreflight(ctx, source.memoryId, sourceNotFound);
         } else if (!(await canReadMemory(ctx.db, ctx, source.memoryId))) {
-          throw new GraphQLError(`Source node not found: "${rawSource}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: rawSource },
-          });
+          throw sourceNotFound();
         }
       }
       authedMemories.add(source.memoryId);
@@ -4678,6 +4780,9 @@ export const nodeMutations = {
         }
         throw e;
       }
+
+      // #5019/#5223 — the merged target's size is measured inside the write transaction below, after its role-writer
+      // and authoring gates, from `tgtPt` (or the ciphertext envelope when the merge touches no encrypted field).
 
       // Post-merge plaintext content drives the spec-032 abstract hash.
       const postMergeContent = contentChanged
@@ -4846,6 +4951,14 @@ export const nodeMutations = {
           authoredChange: Object.keys(changed).length > 0,
           mintHuman: false, // a fold, not an authoring write (D-2026-09-26-D)
         }, authoringFromRequest(ctx, input.authoredWith));
+        // #5019 (moved here by #5223): the merged target, before any write, after the gates above. Freshness:
+        // `revisionStateMatches` above compared every `TRACKED_NODE_FIELDS` entry — the four size-counted fields
+        // (content, description, data, properties) among them — for BOTH endpoints against these locked rows, so
+        // `changed`, `tgtPt` and `touchesEncrypted` (all computed from the pre-transaction reads) describe the rows
+        // being written; the one deliberately unversioned field, ownerRepo, is not size-counted.
+        if (Object.keys(changed).length > 0) {
+          assertNodeContentSize(() => resultingNodeContent(changed, tgtEnc.isEncrypted && !touchesEncrypted ? withEncryptedSizes(target) : tgtPt));
+        }
         await createNodeRevision(
           tx,
           buildNodeRevisionSnapshot(target, editorFromAuth(ctx), {
@@ -5076,6 +5189,7 @@ export const nodeMutations = {
       { memoryId }: { memoryId: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // Preserve the ordinary write-access and concealed-memory boundary.
       const { id } = await resolveMemoryRefForWrite(ctx, memoryId);
       await requireMemoryWriteAccess({ ...ctx, installWritePreflight: true }, id);
@@ -5095,8 +5209,9 @@ export const nodeMutations = {
       { nodeRevRef, truncate = false }: { nodeRevRef: string; truncate?: boolean },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       const notFound = () => new GraphQLError('Node revision not found', {
-        extensions: { code: 'NOT_FOUND', nodeRevRef },
+        extensions: { code: 'NOT_FOUND' },
       });
       const revisionId = await resolveRevisionIdOrNotFound(ctx, nodeRevRef, notFound);
       // Resolve only provenance before the read gate: a moved node's snapshot
@@ -5317,6 +5432,13 @@ export const nodeMutations = {
           'objectType' in restoreFields ? (restoreFields.objectType as string | null) : current.objectType,
           'properties' in restoreFields ? restoreFields.properties : current.properties,
         );
+        // cor:dmo:060:19 (Decided: Holger, 2026-11-27, answer A) — a restore is deliberately NOT
+        // checked against NODE_CONTENT_MAX_BYTES, even when the ceiling was lowered after that
+        // version was written: a restore is byte-identical to the revision it came from and adds
+        // nothing new (cor:dmo:060:04), so history stays recoverable. Exempt from the ceiling only —
+        // the role-writer and schema gates above still run, and every OTHER write to the node
+        // (updateNode, search-and-replace, merge, …) is still checked; the same content sent as an
+        // ordinary update refuses NODE_CONTENT_TOO_LARGE.
         if (truncate) {
           // #617 truncate: collapse the history so the selected revision becomes
           // the new baseline. Delete every snapshot NEWER than the selected one
@@ -5428,7 +5550,8 @@ export const nodeMutations = {
     // (as restoreNodeRevision) — the memory you own the live node in, even if the
     // snapshot was captured in another memory before a move.
     deleteNodeRevision: async (_: unknown, { nodeRevRef }: { nodeRevRef: string }, ctx: Context) => {
-      const notFound = () => new GraphQLError('Node revision not found', { extensions: { code: 'NOT_FOUND', nodeRevRef } });
+      requireCallerIdentity(ctx);
+      const notFound = () => new GraphQLError('Node revision not found', { extensions: { code: 'NOT_FOUND' } }); // #5168: no caller ref relayed
       const revisionId = await resolveRevisionIdOrNotFound(ctx, nodeRevRef, notFound);
       // #3329: a revision whose node's memory is soft-deleted is answered as missing, in the same single lookup,
       // before any access gate (no FORBIDDEN-vs-NOT_FOUND oracle). withNodeHistoryWrite re-checks under lock.
@@ -5465,9 +5588,10 @@ export const nodeMutations = {
       { nodeRevRef, revLabel }: { nodeRevRef: string; revLabel?: string | null },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       const notFound = () =>
         new GraphQLError('Node revision not found', {
-          extensions: { code: 'NOT_FOUND', nodeRevRef },
+          extensions: { code: 'NOT_FOUND' },
         });
       const revisionId = await resolveRevisionIdOrNotFound(ctx, nodeRevRef, notFound);
       const revision = await ctx.db.nodeRevision.findUnique({ where: { id: revisionId } });
@@ -5504,7 +5628,8 @@ export const nodeMutations = {
     // #617 — delete ALL snapshots for a node, returning the count deleted. Write-
     // gated on the node's current memory. nodeRef is a PK or fully-qualified URN.
     clearNodeHistory: async (_: unknown, { nodeRef }: { nodeRef: string }, ctx: Context) => {
-      const notFound = () => new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });
+      requireCallerIdentity(ctx);
+      const notFound = () => new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
       let nodeId: string;
       try {
         // includeDeleted: a soft-deleted node still owns residual history an
@@ -5523,7 +5648,7 @@ export const nodeMutations = {
         select: { memoryId: true, role: true, loc: true },
       });
       if (!node) throw notFound();
-      await nodeDoorWritePreflight(ctx, node.memoryId, () => nodeNotFoundError(nodeRef));
+      await nodeDoorWritePreflight(ctx, node.memoryId, notFound);
       // #1641 §3.2 — a question's history is its audit trail (as deleteNodeRevision).
       if (isQuestionFamilyRole(node.role)) throw questionContainedError("Clearing a question's history", [node.loc]);
       return withNodeHistoryWrite(ctx, nodeId, node.memoryId, notFound, async tx => {
@@ -5550,23 +5675,24 @@ export const nodeMutations = {
       }: { nodeRef: string; connectionRef: string; folderId?: string | null; title?: string | null },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       let nodeId: string;
       try {
         ({ id: nodeId } = await resolveNodeRefForCaller(ctx, nodeRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError) {
-          throw new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });
+          throw new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
         }
         throw e;
       }
       const node = await ctx.db.node.findUnique({ where: { id: nodeId } });
       if (!node || node.deletedAt) {
-        throw new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });
+        throw new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
       }
       const accessibleIds = await getAccessibleMemoryIds(ctx);
       if (!accessibleIds.includes(node.memoryId)) {
         // Denied and not-found are indistinguishable on purpose (nodeById parity).
-        throw new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });
+        throw new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
       }
       // A locked encrypted node must be a typed refusal, never a silent
       // ciphertext export — decryptNodesBatch's leave-as-ciphertext posture

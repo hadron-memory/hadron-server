@@ -94,8 +94,13 @@ export type ListedNode = {
   inheritedFrom: InheritedFrom | null;
 };
 
-export type AgentTaskEntry = { node: ListedNode & { abstract?: string }; trigger: string | null; matchedBy?: MatchedBy };
-export type AgentTaskSearch = { symptom?: string | null; limit?: number | null };
+export type AgentTaskEntry = { node: ListedNode & { abstract?: string }; trigger: string | null; matchedBy?: MatchedBy; score?: number | null };
+/** #2421, #5284: what the caller gives is a phrase (Holger, 2026-11-17; `symptom` removed with no alias, 2026-11-26). */
+export type AgentTaskSearch = { phrase?: string | null; limit?: number | null };
+/** A ranked task: its vector score on the abstract, or null when nothing scored it (the keyword fallback). */
+export type RankedAgentTask = AgentTaskEntry & { matchedBy: MatchedBy; score: number | null };
+/** #5284: the most tasks one ranked list returns (default 3). */
+export const RANKED_TASK_LIST_MAX = 10;
 
 export type AgentProcessKind = 'STARTS' | 'INVOLVED';
 export type AgentProcessEntry = { node: ListedNode; kind: AgentProcessKind; trigger: string | null };
@@ -256,62 +261,134 @@ async function resolveIndexSources(
 }
 
 /**
+ * #5360 B7 — validate a ranked-list search before ANY read, the Agent ref's resolution included: an invalid
+ * limit or an over-long phrase is BAD_USER_INPUT even for an unknown or unreadable Agent, so a caller's bad
+ * input is named as such instead of losing to the gate's AGENT_NOT_FOUND, and no agent row is read to refuse
+ * a malformed request. Semantics unchanged from the old post-read check: limit is judged only with a phrase
+ * (without one it is ignored, the legacy list), and the phrase bound is the shared 512 (#5360 B2). Called by
+ * the GraphQL resolver and the MCP tool before they resolve the ref, and again at the top of
+ * {@link listAgentTasks} for every direct caller.
+ */
+export function assertAgentTaskSearch(search: AgentTaskSearch): void {
+  if (search.phrase == null) return;
+  const phrase = search.phrase.trim();
+  if (!phrase || (search.limit != null && (!Number.isInteger(search.limit) || search.limit < 1 || search.limit > RANKED_TASK_LIST_MAX))) {
+    throw new GraphQLError(`phrase must be non-empty and limit must be an integer from 1 to ${RANKED_TASK_LIST_MAX}.`, { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  assertQueryLength(phrase);
+}
+
+/**
  * An Agent's tasks (cor:dmo:050:15): its effective runnable nodes and every
  * chain index's listed tasks, each once, with a trigger where an index edge
  * gives one. Ordered by loc, then memory id, for a stable list.
- * #2421 experiment: symptom ranks its runnable effective-chain subset by
- * abstract only (cor:dmo:050:15); omission preserves the original list.
+ * #2421, #5284: a phrase ranks the runnable effective-chain subset by abstract
+ * ({@link matchAgentTasks}) and returns at most `limit` (default 3, at most
+ * {@link RANKED_TASK_LIST_MAX}); omission preserves the original list.
  */
 export async function listAgentTasks(db: Db, auth: AuthContext, agentId: string, ref: string, search: AgentTaskSearch = {}): Promise<AgentTaskEntry[]> {
+  assertAgentTaskSearch(search);
+  const tasks = await openAgentTasks(db, auth, agentId, ref);
+  if (search.phrase == null) return tasks.entries; // byte-identical legacy list
+  // The ranker judges the same TRIMMED phrase the validation above refused at (#5408, Baylor's F3: noted as
+  // equivalence — the validation trims first, and this trim is what keeps the two arms on one string).
+  return (await tasks.rank(search.phrase.trim())).ranked.slice(0, search.limit ?? 3);
+}
+
+/**
+ * #5284 — an Agent's task set after the list gate, with its ranking against a phrase. One gate, one chain read and
+ * one task set serve both the list and `agentInstructions` (the register arm finds its task in `entries`).
+ */
+export async function openAgentTasks(db: Db, auth: AuthContext, agentId: string, ref: string) {
   const agent = await gatedAgent(db, auth, agentId, ref);
   const ctx = await agentContext(db, agent);
   const entries = await tasksOf(db, auth, agent, ctx);
-  if (search.symptom == null) return entries; // byte-identical legacy list
-  const symptom = search.symptom.trim();
-  if (!symptom || (search.limit != null && (!Number.isInteger(search.limit) || search.limit < 1))) {
-    throw new GraphQLError('symptom must be non-empty and limit must be a positive integer.', { extensions: { code: 'BAD_USER_INPUT' } });
-  }
-  assertQueryLength(symptom); // #435: this free text reaches the keyword half without passing findNodes
-  const limit = Math.min(search.limit ?? 3, 3);
-  // #2421 experimental search is only the effective SYSTEM set, not the wider
-  // readable outside-chain index entries accepted by the unfiltered list.
+  return { entries, rank: (phrase: string) => matchAgentTasks(db, auth, agent, ctx, entries, phrase) };
+}
+
+/**
+ * #5284 (S4 of #4360; cor:dmo:050:15 "Finding a task by phrase", Proposed) — rank the runnable effective-chain tasks
+ * with a non-empty abstract against `phrase`, on the abstract only.
+ *
+ * With an embedding of the phrase (`vectorAvailable`), the order is the vector similarity of each abstract
+ * (`score` = 1 - cosine distance; Holger, 2026-11-25, "Accept both": vector on the abstract), best first; ties go to
+ * a task the keyword half also found, then by loc. A task the keyword half finds that has no abstract vector yet
+ * follows the scored ones with `score` null. Without one (no embedding configured, or the call failed), the order is
+ * #2421's keyword fallback, unchanged, every `score` null. `matchedBy` says which halves found each task, as before.
+ *
+ * The candidate set, the install-memory exclusion and the re-read and re-authorization after ranking are #2421's:
+ * an override, move, revocation or boot-prompt turn during retrieval drops a task rather than keeping an old stamp.
+ * Never logs the phrase or a task.
+ */
+export async function matchAgentTasks(
+  db: Db,
+  auth: AuthContext,
+  agent: GatedAgent,
+  ctx: Awaited<ReturnType<typeof agentContext>>,
+  entries: AgentTaskEntry[],
+  phrase: string,
+): Promise<{ vectorAvailable: boolean; ranked: RankedAgentTask[] }> {
+  assertQueryLength(phrase); // #435: this free text reaches the keyword half without passing findNodes
+  // #2421: only the effective SYSTEM set, not the wider readable outside-chain index entries the unfiltered list accepts.
   const rows = await db.node.findMany({
     where: { id: { in: entries.map(e => e.node.id) }, memoryId: { in: ctx.scope.memoryIds }, deletedAt: null, isRunnable: true, abstract: { not: null } },
     select: { id: true, memoryId: true, loc: true, role: true, deletedAt: true, abstract: true },
   });
   const candidates = rows.filter(r => !!r.abstract?.trim());
-  if (!candidates.length) return [];
+  let vectorAvailable = false;
+  if (!candidates.length) return { vectorAvailable, ranked: [] };
   const ids = candidates.map(r => r.id);
   const provider = getRetrievalProvider();
   const lexOpts = { db, memoryIds: ctx.scope.memoryIds, candidateNodeIds: ids, abstractOnly: true, limit: ids.length, filter: { isRunnable: true } };
   let vector: Array<{ nodeId: string; score: number }> = [];
-  let vectorAvailable = false;
   if (isEmbeddingConfigured()) {
     // Embedding unavailability degrades to keyword; database/provider errors
     // still escape. Summary-only filtering occurs before the vector window.
     let embedding: number[] | undefined;
-    try { [embedding] = await getEmbeddingClient().embed([symptom], 'query'); } catch { /* keyword fallback */ }
+    try { [embedding] = await getEmbeddingClient().embed([phrase], 'query'); } catch { /* keyword fallback */ }
     vectorAvailable = !!embedding;
     if (embedding) vector = await provider.vectorSearch({ db, memoryIds: ctx.scope.memoryIds, candidateNodeIds: ids, abstractOnly: true, queryEmbedding: embedding, limit: ids.length, contentScope: 'CONTENT' });
   }
-  const { hits: keyword } = await hybridKeywordCandidates(symptom,
+  const { hits: keyword } = await hybridKeywordCandidates(phrase,
     query => provider.lexicalSearch({ ...lexOpts, fields: ['abstract'], query }), !vectorAvailable);
-  const ranked = composeHybridRanking(keyword, vector, ids.length);
+  const order = vectorAvailable ? vectorOrder(keyword, vector, new Map(candidates.map(r => [r.id, r.loc])))
+    : composeHybridRanking(keyword, [], ids.length).map(h => ({ ...h, score: null }));
   // Re-read and re-authorize current rows before rendering; an override, move,
   // revocation or boot-prompt turn during retrieval cannot retain an old stamp.
   const current = await db.node.findMany({
-    where: { id: { in: ranked.map(h => h.nodeId) }, memoryId: { in: ctx.scope.memoryIds }, isRunnable: true, deletedAt: null, abstract: { not: null } },
+    where: { id: { in: order.map(h => h.nodeId) }, memoryId: { in: ctx.scope.memoryIds }, isRunnable: true, deletedAt: null, abstract: { not: null } },
     select: { id: true, memoryId: true, loc: true, role: true, deletedAt: true, abstract: true },
   });
   const effective = await retainEffective(db, current, await effectiveScope(db, [agent.systemMemoryId]));
   const ok = await reverifyServed(db, auth, agent.systemMemoryId, entries.map(e => e.node), effective);
   const byId = new Map(entries.map(e => [e.node.id, e]));
   const abstract = new Map(effective.filter(r => !!r.abstract?.trim()).map(r => [r.id, r.abstract!]));
-  return ranked.flatMap(h => {
+  const ranked = order.flatMap(h => {
     const entry = byId.get(h.nodeId);
     if (!entry || !ok.has(h.nodeId) || !abstract.has(h.nodeId)) return [];
-    return [{ ...entry, node: { ...entry.node, abstract: abstract.get(h.nodeId)! }, matchedBy: h.matchedBy }];
-  }).slice(0, limit);
+    return [{ ...entry, node: { ...entry.node, abstract: abstract.get(h.nodeId)! }, matchedBy: h.matchedBy, score: h.score }];
+  });
+  return { vectorAvailable, ranked };
+}
+
+/**
+ * #5284: the vector order. Scored tasks by similarity, best first (ties: found by keyword too, then loc), then the
+ * keyword-only tasks (no abstract vector yet) in keyword order with no score.
+ */
+function vectorOrder(
+  keyword: ReadonlyArray<{ nodeId: string }>,
+  vector: ReadonlyArray<{ nodeId: string; score: number }>,
+  locOf: Map<string, string>,
+): Array<{ nodeId: string; matchedBy: MatchedBy; score: number | null }> {
+  const kw = new Set(keyword.map(h => h.nodeId));
+  const scored = [...vector].sort((a, b) => b.score - a.score
+    || Number(kw.has(b.nodeId)) - Number(kw.has(a.nodeId))
+    || (locOf.get(a.nodeId) ?? '').localeCompare(locOf.get(b.nodeId) ?? ''));
+  const vec = new Set(vector.map(h => h.nodeId));
+  return [
+    ...scored.map(h => ({ nodeId: h.nodeId, matchedBy: (kw.has(h.nodeId) ? 'BOTH' : 'VECTOR') as MatchedBy, score: h.score })),
+    ...keyword.filter(h => !vec.has(h.nodeId)).map(h => ({ nodeId: h.nodeId, matchedBy: 'KEYWORD' as MatchedBy, score: null })),
+  ];
 }
 
 async function tasksOf(

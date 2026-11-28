@@ -146,12 +146,12 @@ describe('#3976 updateApp on an uninstalled App', () => {
  */
 describe('#3976 App-owned AI-config writes on an uninstalled App', () => {
   const base = { ownerType: 'APP', provider: 'anthropic', model: 'claude-sonnet-5-5', apiKey: 'sk-test-key' };
-  const mkConfig = async () => (await M.createAiServiceConfig({}, { ...base, ownerId: app.id, name: 'default' }, ctx(admin.id))).id as string;
+  const mkConfig = async () => (await M.createAiServiceConfig({}, { ...base, ownerRef: app.id, name: 'default' }, ctx(admin.id))).id as string;
   const cfg = (id: string) => db.aiServiceConfig.findUniqueOrThrow({ where: { id } });
 
   it('createAiServiceConfig refuses APP_UNINSTALLED and creates nothing', async () => {
     await uninstall();
-    const r = await refusal(M.createAiServiceConfig({}, { ...base, ownerId: app.id, name: 'default' }, ctx(admin.id)));
+    const r = await refusal(M.createAiServiceConfig({}, { ...base, ownerRef: app.id, name: 'default' }, ctx(admin.id)));
     expect(r.code).toBe('APP_UNINSTALLED');
     expect(await db.aiServiceConfig.count({ where: { appId: app.id } })).toBe(0);
   });
@@ -175,7 +175,7 @@ describe('#3976 App-owned AI-config writes on an uninstalled App', () => {
   it('refuses before judging the input: an invalid argument on an uninstalled App is APP_UNINSTALLED', async () => {
     const id = await mkConfig();
     await uninstall();
-    expect((await refusal(M.createAiServiceConfig({}, { ...base, ownerId: app.id, name: 'x', provider: 'no-such-provider' }, ctx(admin.id)))).code).toBe('APP_UNINSTALLED');
+    expect((await refusal(M.createAiServiceConfig({}, { ...base, ownerRef: app.id, name: 'x', provider: 'no-such-provider' }, ctx(admin.id)))).code).toBe('APP_UNINSTALLED');
     expect((await refusal(M.updateAiServiceConfig({}, { id, provider: 'no-such-provider' }, ctx(admin.id)))).code).toBe('APP_UNINSTALLED');
   });
 
@@ -183,7 +183,7 @@ describe('#3976 App-owned AI-config writes on an uninstalled App', () => {
     const id = await mkConfig();
     await uninstall();
     for (const run of [
-      () => M.createAiServiceConfig({}, { ...base, ownerId: app.id, name: 'x' }, ctx(stranger.id)),
+      () => M.createAiServiceConfig({}, { ...base, ownerRef: app.id, name: 'x' }, ctx(stranger.id)),
       () => M.updateAiServiceConfig({}, { id, model: 'changed' }, ctx(stranger.id)),
       () => M.deleteAiServiceConfig({}, { id }, ctx(stranger.id)),
     ]) {
@@ -196,7 +196,7 @@ describe('#3976 App-owned AI-config writes on an uninstalled App', () => {
     const live = await db.app.findUniqueOrThrow({ where: { id: app.id } });
     await uninstall();
     for (const run of [
-      () => M.createAiServiceConfig({}, { ...base, ownerId: app.id, name: 'raced' }, ctx(admin.id)),
+      () => M.createAiServiceConfig({}, { ...base, ownerRef: app.id, name: 'raced' }, ctx(admin.id)),
       () => M.updateAiServiceConfig({}, { id, model: 'raced' }, ctx(admin.id)),
       () => M.deleteAiServiceConfig({}, { id }, ctx(admin.id)),
     ]) {

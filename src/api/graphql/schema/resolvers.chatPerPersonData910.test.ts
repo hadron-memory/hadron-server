@@ -34,6 +34,7 @@ let outsider: { id: string };
 let adminId: string;
 let agent: { id: string };
 let systemMemoryId: string;
+let appId: string;
 
 const ctxFor = (userId: string): Context => ({ db, roles: ['READER'], userId });
 
@@ -63,6 +64,7 @@ beforeEach(async () => {
       organizationId: org.id, appAgents: { create: { agentId: agent.id } },
     },
   });
+  appId = app.id;
   for (const u of [alice, bob]) {
     await db.appMember.create({ data: { appId: app.id, userId: u.id, role: 'member' } });
   }
@@ -95,7 +97,7 @@ beforeEach(async () => {
 });
 
 async function startShared(userId: string) {
-  return resolvers.Mutation.startChat({}, { agentRef: agent.id, scope: 'shared' }, ctxFor(userId));
+  return resolvers.Mutation.startChat({}, { agentRef: agent.id, scope: 'shared', appRef: appId }, ctxFor(userId));
 }
 async function extract(userId: string, chatId: string, data: Record<string, unknown>) {
   return resolvers.Mutation.processChatResponse(
@@ -114,6 +116,15 @@ async function dataNodeOf(chatId: string) {
 }
 
 describe('#910 — per-person extraction in an app-class host', () => {
+  it('#5019: a chat message and its reply are not judged by NODE_CONTENT_MAX_BYTES', async () => {
+    vi.stubEnv('NODE_CONTENT_MAX_BYTES', '5');
+    try {
+      const { chatId } = await startShared(alice.id);
+      await resolvers.Mutation.sendChatMessage({}, { chatId, userMessage: 'x'.repeat(2000) }, ctxFor(alice.id));
+      await extract(alice.id, chatId, { industry: 'y'.repeat(2000) });
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   it("separate chats: A's value never reaches B's prompt; each then sees only their own", async () => {
     const a = await startShared(alice.id);
     const b = await startShared(bob.id);
@@ -328,7 +339,7 @@ describe('#910 — the default data node is always the compiled memory\'s own (C
       data: { id: generateId(), memoryId: team.id, loc: 'data', name: 'data', nodeType: 'info', data: { industry: 'TEAM-motto' } },
     });
     for (const [user, value] of [[alice, 'A-own'], [bob, 'B-own']] as const) {
-      const chat = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, ctxFor(user.id));
+      const chat = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: appId }, ctxFor(user.id));
       await extract(user.id, chat.chatId, { industry: value });
       const prompt = await promptFor(user.id, chat.chatId);
       expect(prompt).toContain(`industry=${value};`);
@@ -361,7 +372,7 @@ describe('#910 — the default data node is always the compiled memory\'s own (C
 
 describe('#910 — single-human hosts keep the flat bag', () => {
   it('a personal-memory chat still folds extraction flat and reads it back whole', async () => {
-    const chat = await resolvers.Mutation.startChat({}, { agentRef: agent.id }, ctxFor(alice.id));
+    const chat = await resolvers.Mutation.startChat({}, { agentRef: agent.id, appRef: appId }, ctxFor(alice.id));
     await extract(alice.id, chat.chatId, { industry: 'A-construction', users: 'literal' });
     const { memoryId, data } = await dataNodeOf(chat.chatId);
     const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
@@ -460,7 +471,7 @@ describe('#1328 — extraction into a data node a rule governs', () => {
     const task = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: 'author-task', memoryId } } });
     const authored = { region: 'EU', extra: 'stamped' };
     await resolvers.Mutation.updateNode({}, {
-      input: { memoryId, loc: 'data', data: authored, authoredWith: { task: task.id, revision: task.revSeq } },
+      input: { memoryRef: memoryId, loc: 'data', data: authored, authoredWith: { task: task.id, revision: task.revSeq } },
     } as never, { db, roles: ['ADMIN'], userId: adminId });
     const stamped = await db.node.findUniqueOrThrow({ where });
     expect(stamped.authoredByTask).toBe(task.id);

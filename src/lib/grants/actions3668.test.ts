@@ -27,11 +27,11 @@ beforeEach(async () => { await cleanDb(db); await dropTestActions(); });
 afterAll(async () => { await dropTestActions(); });
 
 describe('the platform list', () => {
-  it('#3707 (S1b): the shipped list is exactly the seven seeded actions, and a repeat of the upsert changes nothing (terms: seed3707.test.ts)', async () => {
-    expect(PLATFORM_ACTIONS.map((a) => a.name).sort()).toEqual(['bootprompt.compile.approve', 'bootprompt.source.edit', 'schedule.create', 'secret.reveal', 'secret.use', 'webhook.create', 'worker.session.restart']);
+  it('#3707 (S1b): the shipped list is exactly the eight seeded actions (#5321 added memory.read), and a repeat of the upsert changes nothing (terms: seed3707.test.ts)', async () => {
+    expect(PLATFORM_ACTIONS.map((a) => a.name).sort()).toEqual(['bootprompt.compile.approve', 'bootprompt.source.edit', 'memory.read', 'schedule.create', 'secret.reveal', 'secret.use', 'webhook.create', 'worker.session.restart']);
     await upsertPlatformActions(db);
     const before = await db.$queryRawUnsafe<Array<{ n: number }>>(`SELECT count(*)::int AS n FROM actions`);
-    expect(await upsertPlatformActions(db)).toEqual({ inserted: 0, updated: 0, unchanged: 7 });
+    expect(await upsertPlatformActions(db)).toEqual({ inserted: 0, updated: 0, unchanged: 8 });
     expect(await db.$queryRawUnsafe(`SELECT count(*)::int AS n FROM actions`)).toEqual(before);
   });
 });
@@ -153,18 +153,20 @@ describe('no surface writes an action, or a grant (S1a has no writer)', () => {
 // #3789 (S2a-read, gated T3 Hardened) added the read-only Query.grant/grants (#3800 adds Query.myGrants) and their types. Still no writer.
 // #3649 slice B added grant signing requests: requestGrantSignature / withdrawGrantSigningRequest write a REQUEST row,
 // never a grant or an action, and grantSigningRequest reads one. Still no grant writer.
+// #5001 added the selection calls (requestGrantSelectionSignature / withdrawGrantSigningSelection write a selection REQUEST and its item
+// request rows, never a grant or an action; grantSigningSelection reads one) and GrantSigningSelection(State). Still no grant writer.
 // #3649 slice D added the READ projection of a grant's signatures: GrantSignature, GrantSignatureState, GrantSignatureStatus
 // (Grant.signatureStatus). Types only, no query or mutation; still no grant writer.
 const BASELINE = [
   'Mutation.createAgentOrgGrant', 'Mutation.createConnectionGrant', 'Mutation.createGrant', 'Mutation.createPrincipalGrant', 'Mutation.grantApp', 'Mutation.grantAppKeyScope',
-  'Mutation.grantCredits', 'Mutation.mintActionTickets', 'Mutation.recordAppAction', 'Mutation.requestGrantSignature', 'Mutation.revokeAgentOrgGrant', 'Mutation.revokeAppGrant',
+  'Mutation.grantCredits', 'Mutation.mintActionTickets', 'Mutation.recordAppAction', 'Mutation.requestGrantSelectionSignature', 'Mutation.requestGrantSignature', 'Mutation.revokeAgentOrgGrant', 'Mutation.revokeAppGrant',
   'Mutation.revokeAppMemoryWriteGrant', 'Mutation.revokeAutomationReadGrant', 'Mutation.revokeAutomationTeamSnapshotGrant', 'Mutation.revokeConnectionGrant',
-  'Mutation.revokeGrant', 'Mutation.revokePrincipalGrant', 'Mutation.setAppMemoryWriteGrant', 'Mutation.setAutomationReadGrant', 'Mutation.setAutomationTeamSnapshotGrant', 'Mutation.withdrawGrant', 'Mutation.withdrawGrantSigningRequest',
+  'Mutation.revokeGrant', 'Mutation.revokePrincipalGrant', 'Mutation.setAppMemoryWriteGrant', 'Mutation.setAutomationReadGrant', 'Mutation.setAutomationTeamSnapshotGrant', 'Mutation.withdrawGrant', 'Mutation.withdrawGrantSigningRequest', 'Mutation.withdrawGrantSigningSelection',
   'Query.action', 'Query.actionRegisterIndex', 'Query.actionTickets', 'Query.appGrants', 'Query.appMemoryWriteGrants', 'Query.automationReadGrants', 'Query.automationTeamSnapshotGrant',
-  'Query.automationTeamSnapshotGrants', 'Query.connectionGrant', 'Query.connectionGrants', 'Query.effectiveActionPolicy', 'Query.grant', 'Query.grantActions', 'Query.grantSigningRequest', 'Query.grants', 'Query.myGrants', 'Query.principalGrant', 'Query.principalGrants',
+  'Query.automationTeamSnapshotGrants', 'Query.connectionGrant', 'Query.connectionGrants', 'Query.effectiveActionPolicy', 'Query.grant', 'Query.grantActions', 'Query.grantSigningRequest', 'Query.grantSigningSelection', 'Query.grants', 'Query.myGrants', 'Query.principalGrant', 'Query.principalGrants',
   'TYPE AccessGrant', 'TYPE ActionRegisterIndexEntry', 'TYPE ActionRegisterIndexPage', 'TYPE ActionRegisterIndexState', 'TYPE ActionTicket', 'TYPE ActionTicketsPage',
   'TYPE AgentOrgGrant', 'TYPE AppGrant', 'TYPE AppGrantName', 'TYPE AppMemoryWriteGrant', 'TYPE AutomationReadGrant', 'TYPE AutomationTeamSnapshotGrant',
   'TYPE AutomationTeamSnapshotGrantPage', 'TYPE ConnectionGrant', 'TYPE ConnectionGrantsPage', 'TYPE CreateGrantInput', 'TYPE EffectiveActionPolicy', 'TYPE Grant', 'TYPE GrantAction', 'TYPE GrantActionParameter', 'TYPE GrantActionsPage', 'TYPE GrantAnnouncement',
-  'TYPE GrantCreditsInput', 'TYPE GrantHolderDepartureReason', 'TYPE GrantHolderKind', 'TYPE GrantSignature', 'TYPE GrantSignatureState', 'TYPE GrantSignatureStatus', 'TYPE GrantSigningRequest', 'TYPE GrantSigningRequestState', 'TYPE GrantState', 'TYPE GrantsPage', 'TYPE MintActionTicketsInput', 'TYPE PrProtocolAction', 'TYPE PrincipalGrant', 'TYPE PrincipalGrantsPage', 'TYPE RecordAppActionResult',
+  'TYPE GrantCreditsInput', 'TYPE GrantHolderDepartureReason', 'TYPE GrantHolderKind', 'TYPE GrantSignature', 'TYPE GrantSignatureState', 'TYPE GrantSignatureStatus', 'TYPE GrantSigningRequest', 'TYPE GrantSigningRequestState', 'TYPE GrantSigningSelection', 'TYPE GrantSigningSelectionState', 'TYPE GrantState', 'TYPE GrantsPage', 'TYPE MintActionTicketsInput', 'TYPE PrProtocolAction', 'TYPE PrincipalGrant', 'TYPE PrincipalGrantsPage', 'TYPE RecordAppActionResult',
   'TYPE SkillExportAction', 'TYPE TickAction', 'TYPE TickActionState',
 ];

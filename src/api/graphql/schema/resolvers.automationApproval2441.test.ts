@@ -44,7 +44,7 @@ async function fixture() {
   const entryNodeUrn = 'hrn:node:adopt.test:flow:entry';
   const schedule = await appRunMutations.createAgentSchedule({}, { input: { appRef: app.id, name: 'Weekly', cron: '0 6 * * 1', entryNodeUrn, runAsSelf: true, agentRef: agent.id } }, ctx as never);
   const webhook = await appRunMutations.createAgentWebhook({}, { input: { appRef: app.id, name: 'inbound', entryNodeUrn, runAsSelf: true, agentRef: agent.id } }, ctx as never);
-  const manual = await mintAppRun(db, { appId: app.id, organizationId: org.id, agentId: agent.id, userId: user.id, triggerKind: 'MANUAL', entryNodeUrn });
+  const manual = await mintAppRun(db, { appId: app.id, owner: { organizationId: org.id }, agentId: agent.id, userId: user.id, triggerKind: 'MANUAL', entryNodeUrn });
   const llm = vi.fn(async () => ({ text: 'ok', tokensIn: 1, tokensOut: 1, provider: 'test', model: 'test' }));
   const deps: RunExecutionDeps = { ...makeProdRunDeps(db), resolveConfig: vi.fn(async () => ({ config: {} }) as never), llm, writeOutput: vi.fn(async () => null) };
   const ref = { SCHEDULE: schedule.id, WEBHOOK: webhook.webhook.id, MANUAL: manual.id } as Record<Kind, string>;
@@ -291,7 +291,7 @@ describe('approve and decline', () => {
   });
   it.each(['SCHEDULE', 'WEBHOOK'] as const)('declining an adopted %s revokes it: the next run fails AUTOMATION_UNADOPTED and an existing run snapshot is untouched', async kind => {
     const f = await fixture();
-    const mk = () => mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: kind, triggerId: f.ref[kind], entryNodeUrn: f.entryNodeUrn });
+    const mk = () => mintAppRun(db, { appId: f.app.id, owner: { organizationId: f.org.id }, agentId: f.agent.id, userId: f.user.id, triggerKind: kind, triggerId: f.ref[kind], entryNodeUrn: f.entryNodeUrn });
     const before = await mk();
     expect(await decline(f, kind)).toBe(true);
     expect((await db.appRun.findUniqueOrThrow({ where: { id: before.id } })).automationPin).toEqual(before.automationPin);
@@ -307,7 +307,7 @@ describe('approve and decline', () => {
     expect(await decline(f, 'MANUAL')).toBe(true);
     expect(await db.manualAutomationPin.count({ where: { runId: f.manual.id } })).toBe(0);
     expect((await db.appRun.findUniqueOrThrow({ where: { id: f.manual.id } })).automationPin).toEqual(before.automationPin);
-    const poll = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: 'INTEGRATION', parentRunId: f.manual.id, entryNodeUrn: f.entryNodeUrn });
+    const poll = await mintAppRun(db, { appId: f.app.id, owner: { organizationId: f.org.id }, agentId: f.agent.id, userId: f.user.id, triggerKind: 'INTEGRATION', parentRunId: f.manual.id, entryNodeUrn: f.entryNodeUrn });
     expect(await executeAppRun(db, poll.id, f.deps)).toBe('failed');
     expect((await db.appRun.findUniqueOrThrow({ where: { id: poll.id } })).failure).toMatchObject({ code: 'AUTOMATION_UNADOPTED' });
     // The declined origin is still reachable by its run id, as UNADOPTED, and can be approved again.
@@ -317,7 +317,7 @@ describe('approve and decline', () => {
   });
   it('mutations act on the exact origin run, never a substitute', async () => {
     const f = await fixture();
-    const newer = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: 'MANUAL', entryNodeUrn: f.entryNodeUrn });
+    const newer = await mintAppRun(db, { appId: f.app.id, owner: { organizationId: f.org.id }, agentId: f.agent.id, userId: f.user.id, triggerKind: 'MANUAL', entryNodeUrn: f.entryNodeUrn });
     await decline(f, 'MANUAL');
     expect(await db.manualAutomationPin.count({ where: { runId: newer.id } })).toBe(1);
     await expect(M.declineAutomation({}, { triggerKind: 'MANUAL', triggerRef: generateId() }, f.ctx)).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });

@@ -36,7 +36,7 @@ async function observedWrite(patch: Record<string, unknown>, ownsKind?: 'review'
       };
     } });
     await writeNodeCore({ memoryId, loc: mode === 'create' ? 'new-node' : 'ordinary', name: 'ordinary', content: 'after', ...patch } as Parameters<typeof writeNodeCore>[0],
-      ctx(), mode, { authoring: { kind: 'carry' }, ownsKind,
+      ctx(), mode, { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: { kind: 'carry' }, ownsKind,
         ...(mode === 'update' ? { targetNodeId: nodeId } : {}),
         transaction: { tx: observed as Prisma.TransactionClient, pooledDb: db, afterCommit: () => {} },
       });
@@ -137,10 +137,10 @@ it('real PG: ordinary same-memory content update completes while a signal update
   let writerDone: Promise<PromiseSettledResult<unknown>[]> | undefined;
   try {
     const owner = await held.promise;
-    await writeNodeCore({ memoryId, loc: 'ordinary', content: 'ordinary-finished' }, ctx(), 'update', { authoring: { kind: 'carry' }, targetNodeId: nodeId });
+    await writeNodeCore({ memoryId, loc: 'ordinary', content: 'ordinary-finished' }, ctx(), 'update', { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: { kind: 'carry' }, targetNodeId: nodeId });
     expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).content).toBe('ordinary-finished');
     const writer = writeNodeCore({ memoryId, loc: 'ordinary', isRunnable: false, content: 'signal-finished' }, contextWithPid(waiter), 'update',
-      { authoring: { kind: 'carry' }, targetNodeId: nodeId });
+      { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: { kind: 'carry' }, targetNodeId: nodeId });
     void writer.catch(waiter.reject);
     writerDone = Promise.allSettled([writer]);
     await waitForMemoryKey(await waiter.promise, owner.pid, owner.key);
@@ -151,7 +151,7 @@ it('real PG: ordinary same-memory content update completes while a signal update
     const [{ key: otherKey }] = await db.$queryRaw<Array<{ key: number }>>`SELECT hashtext(${'channel-host:' + other.id}) AS key`;
     expect(otherKey).not.toBe(owner.key); // the different-memory control requires distinct physical keys
     await writeNodeCore({ memoryId: other.id, loc: 'other', isRunnable: false, content: 'independent' }, ctx(), 'update',
-      { authoring: { kind: 'carry' }, targetNodeId: otherNode.id });
+      { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: { kind: 'carry' }, targetNodeId: otherNode.id });
     expect((await db.node.findUniqueOrThrow({ where: { id: otherNode.id } })).content).toBe('independent');
   } finally {
     release.resolve();
@@ -191,14 +191,14 @@ function heldTransactionDb(ready: ReturnType<typeof latch<number>>, release: Ret
 async function extract(database: typeof db, move = false) {
   const { extractParentNodeGraph } = await import('../../../controller/operations/extractParentNode.js');
   const source = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
-  return extractParentNodeGraph(database, { sourceMemoryId: memoryId, parentLoc: 'ordinary',
+  return extractParentNodeGraph(database, { ownerLimitCaller: null, sourceMemoryId: memoryId, parentLoc: 'ordinary',
     name: 'extracted', rootLoc: 'extracted', newUrn: 'test-org:extracted', targetOrganizationId: source.organizationId!,
     newClass: 'knowledge', visibility: null, ownerUserId: null, groupOwnerUserId: null,
     vectorIndexEnabled: false, move, actorId: userId, copierReadableMemoryIds: null, principal: ctx() });
 }
 async function mergeInto(database: typeof db, targetMemoryId: string) {
   const { mergeMemoryGraph } = await import('../../../controller/operations/mergeMemories.js');
-  return mergeMemoryGraph(database, { sourceMemoryId: memoryId, targetMemoryId, fields: new Set(), deleteSourceMem: false,
+  return mergeMemoryGraph(database, { ownerLimitCaller: null, sourceMemoryId: memoryId, targetMemoryId, fields: new Set(), deleteSourceMem: false,
     editor: { userId }, principal: ctx() });
 }
 async function destination() {
@@ -207,6 +207,7 @@ async function destination() {
 }
 function signalWrite(context: Context, role: string | null = 'review') {
   return writeNodeCore({ memoryId, loc: 'ordinary', role }, context, 'update', {
+    ownerLimit: 'refuse', sizeCeiling: 'check',
     targetNodeId: nodeId, ownsKind: 'review', authoring: { kind: 'trustedHuman', authenticatedUserId: userId },
   });
 }
@@ -336,7 +337,7 @@ it.each(['role promotion', 'runnable promotion', 'role clear', 'runnable false',
       : name === 'runnable null' ? { isRunnable: null } : {};
     const kind = name === 'role promotion' || name === 'kind content' ? 'review' : name === 'runnable promotion' ? 'task' : undefined;
     const writer = writeNodeCore({ memoryId, loc: name === 'create' ? 'new' : 'ordinary', name: 'ordinary', ...patch }, contextWithPid(waiter), mode,
-      { authoring: { kind: 'trustedHuman', authenticatedUserId: userId }, ownsKind: kind,
+      { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: { kind: 'trustedHuman', authenticatedUserId: userId }, ownsKind: kind,
         ...(mode === 'update' ? { targetNodeId: nodeId } : {}) });
     void writer.catch(waiter.reject); writerDone = Promise.allSettled([writer]);
     await waitForMemoryKey(await waiter.promise, owner.pid, owner.key);
@@ -360,7 +361,7 @@ it('authority prefix completes before the memory handshake, which precedes loc l
     vi.spyOn(subtree, 'lockLocForWrite').mockImplementation(async (...args) => { order.push('loc'); return loc(...args); }),
   ];
   try {
-    await writeNodeCore({ memoryId, loc: 'ordinary', isRunnable: false }, ctx(), 'update', { targetNodeId: nodeId, authoring: { kind: 'carry' } });
+    await writeNodeCore({ memoryId, loc: 'ordinary', isRunnable: false }, ctx(), 'update', { ownerLimit: 'refuse', sizeCeiling: 'check', targetNodeId: nodeId, authoring: { kind: 'carry' } });
     expect(order.indexOf('authority complete')).toBeGreaterThanOrEqual(0);
     expect(order.indexOf('memory')).toBeGreaterThan(order.indexOf('authority complete'));
     expect(order.indexOf('loc')).toBeGreaterThan(order.indexOf('memory'));
@@ -393,7 +394,7 @@ async function assertOperationJoins(operation: (context: Context) => Promise<unk
 it('real PG: caller-owned task-export merge joins before its node lock', async () => {
   const { resolvers } = await import('./resolvers.js');
   await assertOperationJoins(context => (resolvers.Mutation as unknown as Record<string, (...args: any[]) => Promise<unknown>>).updateTaskNode({},
-    { input: { id: nodeId, properties: { keep: 'present' } }, mergeExports: true }, context), async pid => {
+    { input: { ref: nodeId, properties: { keep: 'present' } }, mergeExports: true }, context), async pid => {
       const [{ locked }] = await db.$queryRaw<Array<{ locked: boolean }>>`
         SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND granted AND pid = ${pid}
           AND objid = (hashtext(${nodeId})::bigint & 4294967295)::oid AND objsubid = 1) AS locked`;
@@ -404,7 +405,7 @@ it('real PG: caller-owned task-export merge joins before its node lock', async (
 
 it('real PG: revision restore joins even for an ordinary snapshot', async () => {
   const { resolvers } = await import('./resolvers.js');
-  await writeNodeCore({ memoryId, loc: 'ordinary', content: 'second' }, ctx(), 'update', { authoring: { kind: 'carry' }, targetNodeId: nodeId });
+  await writeNodeCore({ memoryId, loc: 'ordinary', content: 'second' }, ctx(), 'update', { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: { kind: 'carry' }, targetNodeId: nodeId });
   const revision = await db.nodeRevision.findFirstOrThrow({ where: { nodeId }, orderBy: { createdAt: 'asc' } });
   await assertOperationJoins(context => resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: revision.id }, context));
   expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).content).toBe('before');
@@ -413,7 +414,7 @@ it('real PG: revision restore joins even for an ordinary snapshot', async () => 
 it('real PG: standalone memory clone takes the source key before copying stored signals', async () => {
   const { cloneMemoryGraph } = await import('../../../controller/operations/cloneMemory.js');
   const source = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
-  await assertOperationJoins(context => cloneMemoryGraph(context.db, { sourceMemoryId: memoryId,
+  await assertOperationJoins(context => cloneMemoryGraph(context.db, { ownerLimitCaller: null, sourceMemoryId: memoryId,
     name: 'copy', newUrn: 'test-org:copy', targetOrganizationId: source.organizationId!,
     ownerUserId: null, groupOwnerUserId: null, actorId: userId, copierReadableMemoryIds: null }));
   const copy = await db.memory.findFirstOrThrow({ where: { urn: 'test-org:copy' } });
@@ -455,7 +456,7 @@ it('signal and inline-edge reasons acquire their complete union before any loc l
   ];
   try {
     await writeNodeCore({ memoryId, loc: 'ordinary', isRunnable: false, edges: [{ targetId: target.id, name: 'rel' }] }, ctx(), 'update',
-      { targetNodeId: nodeId, authoring: { kind: 'carry' } });
+      { ownerLimit: 'refuse', sizeCeiling: 'check', targetNodeId: nodeId, authoring: { kind: 'carry' } });
     expect(new Set(events[0])).toEqual(new Set([memoryId, targetMemory.id]));
     expect(events.findIndex(event => event === 'loc')).toBeGreaterThan(0);
     expect(await db.edge.count({ where: { sourceId: nodeId, targetId: target.id } })).toBe(1);
@@ -466,7 +467,7 @@ it('a caller-owned transaction refuses an endpoint outside its predeclared set i
   const targetMemory = await destination();
   const target = await db.node.create({ data: { memoryId: targetMemory.id, loc: 'endpoint', name: 'endpoint' } });
   await expect(db.$transaction(tx => writeNodeCore({ memoryId, loc: 'ordinary', content: 'must roll back',
-    edges: [{ targetId: target.id, name: 'rel' }] }, ctx(), 'update', { targetNodeId: nodeId, authoring: { kind: 'carry' },
+    edges: [{ targetId: target.id, name: 'rel' }] }, ctx(), 'update', { ownerLimit: 'refuse', sizeCeiling: 'check', targetNodeId: nodeId, authoring: { kind: 'carry' },
       transaction: { tx, pooledDb: db, coordinationMemories: [memoryId], afterCommit: () => {} },
     }))).rejects.toMatchObject({ extensions: { code: 'NODE_WRITE_CONFLICT' } });
   expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).content).toBe('before');
@@ -574,10 +575,10 @@ it.each([false, true])('task export missing edge keeps the shared refusal shape 
   const { resolvers } = await import('./resolvers.js');
   const before = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
   await expect(resolvers.Mutation.updateTaskNode({}, {
-    input: { id: nodeId, properties: { exports: {} }, edges: [{ targetId: 'tasks:nope' }] }, mergeExports,
+    input: { ref: nodeId, properties: { exports: {} }, edges: [{ targetRef: 'tasks:nope' }] }, mergeExports,
   }, ctx())).rejects.toMatchObject({
-    message: 'Edge target not found: "tasks:nope"',
-    extensions: { code: 'NodeNotFoundError', ref: 'tasks:nope' },
+    message: 'Edge target not found',
+    extensions: { code: 'NodeNotFoundError' },
   });
   expect(await db.node.findUniqueOrThrow({ where: { id: nodeId } })).toEqual(before);
 });

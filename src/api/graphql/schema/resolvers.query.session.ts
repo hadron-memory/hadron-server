@@ -107,11 +107,12 @@ const usageWindowInstant = z.string().datetime({ offset: true });
  * who may filter usage by App key K. K itself (`self`), and whoever manages K's App (cor:dmo:050:12) through the
  * one person-only manager predicate the key inventory uses. Anyone else, including a non-owner App member, another
  * key of the same App, a bound worker session and another tenant, gets EXACTLY the answer a nonexistent key gets:
- * APP_KEY_NOT_FOUND naming the caller's own reference (the resolvers.appKeyScope.ts shape). A revoked key is still
+ * APP_KEY_NOT_FOUND with the code only (#5225: the caller's reference is not relayed). A revoked key is still
  * a key: its history stays filterable.
  */
 async function admitUsageKeyFilter(ctx: Context, ref: string): Promise<{ id: string; self: boolean }> {
-  const unknownKey = () => new GraphQLError('App key not found.', { extensions: { code: 'APP_KEY_NOT_FOUND', id: ref } });
+  // #5225: the code only; the caller's reference is not relayed (cor:api:140:01).
+  const unknownKey = () => new GraphQLError('App key not found.', { extensions: { code: 'APP_KEY_NOT_FOUND' } });
   const key = await ctx.db.appKey.findUnique({
     where: { id: ref },
     select: { id: true, app: { select: { id: true, organizationId: true, ownerUserId: true } } },
@@ -427,19 +428,19 @@ export const sessionQueries = {
       return { status: 'PENDING', connectionId: null, failureCode: null };
     },
 
-    exchangeConnections: async (_: unknown, { orgId }: { orgId: string }, ctx: Context) => {
-      // 007-entity-id-or-urn: orgId may be ID, bare URN, or prefixed URN.
-      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId);
+    exchangeConnections: async (_: unknown, { orgRef }: { orgRef: string }, ctx: Context) => {
+      // 007-entity-id-or-urn: orgRef may be ID, bare URN, or prefixed URN.
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgRef);
       return listOrgExchangeConnections(ctx, resolvedOrgId);
     },
 
     /** #2213 — `exchangeConnections` as a page: the same admission, rows and order (one shared scope), counted and read in one snapshot. */
     exchangeConnectionsPage: async (
       _: unknown,
-      args: { orgId: string; limit?: number | null; offset?: number | null },
+      args: { orgRef: string; limit?: number | null; offset?: number | null },
       ctx: Context,
     ) => {
-      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, args.orgId);
+      const { id: resolvedOrgId } = await resolveOrgRef(ctx.db, args.orgRef);
       const { where, orderBy } = await orgExchangeConnectionScope(ctx, resolvedOrgId);
       const { take, skip } = pageArgs(args);
       const [total, items] = await ctx.db.$transaction([

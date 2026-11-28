@@ -14,6 +14,7 @@
  * {@link runHoldsReadGrant} is the ONE read arm. It is consulted only by the run `hadron_read_node` read, after the
  * shared gate has refused, and only ever adds: every check below can only refuse.
  */
+import { isUserHolding } from './auth/userHolding.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { canReadMemory } from '../mcp/access-control.js';
@@ -74,6 +75,7 @@ export const READ_GRANT_MEMORY_SELECT = {
   isEncrypted: true,
   isInstallMemory: true,
   deletedAt: true,
+  createdBy: true,
   workerOf: { select: { id: true } },
 } as const;
 
@@ -82,12 +84,13 @@ export type ReadGrantMemory = LinkCapMemory & {
   isEncrypted: boolean;
   isInstallMemory: boolean;
   deletedAt: Date | null;
+  createdBy: string | null;
   workerOf: Array<{ id: string }>;
 };
 
 export type ReadGrantTargetRefusal =
   | 'deleted' | 'encrypted' | 'install-memory' | 'strict-owner' | 'system-not-installed'
-  | 'worker-memory' | 'session-memory' | 'other-app-team-space' | 'cap';
+  | 'worker-memory' | 'session-memory' | 'user-holding' | 'other-app-team-space' | 'cap';
 
 /**
  * May this App's automation hold a read grant on this memory at all, whoever gives it? Returns the refusal, or null.
@@ -129,6 +132,10 @@ export async function readGrantTargetRefusal(
     if (memory.userMemoryOfAgentId !== null) return 'session-memory';
     return memory.appId === app.id ? null : 'other-app-team-space';
   }
+  // hadron-internal#88 (cor:cht:010:02): a per-user chat holding is its creator's alone. A grant is held by an AUTOMATION, never
+  // by the creator reading as themselves, so no grant serves it: refused at give time and again, live, at every read (a grant
+  // given before this rule reads nothing). Judged for any giver, org admin and platform role included.
+  if (isUserHolding(memory)) return 'user-holding';
   const reach = independentReach({ organizationId: app.organizationId, ownerUserId: app.ownerUserId, appId: app.id }, memory);
   return reach === null ? 'cap' : null;
 }

@@ -38,7 +38,7 @@ async function run(writeTo: string, mode: 'replace' | 'append' = 'replace') {
     where: { loc_memoryId: { loc: 'flow:report', memoryId: flowId } },
     data: { data: { output: { writeTo, mode } } as never },
   });
-  const minted = await mintAppRun(db, { organizationId: orgId, appId, agentId, triggerKind: 'MANUAL', entryNodeUrn: ENTRY, eventData: {}, consentPrincipal: await createDbRunConsentPrincipal(db, orgId, appId) });
+  const minted = await mintAppRun(db, { owner: { organizationId: orgId }, appId, agentId, triggerKind: 'MANUAL', entryNodeUrn: ENTRY, eventData: {}, consentPrincipal: await createDbRunConsentPrincipal(db, orgId, appId) });
   const deps: RunExecutionDeps = {
     ...makeProdRunDeps(db),
     resolveConfig: vi.fn(async () => ({ config: { provider: 'anthropic', model: 'test' } }) as never),
@@ -104,6 +104,13 @@ describe('#2716 N2: the run-upsert door and a write grant on a class=system memo
       expect(await footprint(systemId)).toEqual(before);
     }
     expect((await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: LOC, memoryId: systemId } } })).content).toBe('ORIGINAL BOOT SOURCE');
+  });
+
+  it('#5019: a run output node is not judged by NODE_CONTENT_MAX_BYTES', async () => {
+    vi.stubEnv('NODE_CONTENT_MAX_BYTES', '5');
+    try {
+      expect((await run(`hrn:node:${SHARED_URN}:${LOC}`)).outcome).toBe('completed');
+    } finally { vi.unstubAllEnvs(); }
   });
 
   it('CONTROL: an identical live grant on a shared knowledge memory of the same org lets the same run write', async () => {

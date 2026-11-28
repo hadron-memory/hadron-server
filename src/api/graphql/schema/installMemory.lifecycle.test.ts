@@ -97,7 +97,7 @@ describe('#2044 install memory — lazy creation', () => {
     const f = await fixture();
     await expect(M.createNode({}, { input: { loc: 'x', name: 'x' } }, ctxOf(f.admin.id))).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     const mem = await db.memory.create({ data: { id: generateId(), class: 'knowledge', name: 'k', urn: `${orgId}:k`, organizationId: orgId } });
-    await expect(M.createNode({}, { input: { memoryId: mem.id, install: f.install, loc: 'x', name: 'x' } }, ctxOf(f.admin.id)))
+    await expect(M.createNode({}, { input: { memoryRef: mem.id, install: f.install, loc: 'x', name: 'x' } }, ctxOf(f.admin.id)))
       .rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   });
 
@@ -156,11 +156,15 @@ describe('#2044 install memory — URN reclaim (R29) and account erasure', () =>
     await f.create(f.admin);
     const [row] = await f.installRows();
     await M.deleteApp({}, { ref: f.app.id }, ctxOf(f.admin.id));
-    const reclaim = () => M.createApp({}, { orgRef: orgId, agentRef: f.agent.id, name: 'Reclaim Me' }, ctxOf(f.admin.id));
+    // #5203 S3: only a SUPPLIED urn reclaims a deleted App; a derived one iterates past it (pinned below).
+    const reclaim = () => M.createApp({}, { orgRef: orgId, agentRef: f.agent.id, name: 'Reclaim Me', urn: 'reclaim-me' }, ctxOf(f.admin.id));
     await expect(reclaim()).rejects.toMatchObject({ extensions: { code: 'INSTALL_MEMORIES_REMAIN' } });
     // Nothing was destroyed by the refused attempt.
     expect(await db.app.count({ where: { id: f.app.id } })).toBe(1);
     expect((await db.memory.findUniqueOrThrow({ where: { id: row!.id } })).deletedAt).toBeNull();
+    const derived = await M.createApp({}, { orgRef: orgId, agentRef: f.agent.id, name: 'Reclaim Me' }, ctxOf(f.admin.id));
+    expect(derived.urn).toBe('il-org:reclaim-me-2');
+    expect(await db.app.count({ where: { id: f.app.id } })).toBe(1);
     await expect(M.deleteMemory({}, { ref: row!.id }, ctxOf(f.admin.id))).resolves.toBe(true);
     await expect(reclaim()).resolves.toBeTruthy();
     expect(await db.app.count({ where: { id: f.app.id } })).toBe(0);
@@ -188,7 +192,7 @@ describe('#2044 install memory — URN reclaim (R29) and account erasure', () =>
     expect((await Q.memory({}, { ref: install.id }, ctxOf(f.admin.id)))?.id).toBe(install.id);
     // A stranger finds nothing, and a detached install takes no further write.
     expect(await Q.memory({}, { ref: install.id }, ctxOf(f.stranger.id))).toBeNull();
-    await expect(M.updateNode({}, { input: { memoryId: install.id, loc: 'prompts:lane', name: 'x' } }, ctxOf(f.admin.id))).rejects.toThrow();
+    await expect(M.updateNode({}, { input: { memoryRef: install.id, loc: 'prompts:lane', name: 'x' } }, ctxOf(f.admin.id))).rejects.toThrow();
     await expect(M.deleteMemory({}, { ref: install.id }, ctxOf(f.stranger.id))).rejects.toThrow();
     // Once its App is deleted the manager still finds the detached record but reads no content (R45).
     await M.deleteApp({}, { ref: app.id }, ctxOf(f.admin.id));
@@ -235,9 +239,9 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
     await server.start();
     try {
       for (const input of [
-        { memoryId: node.memoryId, loc: 'prompts:lane', name: 'by-memory-loc' },
-        { id: node.id, name: 'by-id' },
-        { id: nodeUrn, name: 'by-urn' },
+        { memoryRef: node.memoryId, loc: 'prompts:lane', name: 'by-memory-loc' },
+        { ref: node.id, name: 'by-id' },
+        { ref: nodeUrn, name: 'by-urn' },
       ]) {
         const result = await server.executeOperation(
           { query: 'mutation($i:UpdateNodeInput!){updateNode(input:$i){id name content description}}', variables: { i: input } },
@@ -254,11 +258,11 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
       }
     } finally { await server.stop(); }
     // The same addresses return the content to a participant manager.
-    const viaMemory = await M.updateNode({}, { input: { memoryId: node.memoryId, loc: 'prompts:lane', name: 'p1' } }, ctxOf(f.admin.id));
+    const viaMemory = await M.updateNode({}, { input: { memoryRef: node.memoryId, loc: 'prompts:lane', name: 'p1' } }, ctxOf(f.admin.id));
     expect(viaMemory.content).toBe('replacement');
-    const viaId = await M.updateNode({}, { input: { id: node.id, name: 'p2' } }, ctxOf(f.admin.id));
+    const viaId = await M.updateNode({}, { input: { ref: node.id, name: 'p2' } }, ctxOf(f.admin.id));
     expect(viaId.content).toBe('replacement');
-    const viaUrn = await M.updateNode({}, { input: { id: nodeUrn, name: 'p3' } }, ctxOf(f.admin.id));
+    const viaUrn = await M.updateNode({}, { input: { ref: nodeUrn, name: 'p3' } }, ctxOf(f.admin.id));
     expect(viaUrn.content).toBe('replacement');
   });
 
@@ -277,7 +281,7 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
     try {
       const result = await server.executeOperation(
         { query: `mutation($i:UpdateNodeInput!){updateNode(input:$i){id memoryId loc name revision description abstract tags content data
-          memory{id} outgoingEdges{id} incomingEdges{id} asset{id} signingRequests{id} signingRequestsPage{items{id} total hasMore nextCursor} commentSummary{comments openThreads oldestOpenThreadAt}
+          storedBytes revisionBytes memory{id} outgoingEdges{id} incomingEdges{id} asset{id} signingRequests{id} signingRequestsPage{items{id} total hasMore nextCursor} commentSummary{comments openThreads oldestOpenThreadAt}
           approvalStatus{state approval{revision}} mintStatus{minted mintedByInfo} authorship{__typename} createdByWorker{id} updatedByAgent{id} updatedByUser{handle}
           contentValidation{state} signatureStatus{state signatures{id}}}}`, variables: { i: { install: f.install, loc: 'prompts:lane', description: 'only-this' } } },
         { contextValue: ctx },
@@ -291,6 +295,8 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
       expect(out.name).toBe('prompts:lane');
       // Selecting `revision` on a concealed write must not error (Node.revision reads revSeq): Andi, Charles, Bindi.
       expect(out.revision).toBe((await db.node.findUniqueOrThrow({ where: { id: node.id } })).revSeq);
+      expect(out.storedBytes).toBeNull(); // #5018 §10: the size of content the reader cannot read
+      expect(out.revisionBytes).toBeNull();
       expect(out).toMatchObject({ description: null, abstract: null, tags: [], content: null, data: null, memory: null,
         outgoingEdges: [], incomingEdges: [], asset: null, signingRequests: [], signingRequestsPage: { items: [], total: 0, hasMore: false, nextCursor: null }, authorship: null, createdByWorker: null, updatedByAgent: null,
         // Ruth's #2064 merge condition: #2189's updatedByUser re-reads the last editor by node id, so it is concealed too.
@@ -313,6 +319,17 @@ describe('#2064 full-scope §10 (Riana) — response and discovery boundaries', 
     expect(await N.updatedByUser({ id: node.id, memoryId: node.memoryId }, {}, ctxOf(f.admin.id))).toMatchObject({ handle: 'concealed-editor' });
     // A concealed parent carries id and memoryId but must not let the resolver re-read the live row.
     expect(await N.updatedByUser({ [INSTALL_CONCEALED]: true, id: node.id, memoryId: node.memoryId }, {}, ctxOf(f.admin.id))).toBeNull();
+  });
+
+  it('#5018 (§10): Node.storedBytes and Node.revisionBytes read nothing on a concealed install-write parent (they would re-read the live row by node id)', async () => {
+    const f = await fixture();
+    const node = await f.create(f.admin);
+    const { INSTALL_CONCEALED } = await import('./installMemory.js');
+    const N = resolvers.Node as any;
+    // Control: an ordinary parent of the same node reports its size.
+    expect(typeof (await N.storedBytes({ id: node.id, memoryId: node.memoryId }, {}, ctxOf(f.admin.id)))).toBe('number');
+    expect(await N.storedBytes({ [INSTALL_CONCEALED]: true, id: node.id, memoryId: node.memoryId }, {}, ctxOf(f.admin.id))).toBeNull();
+    expect(await N.revisionBytes({ [INSTALL_CONCEALED]: true, id: node.id, memoryId: node.memoryId }, {}, ctxOf(f.admin.id))).toBeNull();
   });
 
   it('#1151 (Rico §10): Node.createdByUser reads nothing on a concealed install-write parent (it would re-read createdBy by node id)', async () => {
@@ -510,7 +527,7 @@ describe('#2044 install memory — list surfaces', () => {
       expect((await Q.memory({}, { ref }, ctxOf(f.contributor.id)))?.id).toBe(row!.id);
     }
     // And a node read through the enumeration gate finds nothing for the reader.
-    const found = await Q.findNodes({}, { filter: { memoryIds: [row!.id] }, limit: 10 }, ctxOf(reader.id)).catch(() => ({ items: [] }));
+    const found = await Q.findNodes({}, { filter: { memoryRefs: [row!.id] }, limit: 10 }, ctxOf(reader.id)).catch(() => ({ items: [] }));
     expect(found.items ?? found.nodes ?? []).toHaveLength(0);
   });
 
@@ -627,7 +644,7 @@ describe('#2044 install memory — existing-node writes versus revocation', () =
   const update = (f: Awaited<ReturnType<typeof fixture>>) =>
     M.updateNode({}, { input: { install: f.install, loc: 'prompts:lane', content: 'late' } }, ctxOf(f.admin.id));
   const createByMemoryId = (f: Awaited<ReturnType<typeof fixture>>, memoryId: string) =>
-    M.createNode({}, { input: { memoryId, loc: 'prompts:other', name: 'o', content: 'late' } }, ctxOf(f.admin.id));
+    M.createNode({}, { input: { memoryRef: memoryId, loc: 'prompts:other', name: 'o', content: 'late' } }, ctxOf(f.admin.id));
 
   for (const [label, write] of [['updateNode(install)', (f: any) => update(f)], ['createNode(memoryId)', (f: any, id: string) => createByMemoryId(f, id)]] as const) {
     it(`${label} vs deleteApp: refused, nothing committed`, async () => {

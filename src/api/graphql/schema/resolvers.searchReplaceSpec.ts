@@ -27,6 +27,7 @@ import {
 } from '../../../lib/nodeRevisionSnapshot.js';
 import { decryptNodeFields, encryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
+import { assertNodeContentSize, resultingNodeContent, type NodeContentFields } from '../../../lib/nodeContentLimit.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import { assertAuthoring, authoringFromRequest, type AuthoredWith } from '../../../lib/authoringAttestation.js';
 import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
@@ -35,6 +36,7 @@ import { enqueueNodeEmbedding } from '../../../services/embedding/enqueue.js';
 import { publishNodeWritten } from '../../../lib/events/nodeWritten.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import {
+  requireCallerIdentity,
   type Context,
   requireMemoryWriteAccess,
   concealUnreadableDenial,
@@ -47,7 +49,7 @@ export interface SpecSearchReplaceInput {
   /** #1328 — one claim for every changed spec. */
   authoredWith?: AuthoredWith | null;
   memoryRef: string;
-  nodeIds: string[];
+  nodeRefs: string[];
   oldText: string;
   newText: string;
   fields: Array<'content' | 'abstract'>;
@@ -69,6 +71,14 @@ interface ChangedNode {
   plaintext: { content: string | null; abstract: string | null };
   /** #2041 S2b — the content before replacement, read under the apply transaction's row locks. */
   storedContent: string | null;
+  /**
+   * #5223 — the decrypted row the ceiling is measured against (the snapshot's `pt`). The size check no longer runs in
+   * the snapshot (a dry run cannot run the authoring gate, so it must not answer the size bit at all). On the apply
+   * this is fresh by construction: the rows are locked FOR UPDATE before `snapshot(tx, true)` re-runs, so the pass
+   * measures the very rows it writes. (The bulk `searchReplaceInNodes` door instead measures a pre-transaction basis
+   * its `revisionStateMatches` check proves current — see there.)
+   */
+  sizeBasis: NodeContentFields;
   isEncrypted: boolean;
   contentChanged: boolean;
   abstractChanged: boolean;
@@ -117,7 +127,8 @@ export async function searchReplaceInSpecNodes(
   { input }: { input: SpecSearchReplaceInput },
   ctx: Context,
 ) {
-  if (!Array.isArray(input.nodeIds) || input.nodeIds.length === 0) {
+  requireCallerIdentity(ctx);
+  if (!Array.isArray(input.nodeRefs) || input.nodeRefs.length === 0) {
     throw error('Select at least one spec node.', 'SEARCH_REPLACE_NO_SELECTION');
   }
   if (!Array.isArray(input.fields) || input.fields.length === 0 ||
@@ -163,7 +174,7 @@ export async function searchReplaceInSpecNodes(
   // Resolve the exact selection before the transaction, reading only metadata.
   // The apply transaction rechecks the current memory before loading plaintext.
   const ids = new Set<string>();
-  for (const ref of input.nodeIds) {
+  for (const ref of input.nodeRefs) {
     let id: string;
     try {
       ({ id } = await resolveNodeRefForCaller(ctx, ref));
@@ -283,6 +294,7 @@ export async function searchReplaceInSpecNodes(
         changed: {},
         plaintext: { content: pt.content, abstract: pt.abstract },
         storedContent: pt.content,
+        sizeBasis: pt,
         isEncrypted: encryption.isEncrypted,
         contentChanged: false,
         abstractChanged: false,
@@ -317,11 +329,17 @@ export async function searchReplaceInSpecNodes(
         }
       }
       replacement.authoredChange = authoredContentChanged(diffNodeChanges(pt, replacement.changed));
-      if (replacement.total > 0) changed.push(replacement);
+      if (replacement.total > 0) {
+        changed.push(replacement);
+      }
     }
 
     const plan = createHash('sha256').update(JSON.stringify({
       memoryId,
+      // Deliberate literal, not read from the memory (#5063 R3, pinned by corpusColumns1613.test.ts C5, which holds a
+      // golden hash of this input): the legacy `Memory.corpusDraft` column is gone from the inputs, but the key stays in
+      // the hashed JSON so a plan previewed before the re-key still applies after it. Changing or dropping it changes
+      // every plan hash and stales all in-flight previews.
       corpusDraft: true,
       selectedIds,
       oldText: input.oldText,
@@ -385,12 +403,26 @@ export async function searchReplaceInSpecNodes(
     if (input.maxNodesChanged != null && current.changed.length > input.maxNodesChanged) {
       throw error('The replacement exceeds maxNodesChanged.', 'SEARCH_REPLACE_MAX_NODES_CHANGED');
     }
+    // #5223 — passes, not one interleaved loop: every authoring gate runs for the WHOLE batch, then every size check,
+    // then the writes. A size refusal counts stored fields, so a writer the authoring gate refuses (on this row or any
+    // other) must not learn the over/under bit — a batch whose row 1 is over-size and whose row 2 the gate refuses
+    // answers authoring, never the size bit. All three passes share one transaction: a later refusal still rolls
+    // back an earlier write, exactly as the interleaved loop did.
+    const authored: Array<{ node: ChangedNode; stamp: Awaited<ReturnType<typeof assertAuthoring>> }> = [];
     for (const node of current.changed) {
       // #1328 — a spec's role rule answers to the same claim as any other writer.
-      const authoredStamp = await assertAuthoring(tx, memoryId, {
+      const stamp = await assertAuthoring(tx, memoryId, {
         priorRole: node.raw.role, priorRunnable: node.raw.isRunnable,
         role: node.raw.role, runnable: node.raw.isRunnable, mintHuman: true, authoredChange: node.authoredChange,
       }, authoringFromRequest(ctx, input.authoredWith));
+      authored.push({ node, stamp });
+    }
+    for (const { node } of authored) {
+      // #5019 — the resulting node, before any write (moved out of the snapshot by #5223). A thunk, like every
+      // #5223 door: the ceiling costs nothing when none is set.
+      assertNodeContentSize(() => resultingNodeContent(node.changed, node.sizeBasis));
+    }
+    for (const { node, stamp: authoredStamp } of authored) {
       await createNodeRevision(tx, buildNodeRevisionSnapshot(node.raw, editorFromAuth(ctx), {
         revLabel: input.reason,
         changes: Object.keys(node.changed),

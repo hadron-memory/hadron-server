@@ -134,7 +134,7 @@ describe('#1037 — startSession resolver, explicit App reference', () => {
       expect.fail('expected a refusal');
     } catch (e) {
       const err = e as GraphQLError;
-      expect(err.message).toBe(`Worker not found: ${DARA_URN()}`);
+      expect(err.message).toBe('Worker not found'); // #5168: the ref is not quoted back
       expect(err.extensions).toEqual({ code: 'WORKER_NOT_FOUND' });
     }
 

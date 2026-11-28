@@ -2,7 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb, createDbWorkerAttribution } from '../../../test/helpers.js';
+import { seedRootNode, cleanDb, createDbWorkerAttribution } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { runAsActor } from '../../../lib/requestActor.js';
@@ -56,6 +56,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: reader.id, role: 'READER' },
   ] });
   memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'discussion' }, as());
+  await seedRootNode(db, memory.id, 'discussion');
 });
 
 describe('createComment (cor:dmo:110:01–05)', () => {
@@ -82,7 +83,7 @@ describe('createComment (cor:dmo:110:01–05)', () => {
 
   it('anchors an older revision from its retained snapshot, and refuses impossible or pruned ones', async () => {
     const target = await node('spec:2');
-    await resolvers.Mutation.updateNode(null, { input: { id: target.id, content: 'Edited body' } }, as());
+    await resolvers.Mutation.updateNode(null, { input: { ref: target.id, content: 'Edited body' } }, as());
     const live = await db.node.findUniqueOrThrow({ where: { id: target.id } });
     expect(live.revSeq).toBe(2);
     const old = await comment(target.id, 'about v1', writer.id, { anchorRevision: 1 });

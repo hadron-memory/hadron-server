@@ -37,6 +37,7 @@ import { runAsActor } from '../lib/requestActor.js';
 import { UrnNotQualifiedError } from '../lib/urn.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { isTrustedRefusal } from '../api/graphql/formatError.js';
+import { refusalText } from '../lib/refEcho.js';
 
 type TaskRow = Record<string, any> & { id: string; status: string };
 type EventRow = Record<string, any> & { id: string; type: string; createdAt: Date };
@@ -50,6 +51,11 @@ type Resolver<A, R> = (parent: unknown, args: A, ctx: Context) => Promise<R>;
  * the tools themselves are switched off (#3082 R4, no test path back), and would rely on this mapping when switched on.
  */
 export function mcpTaskListArgs<T extends Record<string, unknown> & { parentTaskId?: unknown }>(args: T): Omit<T, 'parentTaskId'> & { parentTaskRef?: unknown } {
+  const { parentTaskId, ...rest } = args;
+  return parentTaskId === undefined ? rest : { ...rest, parentTaskRef: parentTaskId };
+}
+/** #5080: `hadron_task_create` keeps `parentTaskId`; the GraphQL input names it `parentTaskRef`. */
+export function mcpTaskCreateInput<T extends Record<string, unknown> & { parentTaskId?: unknown }>(args: T): Omit<T, 'parentTaskId'> & { parentTaskRef?: unknown } {
   const { parentTaskId, ...rest } = args;
   return parentTaskId === undefined ? rest : { ...rest, parentTaskRef: parentTaskId };
 }
@@ -177,7 +183,7 @@ function refusal(e: unknown) {
     const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
     return textResult([`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n'), true);
   }
-  if (e instanceof UrnNotQualifiedError) return textResult(`[bad_user_input] ${e.message}`, true);
+  if (e instanceof UrnNotQualifiedError) return textResult(`[bad_user_input] ${refusalText(e)}`, true);
   throw e;
 }
 
@@ -446,8 +452,9 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       'A CHILD task names parentTaskId; only the parent\'s assignee may create one, and owns it. Omit assignee to leave ' +
       'it queued; pass status BACKLOG to park it instead.',
     SHAPE_HADRON_TASK_CREATE,
-    async ({ session, ...input }) =>
-      write('hadron_task_create', session, 'Created', (ctx) => M.createAgentTask({}, { input }, ctx)),
+    async ({ session, parentTaskId, ...rest }) =>
+      write('hadron_task_create', session, 'Created', (ctx) =>
+        M.createAgentTask({}, { input: mcpTaskCreateInput({ ...rest, parentTaskId }) }, ctx)),
   );
 
   off('hadron_task_blocker_add',
@@ -553,11 +560,11 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       read(session, async (ctx) => {
         if (tree) {
           const rows = await Q.agentTaskTree({}, { root: id }, ctx);
-          if (!rows) return textResult(`[task_not_found] Task not found.\ntaskId: ${id}`, true);
+          if (!rows) return textResult('[task_not_found] Task not found.', true); // #5168: the caller's id is not echoed
           return textResult((await Promise.all(rows.map((t) => renderTask(t, ctx, { limit: dependencyLimit, offset: dependencyOffset })))).join('\n'));
         }
         const t = await Q.agentTask({}, { ref: id }, ctx);
-        if (!t) return textResult(`[task_not_found] Task not found.\ntaskId: ${id}`, true);
+        if (!t) return textResult('[task_not_found] Task not found.', true); // #5168: the caller's id is not echoed
         return textResult(await renderTask(t, ctx, { limit: dependencyLimit, offset: dependencyOffset }));
       }),
   );

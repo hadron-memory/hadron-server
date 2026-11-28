@@ -76,7 +76,7 @@ const post = async (token: string, query: string, variables: unknown, headers: R
   return await res.json() as Wire;
 };
 const input = (authoredWith?: { task: string; revision: number }) => ({
-  memoryId, loc: 'a', name: 'a', content: 'x', role: 'guide', ...(authoredWith ? { authoredWith } : {}),
+  memoryRef: memoryId, loc: 'a', name: 'a', content: 'x', role: 'guide', ...(authoredWith ? { authoredWith } : {}),
 });
 /** The GraphQL surface: a sign-in JWT with a session is not the portal path, so it attests. */
 const viaGraphql = (authoredWith?: { task: string; revision: number }) =>

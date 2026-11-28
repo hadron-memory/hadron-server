@@ -60,7 +60,7 @@ const verdictEvent = (appId: string, taskId: string, slot: string, v: Verdict) =
 async function review(r: Review = {}) {
   const parent = r.inBuild ?? build;
   const slot = SLOTS[nextSlot++]!;
-  const t = await M.createAgentTask!({}, { input: { parentTaskId: parent.id, title: slot, assignee: { user: holder.id }, source: 'synthetic' } }, ctx(author.id));
+  const t = await M.createAgentTask!({}, { input: { parentTaskRef: parent.id, title: slot, assignee: { user: holder.id }, source: 'synthetic' } }, ctx(author.id));
   // A seat binds the build's CURRENT frozen head; re-freezing an earlier head keeps its first-freeze position (#4280).
   if (r.head) await M.freezePullRequestHead!({}, { taskRef: parent.id, head: r.head }, ctx(author.id));
   await M.assignReviewSeat!({}, { taskRef: t.id, slot, head: r.head ?? H }, ctx(author.id));
@@ -68,7 +68,7 @@ async function review(r: Review = {}) {
   for (const v of r.verdicts ?? [r]) await verdictEvent((r.inApp ?? app).id, t.id, slot, v);
   if ((r.end ?? 'finish') === 'finish') {
     const findings = Array.from({ length: r.findings ?? 0 }, (_, i) => ({ severity: 'P2', text: `finding ${i + 1}` }));
-    await M.finishAgentTask!({}, { taskRef: t.id, result: { outcome: 'approved', ...(r.findings == null ? {} : { findings }) } }, ctx(holder.id));
+    await M.finishAgentTask!({}, { taskRef: t.id, result: { outcome: r.verdicts?.length === 0 ? 'failed' : 'approved', ...(r.findings == null ? {} : { findings }) } }, ctx(holder.id));
     for (const [i, disposition] of (r.dispositions ?? []).entries()) {
       await M.disposeAgentTaskFinding!({}, { taskRef: t.id, findingId: `F${i + 1}`, disposition }, ctx(author.id));
     }
@@ -301,7 +301,7 @@ describe('the surface', () => {
     const started = new Date(Date.now() - 60_000);
     await db.session.create({ data: { id: generateId(), appId: app.id, agentId, userId: holder.id, workerId: ada.id, startedAt: started, updatedAt: started, llmModel: 'model-live', family: 'family-live', modelReportedAt: started } });
     const asAda = <T>(fn: () => Promise<T>) => runAsActor({ workerId: ada.id, agentId }, fn);
-    const t = await M.createAgentTask!({}, { input: { parentTaskId: build.id, title: 'live', assignee: { user: holder.id }, source: 'synthetic' } }, ctx(author.id));
+    const t = await M.createAgentTask!({}, { input: { parentTaskRef: build.id, title: 'live', assignee: { user: holder.id }, source: 'synthetic' } }, ctx(author.id));
     await M.assignReviewSeat!({}, { taskRef: t.id, slot: 's16', head: H }, ctx(author.id));
     await db.agentTask.update({ where: { id: t.id }, data: { assigneeUserId: null, assigneeWorkerId: ada.id } });
     await asAda(() => M.startAgentTask!({}, { taskRef: t.id }, ctx(holder.id)));

@@ -13,6 +13,7 @@ import { ensureChannelWithRoot } from '../../../lib/channels.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
+import { joinHostForKey } from '../../../test/agentTeamHost.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -62,6 +63,7 @@ beforeEach(async () => {
   solo = await w('Solo');
   const raw = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
   key = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4), label: 'orca1' }, select: { id: true } });
+  await joinHostForKey(db, key.id, 'orca1');
   await M.grantAppKeyScope({}, { id: key.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager.id));
   await M.registerHost(
     {},

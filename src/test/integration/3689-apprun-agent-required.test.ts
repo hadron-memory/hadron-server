@@ -97,7 +97,7 @@ async function insertRun(c: pg.Client, appId: string, agentId: string | null): P
 /** Mint a valid run through the real path (served record included), off a real schedule naming `agentId`. */
 async function mintValid(appId: string, agentId: string) {
   const schedule = await db.agentSchedule.create({ data: { id: generateId(), organizationId: orgId, appId, agentId, name: `s-${generateId().slice(-6)}`, cron: '0 0 1 1 *', entryNodeUrn: 'ra-org:mem:entry' } });
-  return mintAppRun(db, { organizationId: orgId, appId, agentId, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: 'ra-org:mem:entry', publish: false });
+  return mintAppRun(db, { owner: { organizationId: orgId }, appId, agentId, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: 'ra-org:mem:entry', publish: false });
 }
 
 beforeEach(async () => {

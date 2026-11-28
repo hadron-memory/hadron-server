@@ -18,6 +18,7 @@ import { UrnNotQualifiedError } from '../lib/urn.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import type { ListPage, ListPageArgs } from '../lib/listPage.js';
 import type { OrgWebPoll } from '../lib/webPolls.js';
+import { refusalText } from '../lib/refEcho.js';
 
 type Resolver<A, R> = (parent: unknown, args: A, ctx: Context) => Promise<R>;
 const Q = resolvers.Query as unknown as { webPollsPage: Resolver<{ orgRef: string } & ListPageArgs, ListPage<OrgWebPoll>> };
@@ -40,7 +41,7 @@ function refusal(e: unknown) {
     const { code } = publicErrorExtensions(e.extensions ?? {});
     return textResult(`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, true);
   }
-  if (e instanceof UrnNotQualifiedError) return textResult(`[bad_user_input] ${e.message}`, true);
+  if (e instanceof UrnNotQualifiedError) return textResult(`[bad_user_input] ${refusalText(e)}`, true);
   throw e;
 }
 

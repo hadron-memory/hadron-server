@@ -1,3 +1,4 @@
+import { judgeAppLinks } from '../../../lib/appMemoryLinks.js';
 import { readableSupersedingSessionId } from '../../../lib/sessionSuperseded.js';
 import { isNewInstallPayload } from './installationPayload.js';
 import { listAppInstallations, appInstallationWhere } from '../../../lib/appInstallations.js';
@@ -9,6 +10,7 @@ import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
 import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { lintWarningPage, lintWarningPageForNodeId } from '../../../lib/bootPromptLint.js';
+import { lintSpec } from '../../../lib/specLint.js';
 import { sharedOrganizations } from './sharedOrganizations.js';
 import { projectGovernedKind } from '../../../lib/edgeGovernedKind.js';
 import { revisionApprovalOf } from '../../../lib/nodeApproval.js';
@@ -16,6 +18,7 @@ import { requireAppKeyManager } from './appKeyManagement.js';
 import { callerIsWorkerSession } from './resolvers.instruction.js';
 import { servedPromptOwnerFields, servedPromptTypeResolvers } from './resolvers.servedPrompt.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { creatableAppUserMemoryClasses } from './appUserMemoryEligibility.js';
 import { loadViewerManages } from './resolvers.appViewerManages.js';
 import { loadSelfJoinFacts } from './resolvers.appSelfJoinFacts.js';
 import { resolveSelfJoinRole, SelfJoinNotAllowedError } from '../../../controller/operations/joinApp.js';
@@ -46,7 +49,6 @@ import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { emitEntityUrnV2 } from '../../../lib/urnEmit.js';
 import { composeAiConfigUrn, type AiConfigUrnOwner } from '../../../lib/entityRef/aiConfigRef.js';
 import { loadAiConfigOwners, aiConfigOwnerKey, type AiConfigOwnerInfo, type AiConfigOwnerRef } from '../../../lib/aiConfigOwner.js';
-import { tickBatch } from './tickBatch.js';
 import { currentHadronServerId } from '../../../lib/hadronServer.js';
 import { servedEndpointInEffect, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import { nodeContentValidationState } from '../../../lib/nodeContentValidation.js';
@@ -111,6 +113,7 @@ import {
   assetUrn,
   resolveAppTeamSpaceMemoryIds,
   getAccessibleMemoryIds,
+  holdsContentReadIndependently,
   canWriteMemoryRecord,
   sessionScopeFilter,
   CONTENT_RAW_DEFAULT,
@@ -119,6 +122,7 @@ import {
   pageEnvelope,
 } from './resolvers.helpers.js';
 import { loadValidationTaskSet } from './resolvers.validationTaskSet.js';
+import { tickBatch } from './tickBatch.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
 import { memoryRowToRef, agentRowToRef, publicOrgMemoryScope, publicOrgAgentScope } from './publicRefs.js';
@@ -1138,6 +1142,23 @@ function truncatedChunksBatched(ctx: Context, nodeId: string): Promise<number | 
 }
 
 /**
+ * #5018 (hrn:node:hadronmemory.com:specs:cor:dmo:060:18) — a node's recorded size, for `Node.storedBytes` (when the parent's projection
+ * omits it) and `Node.revisionBytes` (which the client leaves out of every default select): every node raised in the same tick shares ONE
+ * query, which also returns the memories its revisions were taken in. The read is by the parent's own id, after the node read gate.
+ */
+const nodeBytesOf = tickBatch<string, { stored: number | null; revision: bigint | null; memoryIds: string[] } | null>(async (ctx, ids) => {
+  const rows = await ctx.db.$queryRaw<Array<{
+    id: string; stored: number | null; revision: bigint | null; current: string; memory_ids: string[];
+  }>>`
+    SELECT n.id, n.stored_bytes AS stored, n.revision_bytes AS revision, n.memory_id AS current,
+           COALESCE(array_agg(DISTINCT r.memory_id) FILTER (WHERE r.memory_id IS NOT NULL), ARRAY[]::text[]) AS memory_ids
+    FROM public.nodes n LEFT JOIN public.node_revisions r ON r.node_id = n.id
+    WHERE n.id = ANY(${ids}::text[]) GROUP BY n.id`;
+  // The node's current memory always counts (a legacy revision with no memory is read as it, as nodeRevisions does).
+  return new Map(rows.map((r) => [r.id, { stored: r.stored, revision: r.revision, memoryIds: [...new Set([r.current, ...r.memory_ids])] }]));
+}, null);
+
+/**
  * #3932: `AiServiceConfig.urn` owner lookups raised in the same tick share one query per owner kind
  * ({@link loadAiConfigOwners}); keyed by the request Context, so nothing is kept past the tick. The batch is keyed by
  * the string {@link aiConfigOwnerKey}; the ref behind each key is kept beside it, so the key is never parsed back (#3958).
@@ -1281,6 +1302,23 @@ export const typeResolvers = {
       lintWarningPageForNodeId(ctx, r.nodeId, args),
   },
   Node: {
+    /** #5018 — the bytes this node takes as stored (content, description, data, properties); null = not measured yet. Any reader of the node. */
+    storedBytes: async (n: { id: string; storedBytes?: number | null }, _: unknown, ctx: Context) =>
+      n.storedBytes !== undefined ? n.storedBytes : ((await nodeBytesOf(ctx, n.id))?.stored ?? null),
+    /**
+     * #5018 — the same figure over this node's earlier revisions, as a base-10 string; null = not measured yet. A revision keeps the memory
+     * it was taken in (a node moved from a private memory into a shared one carries snapshots from both), so the figure is shown only to a
+     * reader who may read EVERY memory a counted revision was taken in (the `nodeRevisions` gate, #602) and for a node whose history is not
+     * concealed (#1663); otherwise null, which discloses nothing about a memory the reader cannot read.
+     */
+    revisionBytes: async (n: { id: string }, _: unknown, ctx: Context) => {
+      const row = await nodeBytesOf(ctx, n.id);
+      if (!row || row.revision === null) return null;
+      for (const memoryId of row.memoryIds) if (!(await isMemoryReadableCached(ctx, memoryId))) return null;
+      const { isConcealedCommentHistory } = await import('./resolvers.comments.js');
+      if (await isConcealedCommentHistory(ctx, n.id)) return null;
+      return row.revision.toString();
+    },
     indexTruncated: async (n: { id: string; embeddingTruncatedChunks?: number | null }, _: unknown, ctx: Context) => {
       const count = n.embeddingTruncatedChunks !== undefined ? n.embeddingTruncatedChunks
         : await truncatedChunksBatched(ctx, n.id);
@@ -1294,6 +1332,9 @@ export const typeResolvers = {
       args: { first?: number | null; after?: string | null },
       ctx: Context,
     ) => lintWarningPage(ctx, n, args),
+    /** #5109 — spec content lint: pure on the stored text, under the node's own read gate (the parent resolved it). */
+    specLint: (n: { loc: string; name?: string | null; role?: string | null; tags?: string[] | null; content?: string | null }) =>
+      n.content === undefined ? null : lintSpec({ loc: n.loc, name: n.name, role: n.role, tags: n.tags, content: n.content }),
     /**
      * #2041 — the one place a node's include tags resolve for a reader
      * (cor:dmo:150:03), so every path that reaches `Node.content` is covered
@@ -2024,6 +2065,8 @@ export const typeResolvers = {
     },
     /** #2109 — whether the caller manages this App; the shared managesApp predicate as a read-time fact. */
     viewerManages: (a: { id: string }, _: unknown, ctx: Context) => loadViewerManages(ctx, a.id),
+    /** #5218 — what createMemoryInApp would still admit for the viewer; the door's own check, from the viewer's own rows. */
+    viewerAppUserMemoryClasses: (a: { id: string }, _: unknown, ctx: Context) => creatableAppUserMemoryClasses(ctx, a.id),
     /**
      * Spec 049 Phase 4 — the App's default Channel, gated on its HOST MEMORY
      * like `App.sharedMemory`: `Query.app` admits an org member who is not an
@@ -2139,6 +2182,40 @@ export const typeResolvers = {
         .sort(servedInstallationOrder(wholeAppReadable))
         .map(row=>row.agent)
         .filter((ag): ag is NonNullable<typeof ag> => ag !== null);
+    },
+    /**
+     * #5185: this App's memory links. Only entries whose memory the viewer reads in their OWN right (not through any App) are
+     * listed; the rest are absent and not counted. `active` is the shared at-use judgement of `src/lib/appMemoryLinks.ts`.
+     */
+    attachedMemories: async (a: { id: string }, _: unknown, ctx: Context) => {
+      if (!(await loadReadableNestedApp(ctx, a.id))) return [];
+      // The attacher is a roster fact: withheld from a caller the member list is withheld from (#2089), as `members` does.
+      const rosterWithheld = await appRosterWithheld(ctx, a.id);
+      const links = await ctx.db.appMemoryLink.findMany({
+        where: { appId: a.id, memory: { deletedAt: null } },
+        orderBy: [{ createdAt: 'asc' }, { memoryId: 'asc' }, { attachedBy: 'asc' }],
+        select: { memoryId: true, attachedBy: true, createdAt: true, attacher: { select: { handle: true } } },
+      });
+      if (links.length === 0) return [];
+      // One own-right judgement per distinct memory for this viewer.
+      const memoryIds = [...new Set(links.map((l) => l.memoryId))];
+      const readableIds = new Set<string>();
+      await Promise.all(memoryIds.map(async (id) => { if (await holdsContentReadIndependently(ctx, id)) readableIds.add(id); }));
+      const visible = links.filter((l) => readableIds.has(l.memoryId));
+      if (visible.length === 0) return [];
+      const judged = await judgeAppLinks(ctx.db, a.id, { onlyMemoryIds: [...readableIds] });
+      const active = new Map(judged.map((j) => [`${j.memoryId}:${j.attachedBy}`, j.active]));
+      const memories = new Map((await ctx.db.memory.findMany({ where: { id: { in: [...readableIds] } } })).map((m) => [m.id, m]));
+      return visible.flatMap((l) => {
+        const memory = memories.get(l.memoryId);
+        return memory ? [{
+          memory,
+          attachedById: rosterWithheld ? null : l.attachedBy,
+          attachedByHandle: rosterWithheld ? null : (l.attacher.handle ?? null),
+          createdAt: l.createdAt,
+          active: active.get(`${l.memoryId}:${l.attachedBy}`) ?? false,
+        }] : [];
+      });
     },
     members: async (a: { id: string }, _: unknown, ctx: Context) => {
       if (await appRosterWithheld(ctx, a.id)) return null;

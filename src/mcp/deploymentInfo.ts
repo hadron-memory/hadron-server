@@ -247,7 +247,135 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation (ship order per precedent
 // 0274: notices, server, companions). Gates and refusals are unchanged; `agentTasks(externalId)` keeps its name (an
 // external-system label). (0.36.0 is #5066, #1796, and 0.37.0 is #5064, Billing A1, both merged first.)
-export const HADRON_SERVER_VERSION = '0.38.0';
+//
+// 0.39.0 — BREAKING, entity refs S3 (#4139): `nodeExport(id)` → `nodeExport(ref)` (the node's PK or URN), no alias.
+// A lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation (ship order per precedent
+// 0274: notices, server, companions). The export's contents, gating and refusals are unchanged; only the argument that
+// names the node changed. (0.38.0 is #4782, entity refs S7, merged first.)
+//
+// 0.40.0 — SEMANTICS BREAK, Billing A4 (#5011): free credit now expires. `creditBalance` settles the owner's expired
+// grants (one `adjustment` entry each, source pair ('grant-expiry', <grant id>)) before it sums, and never answers a
+// balance holding credit whose expiry has passed, so a balance drops at an expiry with no write by the client. New
+// field `CreditBalance.expiring: [ExpiringCredit!]!` (what is left of each unexpired grant, soonest first) and type
+// `ExpiringCredit`. `grantCredits` refuses an `expiresAt` not later than now with BAD_USER_INPUT (it was accepted).
+// Additive SDL; a lagging client still validates. (0.39.0 is #4763, #4139 S3, merged first.)
+//
+// 0.41.0 — REFUSAL WIRE CHANGE, #5168: no refusal quotes or relays the ref the caller typed. Every code is unchanged.
+// Messages lose the value (`<CODE>: <ref>` is now `<CODE>: nothing found for the given ref.`; `URN "<v>" is not fully
+// qualified. …` is now `The ref is not a fully qualified <type> URN. …`; `No match for <x>Ref "<v>".` and
+// `<X> "<v>" not found.` lose the quoted value). Extensions drop the relayed caller value: `offendingValue` (on
+// URN_NOT_QUALIFIED, the URN parse BAD_USER_INPUT and AmbiguousLegacyUrnError), `ref` (every entity not-found), and the
+// per-door `appRef`, `taskId`, `workerRef`, `nodeRef`, `nodeRevRef`, `channelRef`, `grantRef`, `id` on their not-found
+// refusals. `expectedType` and `reason` stay. A client branches on the code, as it should; no first-party client reads a
+// dropped key (re-grep on the PR). No SDL change.
+//
+// 0.42.0 — BREAKING, entity refs gap 3 (#5081): the organization argument on 21 fields is `orgRef`, no alias. The 18 Query
+// arguments named `orgId` (findNodes, globalSearch, edges, impersonationSessions, memories, exchangeConnections,
+// exchangeConnectionsPage, slackConnections, telegramConnections, mcpServers, homeAssistantInstances, resendSenders, apps,
+// agents, scopes, channels, registerEntries, assets) and the 3 named `org` (orgBootPromptSigning,
+// orgBootPromptSigningPreview, setOrgBootPromptSigning) are renamed. Scalars and gates are unchanged (impersonationSessions
+// keeps `String`); a lagging client's old name is an UNKNOWN argument and GraphQL refuses the whole operation. (0.41.0 is #5168, merged first.)
+//
+// 0.43.0 — BREAKING, entity refs gap 2 (#5080): 21 input-type fields on 17 input types, plus `createAiServiceConfig(ownerId:)`,
+// take refs, no alias (`*Id` -> `*Ref`): `NodeFilter.memoryRefs`, `EdgeFilter.memoryRef` / `sourceRef` / `targetRef`,
+// `AppFilter.agentRef`, `AiServiceConfigFilter.ownerRef`, `CreateNodeInput` / `UpdateNodeInput` / `ImportNodeInput` /
+// `NodeAuthoringCheckInput` / `BeginAssetUploadV2Input` `.memoryRef`, `UpdateNodeInput.ref`, `NodeEdgeInput.targetRef`,
+// `SearchReplaceInNodesInput` `.nodeRefs` / `.memoryRefs`, `SpecSearchReplaceInput.nodeRefs`, `CreateAgentTaskInput` /
+// `CloneAgentTaskInput` `.parentTaskRef`, `TickerInput` / `TickerPatch` `.channelRefs`, `BatchThrough.channelRef`, and
+// `createAiServiceConfig(ownerRef:)`. A lagging client's old name is an UNKNOWN field or argument and GraphQL refuses the whole
+// operation (ship order per precedent 0274: notices, server, companions). Three of them close a gap: ticker channels and
+// `BatchThrough` now resolve a URN as well as an id. `NodeInput` (the retired `replaceSubtree` shape) keeps `memoryId` and
+// its edges keep `targetId`; `ResumeSessionInput.expectedWorkerId` stays (#5163). MCP tool inputs are unchanged. (0.42.0 is
+// #5081, entity refs gap 3, merged first.)
+//
+// 0.44.0 — NEW REFUSAL, #5184: `updateMemory` with a `urn` (slug) argument on a `personal` or `private` memory that
+// belongs to an App answers APP_MEMORY_SLUG_FIXED (extension `memoryClass`) and applies nothing. An organization-owned
+// one renamed before; a user-owned one answered BAD_USER_INPUT. `name` still changes. No SDL change. (0.43.0 is #5080, merged first.)
+// 0.45.0 — BREAKING (behaviour, no SDL removal), #5183 (A1 of #5182): createMemoryInApp's `name` is optional. For a personal or private memory the server derives
+// slug and display name (<app>-<handle>-<class>), the memory is the user's own, one per class per App
+// (APP_USER_MEMORY_ALREADY_EXISTS). A client that still sends `name` has it ignored for those classes. Also changed for those
+// classes: the memory's tenant moves from the App's organization to the user (organizationId null, URN rooted on their handle),
+// and an App key, worker session, run principal or impersonation is refused (authorization denied), before any read of the App.
+// 0.46.0 — BREAKING (behaviour, no SDL removal) (#5185, A3 of #5182): attachMemoryToApp LINKS a readable memory
+// (any class but system) to an App and no longer binds
+// or renames it; `agentRef` is optional and ignored; MEMORY_ALREADY_APP_SCOPED, ORGANIZATION_MISMATCH and AGENT_NOT_INSTALLED
+// are no longer answered by it. New: detachMemoryFromApp(memoryRef, appRef): Boolean! and App.attachedMemories. A pure App key and
+// a userless run read a linked memory (never write it) while its attacher can read it in their own right. A lagging client that
+// relied on the old bind and rename still parses the call but silently gets a link only. (0.45.0 is #5239, merged first.)
+// 0.47.0 — ADDITIVE, #5218: `App.viewerAppUserMemoryClasses: [MemoryClass!]!`, the personal/private classes the
+// signed-in viewer may still create in the App through `createMemoryInApp`. A lagging client still validates. (0.46.0 is #5258, merged first.)
+// 0.48.0 — BREAKING, #5163: `ResumeSessionInput.expectedWorkerId` is renamed `expectedWorkerRef`, no alias (cor:api:140:01),
+// and takes a worker reference: the id, as before, or a fully qualified worker URN resolved through `resolveWorkerRef`. A
+// lagging client's `expectedWorkerId` is an UNKNOWN input field and GraphQL refuses the whole operation, so the CLI's
+// resume (hadron-cli `team.graphql`) ships in the same window. A ref that is neither an id nor a worker URN (a name, a
+// relative URN, another type) now refuses URN_NOT_QUALIFIED where it was BAD_USER_INPUT; blank stays BAD_USER_INPUT. A URN
+// naming no worker and one naming a worker the caller may not read get one answer (the WORKER_MISMATCH refusal carries
+// expectedWorkerId null, or NOTHING_TO_RESUME). The refusal extension `expectedWorkerId` keeps its name (an output id).
+// MCP tool inputs are unchanged (hadron_resume_session sends no expected worker). (0.47.0 is #5240, merged first.)
+// 0.49.0 — ANSWER CHANGE, #5334 (cor:sec:070:02, Decided, Holger 2026-11-26): `withdrawSecretChangeRequest` on a request that expired while
+// open now answers false (nothing was withdrawn); it still ends as expired with its staged value cleared, as before. It answered true.
+// A live request still answers true and ends withdrawn; an ended one, and another person's or unknown id, are unchanged. No SDL shape change.
+// (0.48.0 is #5314, merged first.)
+// 0.50.0 — ADMISSION COST, #5267: `App.viewerAppUserMemoryClasses` (#5218) is priced at 24 per App by GraphQL admission (it was a leaf, 1),
+// the statements it issues for a member App with three unlicensed installed Agents (a known under-estimate beyond three, tracked in #5362; see admissionComplexity.ts). A list that selects it for many Apps costs more and can
+// now be refused QUERY_TOO_COMPLEX where it was admitted; a single-App selection is unaffected in practice. Answers and the SDL are unchanged.
+// (0.48.0 is #5314, merged first; 0.49.0 is #5334, merged first (the order is Peter's, #153292), so 0.50.0 leaves no gap.)
+// 0.51.0 — BREAKING (behaviour, no SDL removal) (#5345): the reach of an App's links narrows to the record gate. A user-owned
+// memory of a class other than personal/private (`ownerUserId` set) that its owner linked to an App no longer reaches the App's
+// pure key or a userless run on ANY surface; the link row stays, inert (`active: false` in App.attachedMemories), until detached.
+// What main did differed by class. A knowledge/group memory (for example under a user root) was listed by `hadron_list_memories`
+// and its access map, and its NODES were readable through GraphQL `node(ref:)` and returned by `findNodes`, while only
+// `memory(ref:)` and the GraphQL `memories` list refused it. Those callers now lose node content reads and search hits, not only
+// a listing. An app-class memory (a user-owned App's own, linked into itself included) reached every read on main (the record
+// gate's app arm reads the same link judge), so `memory(ref:)` and the `memories` list lose it as well. Both are
+// cor:dmo:060:22 (Decided D-2026-11-26: attaching gives no access; the #5258/#5185 interim covers own personal/private only);
+// the grant (#5321) is the path to that access. Own personal/private linked by the App's owner and organization-owned links are
+// unchanged. (0.50.0 is #5267, merged first.)
+// 0.52.0 — ADDITIVE, #5325 (cor:agt:090:01, :02): `StopSignalScope` gains `APP`, a stop signal that covers every live worker of the App,
+// one cast after it was set included (worked out at each check, no stored roster) and naming no target; whoever manages the App sets and
+// lifts it, a host key never does (STOP_SIGNAL_SCOPE_FORBIDDEN for every shape of the call). The MCP `hadron_stop_signal_set` scope enum
+// gains APP. The three older scopes behave as before. A lagging client that still validates against the old enum cannot send APP, and one
+// that lists signals may now read a scope it does not know. (0.51.0 is #5345, merged first.)
+// 0.53.0 — WIDENING (behaviour, no SDL change) (#5398, cor:api:120:03 App-key line, Decided, Holger 2026-11-27 "Add an own-memory
+// read"): every pure App key READS its own App's shared app-class memories (app_id = the App, no per-user marker, no Worker on
+// it, the App's own tenant) and lists them, read only. For an organization's App the reads already held through the team-space
+// fold, and GraphQL `memories` now lists them too. For a user-owned App every surface is new (memory(ref:), memories, node(ref:),
+// findNodes, resolveUrn, hadron_list_memories, the MCP point reads). A user, a session-bound key, an impersonation and a run gain
+// nothing; per-user anonymous rows and Worker working memories stay refused. (0.52.0 is #5325, merged first.)
+// 0.54.0 — BREAKING (#5394 PR 1, cor:cht:010:02): `startChat` needs an identified App on both scopes: the App credential's App, or the new
+// `appRef` argument (SDL addition). A call that identifies neither, or whose `appRef` differs from the credential's App, is refused
+// CHAT_APP_NOT_IDENTIFIED before any Agent lookup; the App is never searched for, and SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS is
+// retired. A previously working signed-in start that names no App is now refused, so a client keys on this version before sending
+// `appRef` (hadron-portal#2683, hadron-cli#3310). (0.53.0 is #5416, merged first.)
+// 0.55.0 — BREAKING (behaviour, no SDL removal) (#5321, cor:acl:140:02, cor:agt:010:01, cor:dmo:060:22, cor:acl:010:04): an App that acts
+// with no person behind it (a pure App key, or a userless run) now reads a memory outside its own App ONLY through a signed `memory.read`
+// grant the App holds. Attaching a memory (#5258's `app_memory_links`) no longer gives any read on any surface: the link is the App's scope
+// list, and `AppAttachedMemory.active` still shows whether it would count. Upgrade: on deploy every existing attachment stops giving reads,
+// with no backfill (only the memory's manager may sign a read grant, cor:acl:140:02); a key or run that read through one gets the
+// missing-memory answer until the memory's manager signs a grant. The grant has two forms: (a) the App's own organization, opening its
+// ORGANIZATION-visibility unencrypted knowledge memories no App scopes, to userless runs only; (b) named memories, to userless runs and to a
+// pure key holding the new App-key scope `grant:read` (ADDITIVE: the closed scope list gains it; a client that validates scopes against the
+// old list cannot give it). A person, an impersonation, a session-bound key and a run carrying a user id gain nothing. #5398's own-memory
+// read (0.53.0) is neither an attachment nor a grant and is unchanged. (0.53.0 is #5398 and 0.54.0 is #5394, both merged first.)
+// 0.56.0 — BREAKING (behaviour) + ADDITIVE, #5027 (cor:acl:030:01, R1-R4, Holger 2026-11-27): a chat lives in a memory the caller
+// names. ADDITIVE: `startChat(memoryRef:)` (an id or URN of an app, group, personal or private memory of the Agent's App that the caller
+// can read and write as themselves); `Agent.defaultChatHome` (APP_SHARED, PERSONAL or PRIVATE, set through `updateAgent` by whoever
+// manages the Agent) decides when memoryRef is omitted; `Chat.homeMemoryClass` and `Chat.homeMemoryUrn` (the `hrn:mem:` form, as
+// `Memory.urn`) on every chat read. `Chat.scope` is kept and deprecated, now a label derived from the home's class. BREAKING: a home
+// that fails any step, including a caller with no AppMember row in the home's App (a group MemoryMember outside the App), is refused
+// with the one `CHAT_HOME_INVALID` and writes nothing; only the person themselves creates a missing personal or private default home
+// (an App key, a run or a worker session is refused). A start with neither memoryRef nor a default behaves as before.
+// (0.54.0 is #5407 and 0.55.0 is #5411, both merged first.)
+// 0.57.0 — BREAKING (output nullability) + ADDITIVE (#5077 F3a-2, cor:dmo:050:12): `AppRun.organizationId` is now `ID` (null for a
+// run of an App a person owns) and `AppRun.ownerUserId: ID` is new (exactly one of the two is set). A client that reads
+// organizationId as non-null must key on this version. With PERSONAL_APP_RUNS_ENABLED=true the manual door (triggerAppRun,
+// runTask(appRef:), importNode(taskRef:)) launches on a person's App for its key or its owner / owner-role member, FORBIDDEN for
+// anyone else; the owner and an owner-role member read (appRun, latestAppRun, resolveUrn, hadron_get_run) and cancel that App's
+// runs; a platform admin cancels one with its content withheld. MCP `hadron_get_run` and `hadron_run_task` now pass the session's
+// impersonation to those gates, as GraphQL always did: an impersonated MCP session is bounded on an organization's run too (its
+// one organization, no own-run arm), where MCP used to judge it as the target user. (0.55.0 is #5411 and 0.56.0 is #5391,
+// both merged first.)
+export const HADRON_SERVER_VERSION = '0.57.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

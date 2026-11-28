@@ -90,6 +90,6 @@ describe('#3427 SDL text follows the refusal', () => {
     const d = schema.getQueryType()!.getFields()[field].description ?? '';
     expect(d).toMatch(/where/);
     expect(d).toMatch(/childrenOf/);
-    expect(d).toMatch(/memoryIds/);
+    expect(d).toMatch(/memoryRefs/);
   });
 });

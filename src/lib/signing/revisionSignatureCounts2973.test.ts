@@ -407,9 +407,10 @@ describe('#2973 state (C2, cor:dmo:130:04 — re-verified, on the DB signing clo
   it('a cancelled signature never counts', async () => {
     const { passkeyId } = await signLive(nodeId, { closingMs: 20_000 });
     // Cancelled inside the window: revoked and closed together, before window_ends_at (chk_passkey_shape).
-    await db.$executeRaw`UPDATE passkey_credentials
-       SET revoked_at = public.hadron_passkey_wall_now(), window_ended_at = public.hadron_passkey_wall_now(), window_outcome = 'cancelled'
-       WHERE id = ${passkeyId}`;
+    // One clock read used twice (#5264): two wall_now() calls differ by microseconds, and chk_passkey_shape needs both equal.
+    await db.$executeRaw`WITH t AS (SELECT public.hadron_passkey_wall_now() AS at)
+       UPDATE passkey_credentials SET revoked_at = t.at, window_ended_at = t.at, window_outcome = 'cancelled'
+       FROM t WHERE id = ${passkeyId}`;
     expect(await counts(1)).toBe(false);
   });
 

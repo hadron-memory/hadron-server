@@ -122,7 +122,7 @@ describe('draft corpus moves record no URN alias (#1448)', () => {
 });
 
 describe('draft corpus merges record no URN alias either (#1448, @codex P1 on #1451)', () => {
-  const merge = (sourceMemoryId: string, targetMemoryId: string) => mergeMemoryGraph(db, {
+  const merge = (sourceMemoryId: string, targetMemoryId: string) => mergeMemoryGraph(db, { ownerLimitCaller: null,
     sourceMemoryId,
     targetMemoryId,
     fields: new Set(['CONTENT', 'EDGES']),

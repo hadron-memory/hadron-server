@@ -92,7 +92,7 @@ beforeEach(async () => {
   validationTask = (await db.node.create({ data: { id: generateId(), memoryId, loc: 'validate-task', name: 'Validate', isRunnable: true, content: 'check' } })).id;
   const configId = (await db.memoryConfig.create({ data: { id: generateId(), memoryId } })).id;
   await db.nodeRoleRule.create({ data: { id: generateId(), configId, role: 'guide', validationTaskId: validationTask, validationTaskRequired: true } });
-  nodeId = ((await M.createNode({}, { input: { memoryId, loc: 'doc', name: 'Doc', content: 'body', role: 'guide' } }, { db, roles: [], userId: leo } as Context)) as { id: string }).id;
+  nodeId = ((await M.createNode({}, { input: { memoryRef: memoryId, loc: 'doc', name: 'Doc', content: 'body', role: 'guide' } }, { db, roles: [], userId: leo } as Context)) as { id: string }).id;
   await stamp('HUMAN');
   appId = (await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'cvm-app', urn: 'cvm-org:cvm-app' } })).id;
   agentId = (await db.agent.create({ data: { id: generateId(), organizationId: orgId, name: 'cvm-agent', urn: 'cvm-org:cvm-agent' } })).id;
@@ -143,7 +143,7 @@ describe('#1332 MCP hadron_record_content_validation', () => {
     const appMemoryId = (await db.memory.create({
       data: { id: generateId(), organizationId: orgId, urn: 'cvm-org:app-mem', name: 'app-mem', class: 'app', appId },
     })).id;
-    const appNode = ((await M.createNode({}, { input: { memoryId: appMemoryId, loc: 'doc', name: 'Doc', content: 'body' } }, { db, roles: [], userId: leo } as Context)) as { id: string }).id;
+    const appNode = ((await M.createNode({}, { input: { memoryRef: appMemoryId, loc: 'doc', name: 'Doc', content: 'body' } }, { db, roles: [], userId: leo } as Context)) as { id: string }).id;
     const server = createTestableMcpServer(authOf({ appId, clientId: `agent:${agentId}` }), { sessionId: `cv-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } });
     expect(mcpCode(await server.callToolText('hadron_record_content_validation', args({ nodeRef: appNode })))).toBe('FORBIDDEN');
     expect(await reports()).toHaveLength(0);

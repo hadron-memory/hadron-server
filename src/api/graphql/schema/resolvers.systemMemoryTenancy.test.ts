@@ -19,7 +19,7 @@
 import { describe, it, expect, beforeEach, vi, beforeAll, afterAll } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { cleanDb, createMintMarker } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import {
@@ -284,11 +284,7 @@ describe('#949 — audit + repair of an already-broken row', () => {
       },
     });
     const mintedAt = new Date(Date.now() - 60_000);
-    await db.node.create({ data: {
-      id: generateId(), memoryId: corpus.id, loc: 'zz:mint-marker', name: 'zz:mint-marker',
-      content: 'minted elsewhere; tombstoned', role: null, tags: [],
-      mintedAt, mintedByInfo: 'test', deletedAt: mintedAt,
-    } });
+    await createMintMarker(db, corpus.id, { mintedAt });
     await db.node.create({ data: { id: generateId(), memoryId: corpus.id, loc: 'pas:010', name: 'pas:010', tags: ['spec'] } });
     await expectCode(
       M.repairAgentSystemMemory(null, { agentRef: agent.id }, ctx(platformAdmin.id, ['ADMIN'])),

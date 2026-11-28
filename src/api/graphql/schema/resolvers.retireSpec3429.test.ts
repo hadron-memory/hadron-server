@@ -27,7 +27,7 @@ const as = (userId: string): Context => ({ db, userId, roles: [] });
 
 const spec = async (loc: string, patch: Record<string, unknown> = {}, memoryId = mem.id) =>
   (await resolvers.Mutation.createSpecNode(null, { input: {
-    memoryId, loc, name: `Spec ${loc}`, role: 'spec', content: `# Title ${loc}\n\nBody of ${loc}.`, abstract: `About ${loc}.`, tags: ['spec'], ...patch,
+    memoryRef: memoryId, loc, name: `Spec ${loc}`, role: 'spec', content: `# Title ${loc}\n\nBody of ${loc}.`, abstract: `About ${loc}.`, tags: ['spec'], ...patch,
   } } as never, as(admin.id))) as { id: string };
 const rev = async (id: string) => (await db.node.findUniqueOrThrow({ where: { id } })).revSeq;
 const snap = async (id: string) => {
@@ -337,7 +337,7 @@ describe('#3429 authoring (acceptance 4)', () => {
     // Snapshots FIRST, so a write updateSpecNode makes before it refuses would show.
     const before = await snap(x.id);
     const beforeY = await snap(y.id);
-    const viaUpdate = await codeOf(resolvers.Mutation.updateSpecNode(null, { input: { id: x.id, abstract: 'zzz', expectedRevision: await rev(x.id) } } as never, as(admin.id)));
+    const viaUpdate = await codeOf(resolvers.Mutation.updateSpecNode(null, { input: { ref: x.id, abstract: 'zzz', expectedRevision: await rev(x.id) } } as never, as(admin.id)));
     expect(viaUpdate, 'the fixture must actually govern: updateSpecNode has to refuse').toBe('AUTHORING_ATTESTATION_MISSING');
     expect(await snap(x.id)).toBe(before);
     const viaDoor = await codeOf(retire({ ref: x.id, form: 'RESCIND', expectedRevision: await rev(x.id), reason: 'r', summary: 's' }));
@@ -428,7 +428,7 @@ describe('#3429 other writers, committed first, make the door refuse (acceptance
 
   it('an inline edges: write through updateSpecNode', async () => {
     const x = await spec('w4:x'); const y = await spec('w4:y');
-    await resolvers.Mutation.updateSpecNode(null, { input: { id: x.id, edges: [{ sourceLoc: 'w4:x', targetLoc: 'w4:y', targetId: y.id, name: 'superseded-by' }] } } as never, as(admin.id));
+    await resolvers.Mutation.updateSpecNode(null, { input: { ref: x.id, edges: [{ sourceLoc: 'w4:x', targetLoc: 'w4:y', targetRef: y.id, name: 'superseded-by' }] } } as never, as(admin.id));
     const linked = await db.edge.count({ where: { sourceId: x.id, name: 'superseded-by', deletedAt: null } });
     if (linked > 0) expect(await codeOf(rescind(x.id))).toBe('NODE_WRITE_CONFLICT');
     void y;

@@ -53,7 +53,7 @@ describe('#391 soft-deleted nodes excluded from read resolvers', () => {
   it('findNodes lists the live node but not the soft-deleted one', async () => {
     const res = (await Q.findNodes(
       null,
-      { filter: { memoryIds: [fx.memoryId] } },
+      { filter: { memoryRefs: [fx.memoryId] } },
       adminCtx(),
     )) as { hits: Array<{ node: { id: string } }> };
     const ids = res.hits.map((h) => h.node.id);
@@ -71,8 +71,8 @@ describe('#391 soft-deleted nodes excluded from read resolvers', () => {
     expect(await Q.node(null, { ref: fx.liveLoc, memoryRef: fx.memoryId }, adminCtx())).not.toBeNull();
   });
 
-  it('nodeExport throws NOT_FOUND for a soft-deleted node', async () => {
-    await expect(Q.nodeExport(null, { id: fx.deletedId, format: 'MD', full: true }, adminCtx())).rejects.toThrow(/not found/i);
-    await expect(Q.nodeExport(null, { id: fx.liveId, format: 'MD', full: true }, adminCtx())).resolves.toBeTruthy();
+  it('nodeExport throws NODE_NOT_FOUND for a soft-deleted node (#4139)', async () => {
+    await expect(Q.nodeExport(null, { ref: fx.deletedId, format: 'MD', full: true }, adminCtx())).rejects.toMatchObject({ code: 'NODE_NOT_FOUND' });
+    await expect(Q.nodeExport(null, { ref: fx.liveId, format: 'MD', full: true }, adminCtx())).resolves.toBeTruthy();
   });
 });

@@ -216,7 +216,7 @@ describe('#528 — importNode(taskRef:) runs a task on the imported node', () =>
         {},
         {
           input: {
-            memoryId: targetMemoryId,
+            memoryRef: targetMemoryId,
             loc: 'clip:page',
             content: '# Clipped',
             contentType: 'text/markdown',
@@ -236,7 +236,7 @@ describe('#528 — importNode(taskRef:) runs a task on the imported node', () =>
       {},
       {
         input: {
-          memoryId: targetMemoryId,
+          memoryRef: targetMemoryId,
           loc: 'clip:args',
           content: '# A',
           contentType: 'text/markdown',
@@ -257,7 +257,7 @@ describe('#528 — importNode(taskRef:) runs a task on the imported node', () =>
         {},
         {
           input: {
-            memoryId: targetMemoryId,
+            memoryRef: targetMemoryId,
             loc: 'clip:noapp',
             content: '# B',
             contentType: 'text/markdown',
@@ -284,7 +284,7 @@ describe('#528 — importNode(taskRef:) runs a task on the imported node', () =>
         {},
         {
           input: {
-            memoryId: targetMemoryId,
+            memoryRef: targetMemoryId,
             loc: 'clip:nonrunnable',
             content: '# D',
             contentType: 'text/markdown',
@@ -316,7 +316,7 @@ describe('#528 — importNode(taskRef:) runs a task on the imported node', () =>
         {},
         {
           input: {
-            memoryId: targetMemoryId,
+            memoryRef: targetMemoryId,
             loc: 'clip:denied',
             content: '# X',
             contentType: 'text/markdown',
@@ -337,7 +337,7 @@ describe('#528 — importNode(taskRef:) runs a task on the imported node', () =>
     // Knowledge target (the default fixture memory) → app-only, no user.
     const know = await resolvers.Mutation.importNode(
       {},
-      { input: { memoryId: targetMemoryId, loc: 'clip:know', content: '# K', contentType: 'text/markdown', taskRef: taskUrn, appRef: app.id } },
+      { input: { memoryRef: targetMemoryId, loc: 'clip:know', content: '# K', contentType: 'text/markdown', taskRef: taskUrn, appRef: app.id } },
       adminCtx(),
     );
     expect((await db.appRun.findUniqueOrThrow({ where: { id: know.jobId! } })).userId).toBeNull();
@@ -357,7 +357,7 @@ describe('#528 — importNode(taskRef:) runs a task on the imported node', () =>
 
     const res = await resolvers.Mutation.importNode(
       {},
-      { input: { memoryId: personal.id, loc: 'clip:self', content: '# E', contentType: 'text/markdown', taskRef: taskUrn, appRef: app.id } },
+      { input: { memoryRef: personal.id, loc: 'clip:self', content: '# E', contentType: 'text/markdown', taskRef: taskUrn, appRef: app.id } },
       adminCtx(),
     );
     expect((await db.appRun.findUniqueOrThrow({ where: { id: res.jobId! } })).userId).toBe(adminId);
@@ -382,7 +382,7 @@ describe('#528 — importNode(taskRef:) runs a task on the imported node', () =>
     await expect(
       resolvers.Mutation.importNode(
         {},
-        { input: { memoryId: personal.id, loc: 'clip:orphan', content: '# Z', contentType: 'text/markdown', taskRef: taskUrn, appRef: app.id } },
+        { input: { memoryRef: personal.id, loc: 'clip:orphan', content: '# Z', contentType: 'text/markdown', taskRef: taskUrn, appRef: app.id } },
         adminCtx(),
       ),
     ).rejects.toMatchObject({ extensions: { code: 'RELATIONSHIP_MISSING' } });
@@ -395,7 +395,7 @@ describe('#528 — importNode(taskRef:) runs a task on the imported node', () =>
       {},
       {
         input: {
-          memoryId: targetMemoryId,
+          memoryRef: targetMemoryId,
           loc: 'clip:plain',
           content: '# C',
           contentType: 'text/markdown',

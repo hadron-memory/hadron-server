@@ -2,6 +2,7 @@ import { GraphQLError } from 'graphql';
 import type { ApprovalHashFields } from '../../../lib/approvalHash.js';
 import type { Context } from './resolvers.helpers.js';
 import {
+  requireCallerIdentity,
   concealUnreadableDenial,
   isMemoryHiddenForWrite,
   isMemoryReadableCached,
@@ -81,8 +82,8 @@ async function requirePlainApprovalMemory(ctx: Context, memoryId: string): Promi
   throw new GraphQLError('Approval and integrity verification are not applicable to encrypted memories.', { extensions: { code: 'ENCRYPTED_MEMORY_NOT_APPLICABLE', memoryId } });
 }
 
-function nodeNotFound(nodeRef: string): GraphQLError {
-  return new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });
+function nodeNotFound(_nodeRef: string): GraphQLError {
+  return new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
 }
 
 function refusalToGraphQL(error: NodeApprovalRefusal, nodeRef: string): GraphQLError {
@@ -208,6 +209,7 @@ export const nodeApprovalMutations = {
     { nodeRef, revision }: { nodeRef: string; revision?: number | null },
     ctx: Context,
   ) => {
+    requireCallerIdentity(ctx);
     const { id, memoryId } = await resolveLiveNode(ctx, nodeRef);
     if (await isMemoryHiddenForWrite(ctx, memoryId, 'node')) throw nodeNotFound(nodeRef);
     // Authorize before looking at key availability, so a reader of an
@@ -246,6 +248,7 @@ export const nodeApprovalMutations = {
    * approved yet, in one transaction. Placeholders are skipped and reported.
    */
   approveMemoryNodes: async (_: unknown, { memoryRef }: { memoryRef: string }, ctx: Context) => {
+    requireCallerIdentity(ctx);
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
     await concealUnreadableDenial(ctx, memoryId, memoryRef, () => mayApproveNodesPreflight(ctx, memoryId));
     await requirePlainApprovalMemory(ctx, memoryId);

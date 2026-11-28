@@ -62,9 +62,9 @@ const ctx = (): Context => ({ db, roles: ['ADMIN'], userId }) as Context;
 const portal = (): Context => ({ ...ctx(), portalHumanUserId: userId }) as Context;
 const claim = (revision = 1) => ({ task: taskId, revision });
 const create = (loc: string, extra: Record<string, unknown> = {}, c: Context = ctx()) =>
-  M.createNode({}, { input: { memoryId, loc, name: loc, content: 'body', role: 'guide', ...extra } }, c);
+  M.createNode({}, { input: { memoryRef: memoryId, loc, name: loc, content: 'body', role: 'guide', ...extra } }, c);
 const update = (loc: string, extra: Record<string, unknown> = {}, c: Context = ctx()) =>
-  M.updateNode({}, { input: { memoryId, loc, ...extra } }, c);
+  M.updateNode({}, { input: { memoryRef: memoryId, loc, ...extra } }, c);
 const stored = (loc: string, memory = memoryId) => db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc, memoryId: memory } } });
 const tombstone = (id: unknown) => db.node.update({ where: { id: id as string }, data: { deletedAt: new Date() } });
 const expectRefused = async (promise: Promise<unknown>, code: string, role = 'guide') => {
@@ -144,7 +144,7 @@ describe('#3437 item 1: a task edit races a write, with no rulebook lock held', 
           return work(editTx);
         }, options);
       } });
-      editing = M.updateTaskNode({}, { input: { memoryId, loc: 'author-task', content: 'instructions v2' } }, { ...ctx(), db: observed });
+      editing = M.updateTaskNode({}, { input: { memoryRef: memoryId, loc: 'author-task', content: 'instructions v2' } }, { ...ctx(), db: observed });
       drained = Promise.allSettled([editing]);
       await vi.waitFor(async () => {
         const [{ waiting }] = await db.$queryRaw<Array<{ waiting: boolean }>>`
@@ -167,7 +167,7 @@ describe('#3437 item 1: a task edit races a write, with no rulebook lock held', 
 
   /** Runs on its own connection inside the write's open transaction, so a lock on the task would hang here. */
   async function editTask() {
-    await M.updateTaskNode({}, { input: { memoryId, loc: 'author-task', content: 'instructions v2' } }, ctx());
+    await M.updateTaskNode({}, { input: { memoryRef: memoryId, loc: 'author-task', content: 'instructions v2' } }, ctx());
   }
 });
 
@@ -215,7 +215,7 @@ describe('#3437 item 4: the seams a `carry` context would silently open', () => 
     let specId: string;
     let specTask: string;
     const request = (rest: Record<string, unknown> = {}) => ({
-      memoryRef: draftId, nodeIds: [specId], oldText: 'cat', newText: 'dog', fields: ['content'], dryRun: true, ...rest,
+      memoryRef: draftId, nodeRefs: [specId], oldText: 'cat', newText: 'dog', fields: ['content'], dryRun: true, ...rest,
     });
     const replace = (input: Record<string, unknown>) => resolvers.Mutation.searchReplaceInSpecNodes(null, { input } as never, ctx());
 
@@ -348,7 +348,7 @@ describe('#3437 item 7: an encrypted no-op, on real ciphertext', () => {
 
   it('node replace: the same text needs no claim and keeps the stamp; a real change refuses', async () => {
     const node = await row('guide-page');
-    const input = { nodeIds: [node.id], fields: ['content'], oldText: 'cat' };
+    const input = { nodeRefs: [node.id], fields: ['content'], oldText: 'cat' };
     await M.searchReplaceInNodes({}, { input: { ...input, newText: 'cat' } }, ctx());
     await expectStampedAndCurrent('guide-page');
     const before = await row('guide-page');
@@ -358,7 +358,7 @@ describe('#3437 item 7: an encrypted no-op, on real ciphertext', () => {
 
   it('spec replace: the same text needs no claim and keeps the stamp; a real change refuses', async () => {
     const node = await row('pas:010:01');
-    const input = { memoryRef: privateId, nodeIds: [node.id], fields: ['content'], oldText: 'cat', dryRun: true };
+    const input = { memoryRef: privateId, nodeRefs: [node.id], fields: ['content'], oldText: 'cat', dryRun: true };
     const replace = (rest: Record<string, unknown>) => resolvers.Mutation.searchReplaceInSpecNodes(null, { input: { ...input, ...rest } } as never, ctx());
     const same = await replace({ newText: 'cat' }) as { plan: string };
     await replace({ newText: 'cat', dryRun: false, expectedPlan: same.plan });

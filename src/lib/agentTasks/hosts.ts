@@ -65,12 +65,18 @@ export function registrationLapsesAt(
   return new Date(r.refreshedAt.getTime() + checkIns * r.pollIntervalSeconds * 1000);
 }
 
-/** Is the registration live at `now`, under its App's lapse count? Inclusive, like a session's window. */
+/**
+ * Is the registration live at `now`, under its App's lapse count? Inclusive, like a session's window. A registration
+ * stamped lost is never live: before #5259 only a lapse stamped it, after which the window had passed anyway; removing a
+ * host (#5259) ends its registration at once, inside the window (hrn:node:hadronmemory.com:specs:cor:agt:070:01). Every
+ * SQL reader of liveness carries the same `lost_at IS NULL`.
+ */
 export function isRegistrationLive(
-  r: { refreshedAt: Date; pollIntervalSeconds: number },
+  r: { refreshedAt: Date; pollIntervalSeconds: number; lostAt: Date | null },
   now: Date,
   checkIns: number = HOST_LAPSE_CHECK_INS_DEFAULT,
 ): boolean {
+  if (r.lostAt) return false;
   return registrationLapsesAt(r, checkIns).getTime() >= now.getTime();
 }
 
@@ -326,6 +332,7 @@ async function loadLaunchableAssignments(
     LEFT JOIN agent_task_stall_schedule s ON s.app_id = r.app_id
     WHERE ${where}
       AND ${ASSIGNMENT_IN_EFFECT}
+      AND r.lost_at IS NULL
       AND r.refreshed_at + make_interval(secs => r.poll_interval_seconds * ${LAPSE_SQL}) >= ${toNaiveUtc(now)}::timestamp
     ORDER BY 1, 2, 3`;
 }

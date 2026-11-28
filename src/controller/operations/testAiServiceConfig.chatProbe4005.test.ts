@@ -400,8 +400,10 @@ describe('spend accounting', () => {
     expect(r.chat).toEqual({ status: 'PASS' });
     const events = await db.usageEvent.findMany({ where: { type: { in: ['ai-config-test', 'ai-config-test-chat'] } } });
     expect(events.map((e) => [e.type, e.keyOwnerType, e.organizationId, (e.tokensIn ?? 0) + (e.tokensOut ?? 0)]).sort()).toEqual([
-      ['ai-config-test', 'HADRON_SERVER', org.id, 25],
-      ['ai-config-test-chat', 'HADRON_SERVER', org.id, 25],
+      // #5020 (cor:dmo:170:05): the platform's own config has no owner of the work, so no billable account; the quota below is
+      // still reserved from the caller's active organization (ruling 2).
+      ['ai-config-test', 'HADRON_SERVER', null, 25],
+      ['ai-config-test-chat', 'HADRON_SERVER', null, 25],
     ]);
     expect((await db.quotaCounter.findFirstOrThrow({ where: { scopeId: org.id, action: 'llm.tokens' } })).used).toBe(50);
   });

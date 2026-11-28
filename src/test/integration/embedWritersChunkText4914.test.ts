@@ -79,7 +79,7 @@ async function embedInto(embeddingSource: 'abstract' | 'contentChunks' | 'both')
 
   const { id: nodeId } = await resolvers.Mutation.createNode(
     {},
-    { input: { memoryId: memory.id, loc: 'secret', name: 'secret', content: CONTENT, abstract: ABSTRACT } } as never,
+    { input: { memoryRef: memory.id, loc: 'secret', name: 'secret', content: CONTENT, abstract: ABSTRACT } } as never,
     ctx,
   );
   await idle();
@@ -131,7 +131,7 @@ describe('#4914 what the embed writers store in chunk_text for an encrypted, ack
 
     const before = await abstractVector(nodeId);
     // A re-embed takes the writer's ON CONFLICT branch, which must store none either.
-    await resolvers.Mutation.updateNode({}, { input: { id: nodeId, abstract: `${ABSTRACT} Edited.` } } as never, ctx);
+    await resolvers.Mutation.updateNode({}, { input: { ref: nodeId, abstract: `${ABSTRACT} Edited.` } } as never, ctx);
     await idle();
     expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).embeddingWorkToken, 'the re-embed completed').toBeNull();
     expect(await storedRows(nodeId)).toEqual(onlyAbstract);

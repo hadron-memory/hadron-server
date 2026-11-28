@@ -86,7 +86,7 @@ describe('#3280 independent user ceiling on item-folded run reach', () => {
     if (door === 'mcp-list') expect((await getMemoryAccess(db, backed.principal)).has(id)).toBe(false);
     else if (door === 'graphql-ids') expect(await getAccessibleMemoryIds({ ...backed.principal })).not.toContain(id);
     else {
-      const args = { filter: { memoryIds: [id] }, limit: 10, ...(door === 'keyword' ? { query: 'needle3278', mode: 'keyword' } : {}) };
+      const args = { filter: { memoryRefs: [id] }, limit: 10, ...(door === 'keyword' ? { query: 'needle3278', mode: 'keyword' } : {}) };
       const withItem = await Q.findNodes({}, args, { ...backed.principal });
       await db.agentMemoryItem.delete({ where: { agentId_memoryId: { agentId: f.agent.id, memoryId: id } } });
       const without = await Q.findNodes({}, args, { ...backed.principal });
@@ -229,7 +229,7 @@ describe('#3280 independent user ceiling on item-folded run reach', () => {
   });
 
   it('item-only user-backed flow loading is refused', async () => {
-    expect(await rejection(loadFlowNode(db, urn(f.read), f.org.id, backed.principal as Context))).toMatchObject({ message: expect.stringContaining('not readable') });
+    expect(await rejection(loadFlowNode(db, urn(f.read), { organizationId: f.org.id }, backed.principal as Context))).toMatchObject({ message: expect.stringContaining('not readable') });
   });
   it('item-only user-backed file write is refused before object storage', async () => {
     vi.mocked(putObject).mockClear();

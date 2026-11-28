@@ -70,7 +70,7 @@ describe('#632 real principal access matrix', () => {
     const readable = await getAccessibleMemoryIds(c.principal);
     const eligible = await db.memory.findMany({ where: { id: { in: readable }, organizationId: orgId, isEncrypted: false, deletedAt: null }, select: { id: true } });
     const ids = eligible.map(m => m.id);
-    const engine = ids.length ? await Q.findNodes({}, { query: queryText, mode: 'keyword', filter: { memoryIds: ids }, limit: 20, expand: 0 }, c.principal) : { hits: [] };
+    const engine = ids.length ? await Q.findNodes({}, { query: queryText, mode: 'keyword', filter: { memoryRefs: ids }, limit: 20, expand: 0 }, c.principal) : { hits: [] };
     const expected = engine.hits.map((h: any) => emitNodeUrnV2(h.node.memory.urn, h.node.loc)).sort();
     const actual = await call(c, { limit: 20 });
     expect(actual.hits.map(h => h.urn).sort()).toEqual(expected);
@@ -119,7 +119,7 @@ describe('#632 real principal access matrix', () => {
       const out = await call(c, { query: '  orchard  ', memoryUrn: `hrn:mem:${memories.attached.urn}` });
       expect(out.hits.map(h => h.urn)).toEqual([emitNodeUrnV2(memories.attached.urn, 'attached')]);
       expect(spy).toHaveBeenCalledTimes(1);
-      expect(spy.mock.calls[0][1]).toMatchObject({ query: 'orchard', mode: 'keyword', filter: { memoryIds: [memories.attached.id] }, limit: 10, expand: 0, includeTotal: false });
+      expect(spy.mock.calls[0][1]).toMatchObject({ query: 'orchard', mode: 'keyword', filter: { memoryRefs: [memories.attached.id] }, limit: 10, expand: 0, includeTotal: false });
       expect(spy.mock.calls[0][2]).toMatchObject({ clientId: c.principal.clientId, appId, userId });
       expect(c.log).toHaveBeenCalledTimes(1);
       expect(c.log).toHaveBeenCalledWith('hadron_find_nodes (1 results)');
@@ -165,7 +165,7 @@ describe('#632 adapter fences, inherited-base scoping and paging (shares the mod
     const secret = await node(base.id, 'base-must-not-escape');
     const local = await node(child.id, 'child-local');
     const c = await context(false);
-    const engine = await Q.findNodes({}, { query: queryText, mode: 'keyword', filter: { memoryIds: [child.id] }, limit: 20 }, c.principal);
+    const engine = await Q.findNodes({}, { query: queryText, mode: 'keyword', filter: { memoryRefs: [child.id] }, limit: 20 }, c.principal);
     expect(engine.hits.map((h: any) => h.node.id), 'control: the shared engine really widens to this base').toContain(secret.id);
     const out = await call(c, { memoryUrn: `hrn:mem:${child.urn}`, limit: 20 });
     expect(out.hits.map(h => h.urn)).toEqual([emitNodeUrnV2(child.urn, local.loc)]);
@@ -213,7 +213,7 @@ describe('#632 adapter fences, inherited-base scoping and paging (shares the mod
     for (let i = 0; i < childCount; i++) locals.push(await node(child.id, `weak-child-${i}`, { name: 'weak child', content: 'crowd632', description: null, abstract: null }));
     for (let i = 0; i < baseCount; i++) await node(base.id, `strong-${i}`, { name: 'crowd632 '.repeat(20), content: 'crowd632 '.repeat(100), description: null, abstract: null });
     const c = await context(false);
-    const first = await Q.findNodes({}, { query: 'crowd632', mode: 'keyword', filter: { memoryIds: [child.id] }, limit: 10 }, c.principal);
+    const first = await Q.findNodes({}, { query: 'crowd632', mode: 'keyword', filter: { memoryRefs: [child.id] }, limit: 10 }, c.principal);
     expect(first.hits).toHaveLength(10);
     expect(first.hits.some((h: any) => locals.some(local => local.id === h.node.id)), 'control: inherited hits crowd out every child on the first page').toBe(false);
     const spy = vi.spyOn(Q, 'findNodes');

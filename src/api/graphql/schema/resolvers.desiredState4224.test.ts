@@ -21,6 +21,7 @@ import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { decideDesiredState, type DesiredStateFacts } from '../../../lib/desiredState/desiredState.js';
 import { resolvers, type Context } from './resolvers.js';
+import { ensureAgentTeamHost, joinHostForKey } from '../../../test/agentTeamHost.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -128,8 +129,11 @@ beforeEach(async () => {
   orca2 = await mkKey('orca2');
   plainKey = await mkKey('plain');
   revokedScopeKey = await mkKey('revoked-scope');
+  await joinHostForKey(db, orca1.id, 'orca1');
   await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, ctx(admin.id));
+  await joinHostForKey(db, orca2.id, 'orca2');
   await M.grantAppKeyScope({}, { id: orca2.id, scope: 'host:operate', hostId: 'orca2' }, ctx(admin.id));
+  await joinHostForKey(db, revokedScopeKey.id, 'orca1');
   await M.grantAppKeyScope({}, { id: revokedScopeKey.id, scope: 'host:operate', hostId: 'orca1' }, ctx(admin.id));
   await M.revokeAppKeyScope({}, { id: revokedScopeKey.id, scope: 'host:operate' }, ctx(admin.id));
   await M.registerHost({}, { input: { appRef: app.id, label: 'Orca 1', pollIntervalSeconds: 600, workers: [
@@ -309,6 +313,8 @@ describe('#4248: which workers a host runs follows hostSetupSource', () => {
   });
 
   it('SERVER: a host with assignments and no registration has them; a host with neither is not found', async () => {
+    // #5259: a host joined to the App (its record), that never registered.
+    await ensureAgentTeamHost(db, app.id, 'orca3');
     await assign('Ada', 'orca3', 'hadron-server/ada', 'claude');
     await source('SERVER');
     expect(await names('orca3')).toEqual(['Ada']);
@@ -610,6 +616,7 @@ describe('#4224 cost', () => {
       if (i % 3 === 0) await task({ id }, i % 2 ? 'started' : 'pending');
     }
     const big = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: `h-${generateId()}`, keyPreview: 'abcd' }, select: { id: true } });
+    await joinHostForKey(db, big.id, 'big');
     await M.grantAppKeyScope({}, { id: big.id, scope: 'host:operate', hostId: 'big' }, ctx(admin.id));
     await M.registerHost({}, { input: { appRef: app.id, label: 'Big', pollIntervalSeconds: 600, workers: ids.map((w) => ({ worker: w, family: 'claude', worktrees: ['wt'] })) } }, keyCtx(big));
     await state(keyCtx(big), 'big'); // warm

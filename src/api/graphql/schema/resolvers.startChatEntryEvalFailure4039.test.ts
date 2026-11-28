@@ -21,6 +21,7 @@ vi.mock('../../../lib/edge-conditions/index.js', async (importOriginal) => ({
 
 const M = resolvers.Mutation as any;
 let agentId: string;
+let appId: string;
 let admin: { id: string };
 const ctx = (): Context => ({ db, roles: ['ADMIN'], userId: admin.id }) as Context;
 
@@ -31,8 +32,9 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
   const created = await M.createAgent({}, { orgRef: org.id, name: 'eval-agent', visibility: 'ORGANIZATION' }, ctx());
   agentId = created.id;
+  // #5394: the start runs under a named App (the no-App manager route is retired), so the fixture installs one.
+  appId = (await db.app.create({ data: { name: 'eval-app', urn: `${org.urn}:eval-app`, organizationId: org.id, appAgents: { create: { agentId } } } })).id;
   const rows = [
-    { loc: 'conversations', data: null },
     { loc: 'conversations:a', data: { stageOrder: ['s'], entryCondition: { '<': [{ var: 'memory.age' }, 5] } }, seq: 1 },
     { loc: 'conversations:a:s', data: {}, content: 'p' },
     { loc: 'conversations:b', data: { stageOrder: ['s'] }, seq: 2 },
@@ -47,7 +49,7 @@ beforeEach(async () => {
 describe('#4039 an evaluator failure refuses the start', () => {
   it('TYPE_MISMATCH: refused with the type_mismatch messageId; the scan does not skip to the next conversation; no value, URN or edge id in the detail', async () => {
     const before = { memories: await db.memory.count(), nodes: await db.node.count() };
-    const err = await M.startChat({}, { agentRef: agentId }, ctx()).then(() => null, (e: any) => e);
+    const err = await M.startChat({}, { agentRef: agentId, appRef: appId }, ctx()).then(() => null, (e: any) => e);
     expect(err?.extensions).toMatchObject({
       code: 'ENTRY_CONDITION_FAILED', reason: 'TYPE_MISMATCH', messageId: 'chat-start.error.type_mismatch',
       detail: { conversation: 'a', field: 'memory.age', operator: '<' },

@@ -85,6 +85,12 @@ BEGIN
 
   EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM %I', serve);
   EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %I', serve);
+  -- #5212: the one writer of user_merges is an owner-owned SECURITY DEFINER function whose EXECUTE is revoked from PUBLIC
+  -- (prisma/user-merge-record-invariants.sql); the serve role needs this grant to call it. Guarded: a database that has not
+  -- yet applied the migration has no function.
+  IF to_regprocedure('public.hadron_record_user_merge(text, text, text, text, jsonb)') IS NOT NULL THEN
+    EXECUTE format('GRANT EXECUTE ON FUNCTION public.hadron_record_user_merge(text, text, text, text, jsonb) TO %I', serve);
+  END IF;
 
   -- Applies to objects created by the role running this script (the migrator),
   -- which must stay the only creator.

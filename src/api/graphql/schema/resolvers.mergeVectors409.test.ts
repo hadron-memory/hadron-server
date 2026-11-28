@@ -26,7 +26,7 @@ async function seed(loc = 'relocate', nodeType = 'info') {
     chunkIndex: 0, charStart: 0, charEnd: 21, chunkText: 'source secret payload', embedding: q }]);
   return node;
 }
-const rawMerge = (database = db) => mergeMemoryGraph(database, { sourceMemoryId: source.id, targetMemoryId: target.id,
+const rawMerge = (database = db) => mergeMemoryGraph(database, { ownerLimitCaller: null, sourceMemoryId: source.id, targetMemoryId: target.id,
   fields: new Set(['CONTENT']), deleteSourceMem: false, editor: { userId: actorId, info: null } });
 const vectorOpts = () => ({ memoryIds: [source.id], queryEmbedding: q, limit: 10 });
 
@@ -74,10 +74,10 @@ describe('#409 merge vector isolation', () => {
     expect(rows).toEqual([{ memoryId: target.id, kind: 'abstract' }]);
     const reader: Context = { db, userId: readerId, roles: ['READER'] };
     for (const mode of ['vector', 'hybrid'] as const) {
-      const out = await resolvers.Query.findNodes({}, { query: 'payload', mode, filter: { memoryIds: [source.id] } }, reader);
+      const out = await resolvers.Query.findNodes({}, { query: 'payload', mode, filter: { memoryRefs: [source.id] } }, reader);
       expect(out.hits).toEqual([]);
     }
-    const chunks = await resolvers.Query.findNodes({}, { query: 'payload', mode: 'vector', granularity: 'chunk', filter: { memoryIds: [source.id] } }, reader);
+    const chunks = await resolvers.Query.findNodes({}, { query: 'payload', mode: 'vector', granularity: 'chunk', filter: { memoryRefs: [source.id] } }, reader);
     expect(chunks.passages).toEqual([]);
     expect(await vectorSearchNodes(db, { ...vectorOpts(), memoryIds: [target.id] })).toHaveLength(1);
   });

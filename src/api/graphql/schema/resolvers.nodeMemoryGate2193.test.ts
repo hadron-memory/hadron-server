@@ -193,7 +193,7 @@ describe('#2193 — controls that keep their memory', () => {
   it('createNode returns its memory to the writer', async () => {
     const r = await post(await keyFor('admin'),
       'mutation($i: CreateNodeInput!) { createNode(input: $i) { id memory { id name } } }',
-      { i: { memoryId: mem.know, loc: `notes:new-${n}`, name: 'new' } });
+      { i: { memoryRef: mem.know, loc: `notes:new-${n}`, name: 'new' } });
     expect(r.errors).toBeUndefined();
     expect(r.data.createNode.memory).toEqual({ id: mem.know, name: 'Know' });
   });
@@ -237,7 +237,7 @@ describe('#2193 — other Node parents: Node.memory still answers as Query.memor
     // A cross-memory edge, so the two endpoints sit under different record gates.
     await db.edge.create({ data: { memoryId: mem.know!, sourceId: node.know!, targetId: node.handoff!, loc: `edges:e-${n}` } });
     for (const [who, bearer] of await allBearers()) {
-      const r = await post(bearer, 'query($o: ID) { edges(orgId: $o, limit: 50) { items { loc source { id memoryId memory { id } } target { id memoryId memory { id } } } } }', { o: org.id });
+      const r = await post(bearer, 'query($o: ID) { edges(orgRef: $o, limit: 50) { items { loc source { id memoryId memory { id } } target { id memoryId memory { id } } } } }', { o: org.id });
       expect(r.errors, `${who}: edges`).toBeUndefined();
       const items = r.data.edges.items as Array<{ loc: string; source: any; target: any }>;
       const e = items.find((x) => x.loc === `edges:e-${n}`);
@@ -248,12 +248,8 @@ describe('#2193 — other Node parents: Node.memory still answers as Query.memor
         expect(e!.target, `${who}: target`).toMatchObject({ id: node.handoff, memory: { id: mem.work } });
       }
       if (who === 'reader') {
-        // Stated up front: the org reader sees the edge and its knowledge-node
-        // source with that memory's record; the target sits in the working
-        // memory the reader may not read (nodeBatch pins the same denial).
-        expect(e, 'reader: the edge').toBeDefined();
-        expect(e!.source, 'reader: source').toMatchObject({ id: node.know, memory: { id: mem.know } });
-        expect(e!.target, 'reader: target').toBeNull();
+        // The target sits in the working memory the reader may not read (nodeBatch pins the same denial), so the edge is absent (hadron-internal#79).
+        expect(e, 'reader: the edge').toBeUndefined();
       }
       if (e) await memoryMatchesOracle(who, bearer, [e.source, e.target].filter(Boolean));
     }

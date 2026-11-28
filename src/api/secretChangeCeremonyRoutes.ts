@@ -34,7 +34,7 @@ const assert=async opt=>{
  return{ceremonyId:opt.ceremonyId,credentialId:b64(c.rawId),authenticatorData:b64(c.response.authenticatorData),clientDataJson:b64(c.response.clientDataJSON),signature:b64(c.response.signature)};
 };
 const endedText=state=>({completed:'This change was already completed.',withdrawn:'This request was withdrawn. Open a new request if you still need the change.',expired:'This request expired. Open a new change request.',stale:'The secret changed. Open a new change request.',declined:'This request was declined. Open a new request if you still need the change.'})[state]||'This request is no longer available. Open a new change request.';
-const completionText=s=>({DELETE:'The secret was deleted.',SET_PROTECTED:'Protection is now on.',CLEAR_PROTECTED:'Protection is now off.'})[s.operation]||'Completed: '+s.change+'.';
+const completionText=s=>({DELETE:'The secret was deleted.',SET_PROTECTED:'Protection is now on.',CLEAR_PROTECTED:'Protection is now off.',SET_DELETE_AFTER_USE:'The secret may now be deleted after use.',CLEAR_DELETE_AFTER_USE:'The secret is no longer deleted after use.'})[s.operation]||'Completed: '+s.change+'.';
 start.onclick=async()=>{
  start.disabled=true;status.textContent='';
  try{
@@ -44,7 +44,13 @@ start.onclick=async()=>{
   const dl=document.createElement('dl');
   const row=(label,value)=>{const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=label;dd.textContent=String(value);dl.append(dt,dd);};
   row('Change',out.summary.change);row('Secret',out.summary.secret);row('App',out.summary.app);
-  if(out.summary.operation==='STORE')row('New metadata',JSON.stringify(out.summary.metadata));
+  // #5295 blind seat: only a plain object gets the readable entries render. Object.entries(null) throws (where the
+  // old JSON.stringify rendered the word "null"), and arrays/strings are not metadata maps — those fall back to
+  // JSON.stringify, the exact text the page showed before, so the summary can never kill the page.
+  const m=out.summary.metadata;
+  if(m!==undefined)row('New metadata',m!==null&&typeof m==='object'&&!Array.isArray(m)
+   ?Object.entries(m).map(([k,v])=>k+': '+(v!==null&&typeof v==='object'?JSON.stringify(v):String(v))).join('; ')||'(none)'
+   :JSON.stringify(m));
   if(out.summary.sizeBytes!==null)row('Value size',new Intl.NumberFormat().format(out.summary.sizeBytes)+' bytes');
   const expiry=new Date(out.summary.expiresAt);
   row('Request expires',new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'long'}).format(expiry)+' ('+Intl.DateTimeFormat().resolvedOptions().timeZone+')');

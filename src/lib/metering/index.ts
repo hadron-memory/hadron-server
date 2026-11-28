@@ -20,6 +20,11 @@ import { Prisma } from '../../generated/prisma/index.js';
 import type { AiModelPrice, PrismaClient, UsageEvent } from '../../generated/prisma/index.js';
 import type { AiConfigOwnerType } from '../aiConfig.js';
 import { generateId } from '../id.js';
+import { PRICE_CACHE_TTL_MS, priceCache } from './priceCache.js';
+import { ownerColumns, ownerWhere, sameOwner, type OwnedRow, type OwnerRef } from '../owner.js';
+import { appendForLiveOwner, LedgerOwnerDeletedError } from './ledgerOwner.js';
+
+export { LedgerOwnerDeletedError } from './ledgerOwner.js';
 
 /** Ledger entry kinds (string column, validated here — no enum by design). */
 export const LEDGER_KINDS = ['grant', 'debit', 'adjustment'] as const;
@@ -40,31 +45,31 @@ const MTOK = 1_000_000n;
 export const HOST_PRICED_PROVIDERS: ReadonlySet<string> = new Set(['openai-compatible']);
 
 /** FR-006: automatic usage debits are OFF unless explicitly enabled. */
-function debitEnabled(): boolean {
+export function debitEnabled(): boolean {
   const raw = process.env.BILLING_DEBIT_ENABLED?.trim().toLowerCase();
   return raw === 'true' || raw === '1';
 }
 
 /** FR-006: markup applied to platform-key cost when debiting; default 0%. */
+// #5216 (item 2): the recorded markup is an Int4 column, so a value whose basis points exceed it must not reach the insert
+// (it would drop the unit). It falls back to 0, like junk, and warns once per process without echoing the value.
+const MARKUP_BP_MAX = 2147483647;
+let markupEnvWarned = false;
 function markupPercent(): number {
-  const raw = Number(process.env.CREDIT_MARKUP_PERCENT);
-  return Number.isFinite(raw) && raw >= 0 ? raw : 0;
+  const rawText = process.env.CREDIT_MARKUP_PERCENT;
+  const raw = Number(rawText);
+  if (Number.isFinite(raw) && raw >= 0 && Math.round(raw * 100) <= MARKUP_BP_MAX) return raw;
+  // Unset or empty is the plain default; only a set, unusable value is a misconfiguration worth a line.
+  if (rawText !== undefined && rawText.trim() !== '' && !markupEnvWarned) {
+    markupEnvWarned = true;
+    console.warn('credit_markup_percent_env_invalid');
+  }
+  return 0;
 }
 
 // ── Price lookup (FR-002) ────────────────────────────────────────────────
 
-interface CachedPrice {
-  row: AiModelPrice | null;
-  fetchedAt: number;
-}
-
-const PRICE_CACHE_TTL_MS = 60_000;
-const priceCache = new Map<string, CachedPrice>();
-
-/** Test hook: drop the price cache (e.g. after seeding AiModelPrice rows). */
-export function clearPriceCache(): void {
-  priceCache.clear();
-}
+export { clearPriceCache, PRICE_CACHE_TTL_MS } from './priceCache.js';
 
 /**
  * Pricing tiers are 1-3 (Holger, 2026-07-11) — schema headroom for future
@@ -76,8 +81,11 @@ export const PRICE_TIER_MAX = 3;
 export const PRICE_TIER_DEFAULT = 1;
 
 export interface GetAiModelPriceOpts {
-  /** Event instant; omit for "now" (the cached hot path). */
+  /** A historical instant; bypasses the cache. Omit for the current price (the cached hot path). */
   at?: Date;
+  /** #5021: the instant the caller is pricing NOW, on the cached path (recordLlmUsage passes the unit's own recorded
+   * instant, gate ruling 5). Defaults to the clock. Ignored when `at` is given. */
+  now?: Date;
   /** Pricing tier 1-3; defaults to tier 1. */
   tier?: number;
 }
@@ -89,9 +97,14 @@ export interface GetAiModelPriceOpts {
  * defaults to 1; there is deliberately NO cross-tier fallback — an unpriced
  * tier under-bills (cost NULL) rather than billing at another tier's rate.
  *
- * A 60s TTL cache serves the hot path (`at` = now); calls with an explicit
+ * A 60s TTL cache serves the hot path (`at` omitted); calls with an explicit
  * historical `at` bypass the cache, since the cached row is the CURRENT
- * price and may postdate `at`.
+ * price and may postdate `at`. #5021: a cache entry also holds the effective
+ * instant of the next row for its key and is not served from that instant
+ * on, so every process switches to a new row at its effective instant (a
+ * new row is always written at least one cache lifetime ahead, so a process
+ * whose entry predates the write has expired by then). Soft-deleted rows are
+ * still skipped (gate ruling 1); after #5021's trigger no row can be marked.
  */
 export async function getAiModelPrice(
   db: PrismaClient,
@@ -101,18 +114,35 @@ export async function getAiModelPrice(
 ): Promise<AiModelPrice | null> {
   const { at } = opts;
   const tier = opts.tier ?? PRICE_TIER_DEFAULT;
-  const now = Date.now();
-  const useCache = at === undefined;
-  const key = `${provider} ${model} ${tier}`;
-  if (useCache) {
-    const hit = priceCache.get(key);
-    if (hit && now - hit.fetchedAt < PRICE_CACHE_TTL_MS) return hit.row;
+  if (at !== undefined) {
+    return db.aiModelPrice.findFirst({
+      where: { provider, model, tier, deletedAt: null, effectiveAt: { lte: at } },
+      orderBy: { effectiveAt: 'desc' },
+    });
   }
-  const row = await db.aiModelPrice.findFirst({
-    where: { provider, model, tier, deletedAt: null, effectiveAt: { lte: at ?? new Date(now) } },
-    orderBy: { effectiveAt: 'desc' },
-  });
-  if (useCache) priceCache.set(key, { row, fetchedAt: now });
+  const now = (opts.now ?? new Date()).getTime();
+  const key = `${provider} ${model} ${tier}`;
+  const hit = priceCache.get(key);
+  if (
+    hit &&
+    now >= hit.fetchedAt &&
+    now - hit.fetchedAt < PRICE_CACHE_TTL_MS &&
+    (hit.nextEffectiveAt === null || now < hit.nextEffectiveAt)
+  ) {
+    return hit.row;
+  }
+  const [row, next] = await Promise.all([
+    db.aiModelPrice.findFirst({
+      where: { provider, model, tier, deletedAt: null, effectiveAt: { lte: new Date(now) } },
+      orderBy: { effectiveAt: 'desc' },
+    }),
+    db.aiModelPrice.findFirst({
+      where: { provider, model, tier, deletedAt: null, effectiveAt: { gt: new Date(now) } },
+      orderBy: { effectiveAt: 'asc' },
+      select: { effectiveAt: true },
+    }),
+  ]);
+  priceCache.set(key, { row, fetchedAt: now, nextEffectiveAt: next ? next.effectiveAt.getTime() : null });
   return row;
 }
 
@@ -156,6 +186,19 @@ export function markupBpFor(price: Pick<AiModelPrice, 'markupBasisPoints'>): num
 
 // ── Usage recording (FR-001/003/004) ─────────────────────────────────────
 
+/**
+ * #5020 (cor:dmo:170:05, :07): unit types that are never debited to anyone, whatever key served them. Embedding is
+ * infrastructure the host pays for. One exported constant, so the debit gate and a pin read the same list.
+ */
+export const NEVER_DEBITED_TYPES: ReadonlySet<string> = new Set(['embedding']);
+
+/** The two billable-account columns a unit records: one set from the account, or both null when the work has no owner. */
+function billableColumns(account: OwnerRef | null): { organizationId: string | null; billableUserId: string | null } {
+  if (account == null) return { organizationId: null, billableUserId: null };
+  const cols = ownerColumns(account);
+  return { organizationId: cols.organizationId, billableUserId: cols.ownerUserId };
+}
+
 export interface LlmUsageParams {
   /** UsageEvent.type, e.g. 'app-run' | 'embedding'. */
   type: string;
@@ -173,8 +216,13 @@ export interface LlmUsageParams {
   appId?: string | null;
   /** On-behalf-of user (FR-001); null for pure-App service runs. */
   userId?: string | null;
-  /** Billable org (FR-001). Required for a debit to happen. */
-  organizationId?: string | null;
+  /**
+   * The billable account (#5020, cor:dmo:170:05): the owner of the work, an organization or a person; null when the work has
+   * no owner (a platform admin's test of the platform's own configuration). REQUIRED, so a new caller cannot leave it out
+   * silently (the caller guard, `meteringCallers5020.test.ts`, lists how each names it). Written to `organizationId` or
+   * `billableUserId`, and the debit goes to that owner's ledger.
+   */
+  billableAccount: OwnerRef | null;
   provider: string;
   model: string;
   tokensIn: number;
@@ -205,15 +253,31 @@ export async function recordLlmUsage(
   params: LlmUsageParams,
 ): Promise<UsageEvent | null> {
   try {
+    // #1660 review (local P2-1): the event is stamped at the instant its
+    // activity was judged, so it cannot count for a session that lapsed after.
+    // #5021 (gate ruling 5): the instant is taken FIRST and the unit is priced
+    // at it, so a unit stamped just after a new row's effective time is never
+    // priced from the old row.
+    const at = new Date();
     const price = HOST_PRICED_PROVIDERS.has(params.provider)
       ? null
-      : await getAiModelPrice(db, params.provider, params.model, { tier: params.tier });
+      : await getAiModelPrice(db, params.provider, params.model, { tier: params.tier, now: at });
     const cost = price
       ? computeCostMicroCents(price, params.tokensIn, params.tokensOut)
       : null;
-    // #1660 review (local P2-1): the event is stamped at the instant its
-    // activity was judged, so it cannot count for a session that lapsed after.
-    const at = new Date();
+    // The debit condition, decided once: it gates both the markup the unit
+    // records and the debit itself (#5021, cor:dmo:170:06), so the two cannot
+    // disagree. Whether the debit then succeeded is read from the ledger.
+    const charged =
+      price != null &&
+      cost != null &&
+      cost > 0n &&
+      debitEnabled() &&
+      params.keyOwnerType === 'HADRON_SERVER' &&
+      // cor:dmo:170:05: an embedding is never debited to anyone, whatever key served it.
+      !NEVER_DEBITED_TYPES.has(params.type) &&
+      params.billableAccount != null;
+    const markupBasisPoints = charged ? markupBpFor(price) : null;
     // #1653 / DY-2: counts toward liveness only for a live, owned session.
     // The same door as every attributed request (#1660 review, Cloe P3):
     // counts for a live owned session, and a pure App key's own lapsed
@@ -232,37 +296,58 @@ export async function recordLlmUsage(
         createdAt: at,
         appId: params.appId ?? null,
         userId: params.userId ?? null,
-        organizationId: params.organizationId ?? null,
+        // #5020: exactly one of the two columns, or neither (chk_usage_event_one_billable). `ownerColumns` refuses an owner
+        // that names both or neither before the insert.
+        ...billableColumns(params.billableAccount),
         provider: params.provider,
         model: params.model,
         tokensIn: params.tokensIn,
         tokensOut: params.tokensOut,
         keyOwnerType: params.keyOwnerType ?? null,
         costMicroCents: cost,
+        // #5021 (cor:dmo:170:06): the row that priced the unit and the markup
+        // of its charge; both null when the unit is unpriced or not charged.
+        priceRowId: price?.id ?? null,
+        markupBasisPoints,
+        // #5021 (gate ruling 9): the run, in the same insert.
+        appRunId: params.appRunId ?? null,
         createdBy: params.createdBy ?? null,
     };
-    const event = params.appRunId && cost != null
-      ? await db.$transaction(async (tx) => {
+    const insert = () => params.appRunId && cost != null
+      ? db.$transaction(async (tx) => {
           const created = await tx.usageEvent.create({ data });
           // A run minted before the column keeps NULL (unknown): `not: null` skips it.
           await tx.appRun.updateMany({ where: { id: params.appRunId!, costMicroCents: { not: null } }, data: { costMicroCents: { increment: cost } } });
           return created;
         })
-      : await db.usageEvent.create({ data });
-    if (
-      debitEnabled() &&
-      params.keyOwnerType === 'HADRON_SERVER' &&
-      cost != null &&
-      cost > 0n &&
-      params.organizationId
-    ) {
-      await debitCredits(db, {
-        organizationId: params.organizationId,
-        amountMicroCents: applyMarkupBp(cost, markupBpFor(price!)),
-        sourceType: 'usage-event',
-        sourceId: event.id,
-        createdBy: params.createdBy ?? null,
-      });
+      : db.usageEvent.create({ data });
+    let event: Awaited<ReturnType<typeof insert>>;
+    try {
+      event = await insert();
+    } catch (err) {
+      // #5216 (item 1): the run row was hard-deleted, so its foreign key refuses the insert. The unit is still real spend
+      // (cor:dmo:170:05/:06): record it once more without the run, which is the state the run's SET NULL key would give it.
+      // Only a violation on `app_run_id` retries; any other key still drops the unit as before (known gap, #5246).
+      const field = err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2003' ? String(err.meta?.field_name ?? err.meta?.constraint ?? '') : '';
+      if (!params.appRunId || !/app_run_id/.test(field)) throw err;
+      data.appRunId = null;
+      event = await db.usageEvent.create({ data });
+    }
+    if (charged) {
+      try {
+        await debitCredits(db, {
+          owner: params.billableAccount!,
+          amountMicroCents: applyMarkupBp(cost!, markupBasisPoints!),
+          sourceType: 'usage-event',
+          sourceId: event.id,
+          createdBy: params.createdBy ?? null,
+        });
+      } catch (err) {
+        // #5352 (hrn:node:hadronmemory.com:specs:cor:dmo:170:08): the owner was deleted, so the debit is refused and writes
+        // nothing; the usage that caused it stays recorded as usage (the event above), and the event is returned.
+        if (!(err instanceof LedgerOwnerDeletedError)) throw err;
+        console.warn('metering.debit_refused_owner_deleted', { usageEventId: event.id });
+      }
     }
     return event;
   } catch (err) {
@@ -360,7 +445,7 @@ function requireSource(sourceType: string | null | undefined, sourceId: string |
 }
 
 interface LedgerInsert {
-  organizationId: string;
+  owner: OwnerRef;
   kind: LedgerKind;
   amountMicroCents: bigint;
   expiresAt: Date | null;
@@ -368,6 +453,8 @@ interface LedgerInsert {
   sourceId: string;
   note: string | null;
   createdBy: string | null;
+  /** Unset: the database default (the insert's own instant). See {@link GrantCreditsParams.createdAt}. */
+  createdAt?: Date;
 }
 
 /**
@@ -375,15 +462,16 @@ interface LedgerInsert {
  * same amount and the same kind (hrn:node:hadronmemory.com:specs:cor:dmo:170:03,
  * plus kind, #5007). The pair is unique across the WHOLE ledger, so without the
  * kind an adjustment reusing a grant's pair would get the grant back as a
- * success. `expiresAt` is deliberately not compared (#5007 ruling 5, A4). A6
- * adds the person owner here, null-safely, in this one place.
+ * success. `expiresAt` is deliberately not compared (#5007 ruling 5, A4). The owner is
+ * compared by its class, null-safely, in `sameOwner` (#5014): an organization's entry
+ * never equals a person's, and two persons' entries never equal each other.
  */
 function isSameLedgerEntry(
-  existing: { organizationId: string; amountMicroCents: bigint; kind: string },
-  params: Pick<LedgerInsert, 'organizationId' | 'amountMicroCents' | 'kind'>,
+  existing: OwnedRow & { amountMicroCents: bigint; kind: string },
+  params: Pick<LedgerInsert, 'owner' | 'amountMicroCents' | 'kind'>,
 ): boolean {
   return (
-    existing.organizationId === params.organizationId &&
+    sameOwner(existing, params.owner) &&
     existing.amountMicroCents === params.amountMicroCents &&
     existing.kind === params.kind
   );
@@ -396,8 +484,12 @@ function isSameLedgerEntry(
  * disagreement is {@link IdempotencyConflictError}, never silently absorbed.
  */
 async function insertOrReplay(db: PrismaClient, params: LedgerInsert) {
+  const { owner, ...rest } = params;
   try {
-    return await db.creditLedgerEntry.create({ data: { id: generateId(), ...params } });
+    // #5352: the owner is judged under its row lock in the insert's own transaction; a deleted owner writes nothing and
+    // throws LedgerOwnerDeletedError. A unique violation rolls that transaction back and is judged below, on `db`.
+    return await appendForLiveOwner(db, owner, (tx) =>
+      tx.creditLedgerEntry.create({ data: { id: generateId(), ...ownerColumns(owner), ...rest } }));
   } catch (err) {
     if ((err as { code?: string }).code !== 'P2002') throw err;
     const existing = await db.creditLedgerEntry.findFirstOrThrow({
@@ -409,10 +501,14 @@ async function insertOrReplay(db: PrismaClient, params: LedgerInsert) {
 }
 
 export interface GrantCreditsParams {
-  organizationId: string;
+  /** The account: an organization or a person (hrn:node:hadronmemory.com:specs:cor:dmo:170:01). */
+  owner: OwnerRef;
   /** Positive micro-cents. */
   amountMicroCents: bigint;
-  /** Policy field only in Phase 0 (FR-005). */
+  /**
+   * When the grant expires (#5011, hrn:node:hadronmemory.com:specs:cor:dmo:170:10): enforced by
+   * ./settleExpiredGrants.ts. The mutation refuses one not later than now; the library stores what it is given.
+   */
   expiresAt?: Date | null;
   /**
    * Idempotency + provenance pair, required (#5007): e.g. ('stripe-checkout',
@@ -425,6 +521,13 @@ export interface GrantCreditsParams {
   sourceId: string;
   note?: string | null;
   createdBy?: string | null;
+  /**
+   * The entry's date; unset is the insert's own instant. A server-written grant made by a read is dated at that read's
+   * instant (#5022, the default monthly grant), so the read's replay at that instant includes it (QA P3 on #5317: the replay
+   * takes grants with createdAt <= its instant, and an insert dated a moment later fell outside `expiring`). Not reachable
+   * from the grantCredits mutation, whose input has no such field.
+   */
+  createdAt?: Date;
 }
 
 /**
@@ -440,7 +543,7 @@ export async function grantCredits(db: PrismaClient, params: GrantCreditsParams)
   }
   requireSource(params.sourceType, params.sourceId);
   return insertOrReplay(db, {
-    organizationId: params.organizationId,
+    owner: params.owner,
     kind: 'grant',
     amountMicroCents: params.amountMicroCents,
     expiresAt: params.expiresAt ?? null,
@@ -448,11 +551,13 @@ export async function grantCredits(db: PrismaClient, params: GrantCreditsParams)
     sourceId: params.sourceId,
     note: params.note ?? null,
     createdBy: params.createdBy ?? null,
+    ...(params.createdAt ? { createdAt: params.createdAt } : {}),
   });
 }
 
 export interface AdjustCreditsParams {
-  organizationId: string;
+  /** The account: an organization or a person. */
+  owner: OwnerRef;
   /** Signed, non-zero micro-cents (a refund is negative). */
   amountMicroCents: bigint;
   /** Required, non-blank: the idempotency + provenance pair. */
@@ -481,7 +586,7 @@ export async function adjustCredits(db: PrismaClient, params: AdjustCreditsParam
     throw new InvalidLedgerAmountError('note is required and must not be blank.');
   }
   return insertOrReplay(db, {
-    organizationId: params.organizationId,
+    owner: params.owner,
     kind: 'adjustment',
     amountMicroCents: params.amountMicroCents,
     expiresAt: null,
@@ -493,7 +598,8 @@ export async function adjustCredits(db: PrismaClient, params: AdjustCreditsParam
 }
 
 export interface DebitCreditsParams {
-  organizationId: string;
+  /** The account: an organization or a person. */
+  owner: OwnerRef;
   /** Positive micro-cents; stored negated. */
   amountMicroCents: bigint;
   sourceType?: string | null;
@@ -512,10 +618,11 @@ export async function debitCredits(db: PrismaClient, params: DebitCreditsParams)
   if (params.amountMicroCents <= 0n) {
     throw new InvalidLedgerAmountError('debitCredits requires a positive amountMicroCents.');
   }
-  return db.creditLedgerEntry.create({
+  // #5352: refused (LedgerOwnerDeletedError, nothing written) when the owner is deleted; see ./ledgerOwner.ts.
+  return appendForLiveOwner(db, params.owner, (tx) => tx.creditLedgerEntry.create({
     data: {
       id: generateId(),
-      organizationId: params.organizationId,
+      ...ownerColumns(params.owner),
       kind: 'debit',
       amountMicroCents: -params.amountMicroCents,
       sourceType: params.sourceType ?? null,
@@ -523,16 +630,16 @@ export async function debitCredits(db: PrismaClient, params: DebitCreditsParams)
       note: params.note ?? null,
       createdBy: params.createdBy ?? null,
     },
-  });
+  }));
 }
 
-/** Org balance = SUM over the append-only ledger; 0n for an empty ledger. */
-export async function creditBalance(db: PrismaClient, organizationId: string): Promise<bigint> {
+/** An account's balance = SUM over its append-only ledger (an organization's or a person's); 0n for an empty ledger. */
+export async function creditBalance(db: PrismaClient, owner: OwnerRef): Promise<bigint> {
   const agg = await db.creditLedgerEntry.aggregate({
-    // deletedAt null: soft-delete is break-glass ops; the balance follows
-    // the codebase-wide soft-deleted-is-gone semantic. Sanctioned
+    // deletedAt null: since #5010 the database refuses a soft-deleted entry (cor:dmo:170:08), so this only keeps
+    // the balance unchanged where that migration refused (HDPRF) and the old schema is still served. Sanctioned
     // corrections are `adjustment` rows, which DO count.
-    where: { organizationId, deletedAt: null },
+    where: { ...ownerWhere(owner), deletedAt: null },
     _sum: { amountMicroCents: true },
   });
   return agg._sum.amountMicroCents ?? 0n;

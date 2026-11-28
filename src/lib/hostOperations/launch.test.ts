@@ -20,6 +20,7 @@ import { APP_KEY_PREFIX, hashAppKey, validateSessionBinding, type AuthContext } 
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { ownsSession } from '../sessionOwnership.js';
 import { hashLaunchGrant, LAUNCH_GRANT_PREFIX, LAUNCH_GRANT_TTL_MS } from './launch.js';
+import { joinHostForKey } from '../../test/agentTeamHost.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -90,6 +91,7 @@ beforeEach(async () => {
   kit = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId, name: 'Kit', slug: 'kit', heldByUserId: holder.id, heldAt: new Date(), reportsToWorkerId: ada.id }, select: { id: true } });
   orca1 = await mkKey('orca1');
   plainKey = await mkKey('plain');
+  await joinHostForKey(db, orca1.id, 'orca1');
   await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager.id));
   await M.registerHost({}, {
     input: { appRef: app.id, label: 'Orca', pollIntervalSeconds: 600, workers: [{ worker: kit.id, family: 'claude', worktrees: ['hadron-server/kit'] }] },
@@ -228,7 +230,7 @@ describe('the grant (Holger\'s ruling A, Rook #10734)', () => {
       throw new Error('expected a refusal');
     };
     const real = await env(foreign.id);
-    expect(real).toBe(JSON.stringify({ m: `Worker not found: ${foreign.id}`, x: { code: 'WORKER_NOT_FOUND' } }));
+    expect(real).toBe(JSON.stringify({ m: 'Worker not found', x: { code: 'WORKER_NOT_FOUND' } })); // #5168: no ref quoted
     await db.worker.delete({ where: { id: foreign.id } });
     expect(await env(foreign.id)).toBe(real);
     // A caller's mistake fails nothing: the start stands and the holder still binds the grant's worker.

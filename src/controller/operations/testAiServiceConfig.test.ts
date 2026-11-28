@@ -283,7 +283,9 @@ describe('testAiServiceConfig (#1378)', () => {
     const r = await test(cfg.id, platformAdmin);
     expect(r.ok).toBe(true);
     const event = await db.usageEvent.findFirstOrThrow({ where: { type: 'ai-config-test' } });
-    expect([event.keyOwnerType, event.organizationId]).toEqual(['HADRON_SERVER', org.id]);
+    // #5020: the platform's own config has no billable account (the caller's active organization is not the owner of the
+    // work), but the quota is still reserved from that organization (ruling 2).
+    expect([event.keyOwnerType, event.organizationId, event.billableUserId]).toEqual(['HADRON_SERVER', null, null]);
     const counter = await db.quotaCounter.findFirstOrThrow({ where: { scopeId: org.id, action: 'llm.tokens' } });
     expect(counter.used).toBe(13);
   });

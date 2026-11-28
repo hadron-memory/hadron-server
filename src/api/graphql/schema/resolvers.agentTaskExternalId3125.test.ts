@@ -1,7 +1,9 @@
 /**
  * #3125 S2 (V29, V45, V46; hrn:node:hadronmemory.com:specs:cor:agt:120:02, Proposed): `AgentTask.externalId`, the
- * claim on an outside item. Optional, set once at create, unique within an App whatever the first task's state,
- * compared exactly as written. The duplicate refusal names no task and can only ever concern the caller's own App.
+ * claim on an outside item. Optional, set once at create, compared exactly as written. At most one ACTIVE task (backlog,
+ * pending or started) per App holds a given value; a finished or cancelled task keeps it but no longer blocks a new claim
+ * (the 2026-11-14 amendment, #4217; pinned in resolvers.agentTaskExternalIdActive4217.test.ts). The duplicate refusal
+ * names no task and can only ever concern the caller's own App.
  * Filterable in `agentTasks(externalId:)` inside the App read gate. GraphQL only (#2937).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -97,7 +99,7 @@ describe('externalId round-trip (#3125 S2)', () => {
 
   it('a child task may carry an externalId, under the same per-App rule', async () => {
     const parent = await create({ assignee: { user: owner.id } });
-    const child = await M.createAgentTask({}, { input: { parentTaskId: parent.id, title: 'child', externalId: X } }, ctx());
+    const child = await M.createAgentTask({}, { input: { parentTaskRef: parent.id, title: 'child', externalId: X } }, ctx());
     expect(await externalIdOf(child.id)).toBe(X);
     await expect(create({ externalId: X })).rejects.toMatchObject({ extensions: { code: 'TASK_EXTERNAL_ID_TAKEN' } });
   });

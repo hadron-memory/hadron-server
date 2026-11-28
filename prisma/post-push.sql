@@ -214,6 +214,13 @@ ALTER TABLE apps
 ALTER TABLE apps
   ADD CONSTRAINT chk_app_owner_xor
   CHECK ((organization_id IS NULL) <> (owner_user_id IS NULL));
+-- #5077 (Billing F3a): a run states exactly one owner, copied from its App. Synced with
+-- the 20261127160000 and 20261127160200 migrations.
+ALTER TABLE app_runs
+  DROP CONSTRAINT IF EXISTS chk_app_run_owner_xor;
+ALTER TABLE app_runs
+  ADD CONSTRAINT chk_app_run_owner_xor
+  CHECK ((organization_id IS NULL) <> (owner_user_id IS NULL));
 -- Ruling DY-5: a dormancy threshold is a positive number of days. Synced with
 -- the 20261005010000 migration + src/test/globalSetup.ts.
 ALTER TABLE apps
@@ -472,15 +479,32 @@ ALTER TABLE principals
 -- which a generated column rejects; the wrapper is the standard workaround.
 -- IF NOT EXISTS (structural, like the HNSW index); changing the expression or
 -- weights needs a dedicated DROP+ADD migration — this won't update it in place.
+-- #5137: an unclosed `<!--` makes the default parser quadratic (every opener rescans to the end of the text for a `-->`
+-- that is not there: 16 KB of `<!--` is about 200 ms, 49 KB over a second, and it keeps burning after the client gives up).
+-- An opener with no `-->` after it is not a comment to the parser: it indexes exactly like `<! -` (verified over 400000
+-- random strings drawn from `<!--`, `-->`, `<!-`, `<!---`, `-5`, `<a `, `&amp;` and words: identical tsvectors). The
+-- replacement keeps the length and cannot re-form an opener with a following `-` (`<!-` would: `<!---` -> `<!--`, still quadratic, #5140
+-- local P1). So every `<!--` after the LAST `-->` is rewritten to `<! -` before parsing; a `<!--` before the last `-->` finds its closer at once and stays.
+-- Same tokens, weights and positions, so the search signal does not change; no refusal; no row is rewritten.
+CREATE OR REPLACE FUNCTION hadron_tsv_unclosed_comment(t text)
+RETURNS text LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path = public, pg_temp AS $$
+  SELECT CASE
+    WHEN position('<!--' in t) = 0 THEN t
+    WHEN position('-->' in t) = 0 THEN replace(t, '<!--', '<! -')
+    ELSE left(t, length(t) - position('>--' in reverse(t)) - 1)
+      || replace(right(t, position('>--' in reverse(t)) + 1), '<!--', '<! -')
+  END
+$$;
+
 CREATE OR REPLACE FUNCTION hadron_nodes_tsv(
   p_name text, p_alias text, p_loc text, p_tags text[],
   p_description text, p_abstract text, p_content text, p_properties text, p_data text
-) RETURNS tsvector LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+) RETURNS tsvector LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path = public, pg_temp AS $$
   SELECT
-    setweight(to_tsvector('english', coalesce(p_name, '') || ' ' || coalesce(p_alias, '')), 'A') ||
-    setweight(to_tsvector('english', coalesce(p_loc, '') || ' ' || array_to_string(coalesce(p_tags, ARRAY[]::text[]), ' ')), 'B') ||
-    setweight(to_tsvector('english', coalesce(p_description, '') || ' ' || coalesce(p_abstract, '')), 'C') ||
-    setweight(to_tsvector('english', left(coalesce(p_content, '') || ' ' || coalesce(p_properties, '') || ' ' || coalesce(p_data, ''), 1000000)), 'D')
+    setweight(to_tsvector('english', hadron_tsv_unclosed_comment(coalesce(p_name, '') || ' ' || coalesce(p_alias, ''))), 'A') ||
+    setweight(to_tsvector('english', hadron_tsv_unclosed_comment(coalesce(p_loc, '') || ' ' || array_to_string(coalesce(p_tags, ARRAY[]::text[]), ' '))), 'B') ||
+    setweight(to_tsvector('english', hadron_tsv_unclosed_comment(coalesce(p_description, '') || ' ' || coalesce(p_abstract, ''))), 'C') ||
+    setweight(to_tsvector('english', hadron_tsv_unclosed_comment(left(coalesce(p_content, '') || ' ' || coalesce(p_properties, '') || ' ' || coalesce(p_data, ''), 1000000))), 'D')
 $$;
 
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS tsv tsvector GENERATED ALWAYS AS (
@@ -765,6 +789,18 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #2659: the append-only record of a deleted user API key.
 \ir user-api-key-deletion-invariants.sql
 
+-- #5010: the credit ledger is append-only. One source, shared verbatim with migration
+-- 20261125130000_credit_ledger_append_only (pinned by src/test/migrations/creditLedgerAppendOnly5010.test.ts).
+\ir credit-ledger-invariants.sql
+
+-- #5021: price rows are kept (no DELETE, no content UPDATE; audit ids follow a recorded merge). One source, shared
+-- verbatim with migration 20261126080400_ai_model_prices_kept (pinned by src/test/migrations/priceRowKept5021.test.ts).
+\ir ai-model-price-invariants.sql
+
+-- #5212: the one writer of user_merges. One source, shared verbatim with migration 20261126070000_user_merge_record_function
+-- (pinned by src/test/migrations/userMergeRecord5212.test.ts). After the tables it reads: users, user_merges, user_merge_consents.
+\ir user-merge-record-invariants.sql
+
 -- #430: the Git-mirror obligation's shape (closed error classes) and its attempt sequence.
 \ir git-mirror-obligation-invariants.sql
 
@@ -914,6 +950,16 @@ CREATE INDEX IF NOT EXISTS usage_events_session_activity_idx
 CREATE INDEX IF NOT EXISTS agent_team_events_person_activity_idx
   ON agent_team_events (actor_user_id, app_id, created_at) WHERE actor_worker_id IS NULL AND task_id IS NOT NULL;
 
+-- #5011 (Billing A4): expiring grants by organization, for the settlement probe and the hourly expiry job. Partial, so
+-- Prisma's schema language can't model it. Same definition as migration
+-- 20261125140000_credit_ledger_expiring_grants_idx, which builds it CONCURRENTLY for production.
+CREATE INDEX IF NOT EXISTS credit_ledger_entries_expiring_grants_idx
+  ON credit_ledger_entries (organization_id, expires_at) WHERE expires_at IS NOT NULL;
+-- #5014 (Billing A6): its owner_user_id twin, for a person's ledger. Same definition as migration
+-- 20261125170000_credit_ledger_person_expiring_grants_idx (CONCURRENTLY there).
+CREATE INDEX IF NOT EXISTS credit_ledger_entries_person_expiring_grants_idx
+  ON credit_ledger_entries (owner_user_id, expires_at) WHERE expires_at IS NOT NULL;
+
 -- #4273: the worker-liveness read (workerActivitySql) keeps a worker's open sessions and the ended ones that end at or after
 -- its latest start; these two partial indexes serve those ranges. Same definitions as migrations
 -- 20261115290000_sessions_worker_ended_idx and 20261115291000_sessions_worker_started_idx (built CONCURRENTLY there).
@@ -959,6 +1005,10 @@ CREATE TRIGGER agent_clone_audits_immutable
 -- 20261115140000_host_worker_assignments (pinned by src/api/graphql/schema/resolvers.hostAssignment4222.test.ts). After
 -- worker-reference-invariants.sql, whose fence function its trigger uses.
 \ir host-assignment-invariants.sql
+
+-- #5259: the hosts of a team App and their settings. One source, shared verbatim with migration
+-- 20261126160000_agent_team_hosts (pinned by src/api/graphql/schema/resolvers.agentTeamHost5259.test.ts).
+\ir agent-team-host-invariants.sql
 
 -- S12 explicit reporting choice (legacy UNSET retained).
 \ir worker-team-choice-invariants.sql
@@ -1010,6 +1060,11 @@ ON CONFLICT (id) DO NOTHING;
 
 -- #451: delete-path FK columns need a leading index (the same statements as the four 20261031110x migrations).
 CREATE INDEX IF NOT EXISTS "usage_events_node_id_idx" ON "usage_events"("node_id");
+
+-- #5020 (Billing A13, cor:dmo:170:05): a usage event names at most one billable account. The migration
+-- 20261126090000_usage_events_billable_user adds the same constraint NOT VALID and 20261126090200 validates it.
+ALTER TABLE "usage_events" DROP CONSTRAINT IF EXISTS "chk_usage_event_one_billable";
+ALTER TABLE "usage_events" ADD CONSTRAINT "chk_usage_event_one_billable" CHECK (num_nonnulls("organization_id", "billable_user_id") <= 1);
 CREATE INDEX IF NOT EXISTS "sessions_agent_id_idx" ON "sessions"("agent_id");
 CREATE INDEX IF NOT EXISTS "sessions_memory_id_idx" ON "sessions"("memory_id");
 CREATE INDEX IF NOT EXISTS "agents_organization_id_idx" ON "agents"("organization_id");
@@ -1028,6 +1083,9 @@ CREATE INDEX IF NOT EXISTS "agent_team_events_pr_frozen_head_idx"
 -- #3649 slice B: grant signing requests, append-only grant signature records, the grant stale trigger. One source, shared
 -- verbatim with migration 20261109200000_grant_signing (after grant-invariants.sql: the tables it guards reference grants).
 \ir grant-signing-invariants.sql
+
+-- #5001: the selection tables' guards and the selection-version widening of the signing CHECKs; after grant-signing-invariants.sql.
+\ir grant-selection-signing-invariants.sql
 
 -- #3999: secret change requests. Verbatim with migration 20261120180000_secret_change_requests.
 \ir secret-change-requests-invariants.sql
@@ -1104,3 +1162,21 @@ ALTER TABLE chat_tool_teardown_intents ADD CONSTRAINT chk_chat_tool_teardown_sta
 
 -- #5009 (Billing A7a): the owner-limit rows.
 \ir owner-limit-invariants.sql
+
+-- #5018 (Billing A14): a node's recorded size, kept by triggers on nodes and node_revisions.
+\ir node-bytes-invariants.sql
+
+-- #5078 (Billing A7d): per-memory live node totals: the triggers, then a refill no node write can fall into.
+\ir memory-node-total-invariants.sql
+BEGIN;
+LOCK TABLE nodes IN SHARE ROW EXCLUSIVE MODE;
+DELETE FROM memory_node_pending;
+INSERT INTO memory_node_totals (memory_id, live_nodes)
+  SELECT memory_id, count(*) FILTER (WHERE deleted_at IS NULL) FROM nodes GROUP BY memory_id
+  ON CONFLICT (memory_id) DO UPDATE SET live_nodes = EXCLUDED.live_nodes;
+UPDATE memory_node_totals t SET live_nodes = 0
+  WHERE t.live_nodes <> 0 AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.memory_id = t.memory_id);
+COMMIT;
+
+-- #5096: pin every guard function's search path; LAST, after every file above that (re)creates a function.
+\ir guard-search-path-invariants.sql

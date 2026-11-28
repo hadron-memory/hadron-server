@@ -31,6 +31,7 @@ import { runAsActor } from '../lib/requestActor.js';
 import { UrnNotQualifiedError } from '../lib/urn.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { isTrustedRefusal } from '../api/graphql/formatError.js';
+import { refusalText } from '../lib/refEcho.js';
 
 type Row = Record<string, any>;
 type Resolver<A, R> = (parent: unknown, args: A, ctx: Context) => Promise<R>;
@@ -69,7 +70,7 @@ const M = resolvers.Mutation as unknown as {
   unsubscribeWorker: Resolver<{ tickerRef: string; workerRef: string }, { subscription: Row; announcement: string | null }>;
   setWorkerWakeSettings: Resolver<{ workerRef: string; input: Row }, Row>;
   acknowledgeWakes: Resolver<{ proofs: string[] }, { acknowledged: number; unchanged: number }>;
-  acknowledgeDeliveryBatches: Resolver<{ batchIds: string[]; through?: Array<{ channelId: string; seq: number }> }, { acknowledged: number; unchanged: number }>;
+  acknowledgeDeliveryBatches: Resolver<{ batchIds: string[]; through?: Array<{ channelRef: string; seq: number }> }, { acknowledged: number; unchanged: number }>;
 };
 const FT = tickerFieldResolvers.Ticker;
 const FW = tickerFieldResolvers.WorkerWakeSettings;
@@ -87,6 +88,17 @@ export const TICKER_WRITE_TOOLS = [
  */
 export const TICKER_READ_TOOLS = ['hadron_ticker_list', 'hadron_agent_ticker_template_list', 'hadron_worker_wake_settings', 'hadron_due_wakes', 'hadron_delivery_settings_get', 'hadron_team_chat_inbox'] as const;
 
+/** #5080: the tools keep their `channelIds` input; the GraphQL input names the same list `channelRefs`. */
+export function mcpTickerInput<T extends Record<string, unknown> & { channelIds?: unknown }>(input: T): Omit<T, 'channelIds'> & { channelRefs?: unknown } {
+  const { channelIds, ...rest } = input;
+  return channelIds === undefined ? rest : { ...rest, channelRefs: channelIds };
+}
+
+/** #5080: `hadron_team_chat_inbox_ack` keeps `through[].channelId`; the GraphQL input names it `channelRef`. */
+export function mcpAckThrough(through: Array<{ channelId: string; seq: number }>) {
+  return through.map(({ channelId, seq }) => ({ channelRef: channelId, seq }));
+}
+
 function textResult(text: string, isError = false) {
   return { ...(isError ? { isError: true as const } : {}), content: [{ type: 'text' as const, text }] };
 }
@@ -98,7 +110,7 @@ function refusal(e: unknown) {
     const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
     return textResult([`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n'), true);
   }
-  if (e instanceof UrnNotQualifiedError) return textResult(`[bad_user_input] ${e.message}`, true);
+  if (e instanceof UrnNotQualifiedError) return textResult(`[bad_user_input] ${refusalText(e)}`, true);
   throw e;
 }
 
@@ -264,7 +276,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     SHAPE_HADRON_TICKER_CREATE,
     async ({ session, appRef, ...input }) =>
       write('hadron_ticker_create', session, async (ctx) => {
-        const t = await M.createTicker({}, { appRef, input }, ctx);
+        const t = await M.createTicker({}, { appRef, input: mcpTickerInput(input) }, ctx);
         return `Created.\n\n${await renderTicker(t, ctx)}${renderTaskWarnings(ctx.taskWarnings)}`;
       }),
   );
@@ -276,7 +288,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     SHAPE_HADRON_TICKER_UPDATE,
     async ({ session, ref: r, ...input }) =>
       write('hadron_ticker_update', session, async (ctx) => {
-        const t = await M.updateTicker({}, { ref: r, input }, ctx);
+        const t = await M.updateTicker({}, { ref: r, input: mcpTickerInput(input) }, ctx);
         return `Updated.\n\n${await renderTicker(t, ctx)}`;
       }),
   );
@@ -432,7 +444,7 @@ export function registerTickerTools(server: McpServer, deps: { db: PrismaClient;
     SHAPE_HADRON_TEAM_CHAT_INBOX_ACK,
     async ({ session, batchIds, through }) => {
       const ack = async (ctx: Context) => {
-        const r = await M.acknowledgeDeliveryBatches({}, { batchIds, through }, session ? { ...ctx, sessionId: session, sessionBindingRefused: false } : ctx);
+        const r = await M.acknowledgeDeliveryBatches({}, { batchIds, ...(through ? { through: mcpAckThrough(through) } : {}) }, session ? { ...ctx, sessionId: session, sessionBindingRefused: false } : ctx);
         return `Acknowledged ${r.acknowledged}${r.unchanged ? ` (${r.unchanged} already delivered)` : ''}.`;
       };
       // A host key acts as itself and names no session; anyone else is a write and needs a session, like hadron_ack_wakes.

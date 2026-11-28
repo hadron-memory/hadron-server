@@ -338,10 +338,10 @@ export async function resolveScopeMemoryRefs(ctx: Context, memoryRefs: string[])
     try {
       ({ id } = await resolveMemoryRef(ctx.db, ref));
     } catch {
-      throw badInput(`No match for memoryRef "${ref}".`);
+      throw badInput('No match for memoryRef.');
     }
     if (!accessible.includes(id)) {
-      throw badInput(`No match for memoryRef "${ref}".`);
+      throw badInput('No match for memoryRef.');
     }
     if (!ids.includes(id)) ids.push(id);
   }
@@ -583,14 +583,14 @@ export async function resolveSearchScope(
       if (!args.appId) {
         // The second clause is a FACT about scope ids, not an instruction in
         // one surface's vocabulary: an id is a value every caller can supply.
-        throw new GraphQLError(`Resolving scope "${named}" by name needs an App context; a scope id needs none.`, {
+        throw new GraphQLError('Resolving a scope by name needs an App context; a scope id needs none.', {
           extensions: { code: 'BAD_USER_INPUT', missing: 'appContext' },
         });
       }
       const r = await resolveScopeByNameInApp(ctx, named, args.appId);
       if (r.ambiguousAmong.length) {
         throw new GraphQLError(
-          `"${named}" is owned by ${r.ambiguousAmong.length} Agents installed in this App; pass the scope id to choose one: ${r.ambiguousAmong.map((s) => s.id).join(', ')}.`,
+          `That scope name is owned by ${r.ambiguousAmong.length} Agents installed in this App; pass the scope id to choose one: ${r.ambiguousAmong.map((s) => s.id).join(', ')}.`,
           { extensions: { code: 'SCOPE_NAME_AMBIGUOUS', candidates: r.ambiguousAmong.map((s) => s.id) } },
         );
       }
@@ -600,7 +600,7 @@ export async function resolveSearchScope(
       scope = row && (await canReadScope(ctx, row)) ? row : null;
     }
     if (!scope) {
-      throw new GraphQLError(`No readable scope matches "${named}".`, { extensions: { code: 'NOT_FOUND' } });
+      throw new GraphQLError('No readable scope matches.', { extensions: { code: 'NOT_FOUND' } });
     }
     return scopeView(ctx, scope, 'call');
   }
@@ -785,7 +785,7 @@ export async function resolveNamedScopeForQuery(
   }
   const r = await resolveSearchScope(ctx, { scopeArg, appId, ambient: false, activeOrg });
   // Unreachable: a named scope always resolves or throws.
-  if (!r) throw new GraphQLError(`No readable scope matches "${scopeArg}".`, { extensions: { code: 'NOT_FOUND' } });
+  if (!r) throw new GraphQLError('No readable scope matches.', { extensions: { code: 'NOT_FOUND' } });
   return r;
 }
 
@@ -814,7 +814,7 @@ export interface RunScopeSnapshot {
  */
 export async function resolveScopeForTrigger(ctx: Context, appId: string, scopeRef: string): Promise<string> {
   const ref = scopeRef.trim();
-  const refuse = () => badInput(`No readable scope matches "${ref}" in this App's context.`);
+  const refuse = () => badInput("No readable scope matches in this App's context.");
   const context = await appContextIfReadable(ctx, appId);
   if (!context) throw refuse();
   let scope: Scope | null = await ctx.db.scope.findFirst({ where: { id: ref, deletedAt: null } });
@@ -822,7 +822,7 @@ export async function resolveScopeForTrigger(ctx: Context, appId: string, scopeR
     const r = await resolveScopeByNameInApp(ctx, ref, appId);
     if (r.ambiguousAmong.length) {
       throw new GraphQLError(
-        `"${ref}" is owned by ${r.ambiguousAmong.length} Agents installed in this App; pass the scope id: ${r.ambiguousAmong.map((s) => s.id).join(', ')}.`,
+        `That scope name is owned by ${r.ambiguousAmong.length} Agents installed in this App; pass the scope id: ${r.ambiguousAmong.map((s) => s.id).join(', ')}.`,
         { extensions: { code: 'SCOPE_NAME_AMBIGUOUS', candidates: r.ambiguousAmong.map((s) => s.id) } },
       );
     }

@@ -8,6 +8,14 @@
  * remaining reader off the columns and stops every writer; the columns stay in
  * the schema (no migration) until PR 2 drops them.
  *
+ * PR 2 (#5063, migration 20261125030000_drop_memory_corpus_columns) dropped them: C1a and C1b now
+ * assert the memory row has no such field at all (src/test/migrations/corpusColumnDrop5063.test.ts
+ * pins the drop itself), and C2's "minted node, no stamp" state is the only state there is.
+ *
+ * Naming and numbering (#5088 F11): the file keeps its #1613 name because it was written against the #1613 remainder
+ * and is cited by that name elsewhere; its pins belong to #5063 (PR 1 of that remainder). There is no C3 pin. The
+ * numbers are kept as they are, because other comments cite C2, C2b, C4, C5 and C6 by number.
+ *
  * The pins read the legacy columns by raw SQL, so they are red on main exactly
  * where main still writes them (C1) or keys behavior on them (C2), and green
  * where main already behaves correctly (C4–C6, controls):
@@ -38,7 +46,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../integrations/db/client.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, createMintMarker } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { lockMintedSpecUnmarks } from './mintedSpecPermanence.js';
@@ -73,14 +81,8 @@ async function specNode(memoryId: string, loc: string, extra: Record<string, unk
  * own. Shape is the one `chk_node_mint_complete` admits for a backfilled
  * marker: `minted_at` set, owner-info only, no mint revision/hash.
  */
-async function mintMarker(memoryId: string, loc: string) {
-  return db.node.create({
-    data: {
-      id: generateId(), memoryId, loc, name: loc,
-      content: 'minted elsewhere; tombstoned', role: 'info', nodeType: 'info',
-      tags: [], mintedAt: MINT, mintedByInfo: 'test', deletedAt: MINT,
-    },
-  });
+function mintMarker(memoryId: string, loc: string) {
+  return createMintMarker(db, memoryId, { loc, mintedAt: MINT, role: 'info', nodeType: 'info' });
 }
 
 /** The mint path the way a caller drives it: approve every node, then mint. */
@@ -96,22 +98,26 @@ beforeEach(async () => {
 });
 
 describe('#5063 C1 — nothing writes the legacy corpus columns', () => {
-  it('C1a — createMemory(draftCorpus: true) leaves corpus_draft false', async () => {
+  it('C1a — createMemory(draftCorpus: true) is accepted and writes no corpus_draft', async () => {
     const m = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'c1a', draftCorpus: true }, ctx());
-    const [row] = await db.$queryRaw<Array<{ corpus_draft: boolean }>>`
-      SELECT corpus_draft FROM memories WHERE id = ${m.id}`;
-    expect(row.corpus_draft).toBe(false);
+    // PR 2 (#5063) dropped the column: the argument is accepted and ignored, and the row has no such field.
+    const [row] = await db.$queryRaw<Array<{ r: Record<string, unknown> }>>`
+      SELECT to_jsonb(m) AS r FROM memories m WHERE id = ${m.id}`;
+    expect(row.r.id).toBe(m.id);
+    expect(row.r).not.toHaveProperty('corpus_draft');
   });
 
-  it('C1b — mintMemoryNodes leaves the stamp columns null and mints the node records', async () => {
+  it('C1b — mintMemoryNodes writes no memory stamp and mints the node records', async () => {
     const m = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'c1b' }, ctx());
     await specNode(m.id, 'c1b:010');
     await approveAll(m.id);
     await mint(m.id);
-    const [row] = await db.$queryRaw<Array<{ corpus_minted_at: Date | null; corpus_minted_by: string | null }>>`
-      SELECT corpus_minted_at, corpus_minted_by FROM memories WHERE id = ${m.id}`;
-    expect(row.corpus_minted_at).toBeNull();
-    expect(row.corpus_minted_by).toBeNull();
+    // PR 2 (#5063) dropped the stamp columns: the row has neither, and the node records hold the mint.
+    const [row] = await db.$queryRaw<Array<{ r: Record<string, unknown> }>>`
+      SELECT to_jsonb(m) AS r FROM memories m WHERE id = ${m.id}`;
+    expect(row.r.id).toBe(m.id);
+    expect(row.r).not.toHaveProperty('corpus_minted_at');
+    expect(row.r).not.toHaveProperty('corpus_minted_by');
     const n = await db.node.findFirstOrThrow({ where: { memoryId: m.id, mintedAt: { not: null } } });
     expect(n.mintedAt).toBeInstanceOf(Date);
   });
@@ -124,9 +130,13 @@ describe('#5063 C2 — the first-spec-mark conflict probe keys on the node mint,
     let written!: () => void;
     const hold = new Promise<void>((r) => { release = r; });
     const isWritten = new Promise<void>((r) => { written = r; });
-    const done = db.$transaction(async (tx) => { await writer(tx); written(); await hold; }, { timeout: 20_000 });
+    let pid = 0;
+    const done = db.$transaction(async (tx) => {
+      [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+      await writer(tx); written(); await hold;
+    }, { timeout: 20_000 });
     await isWritten;
-    return { release, done };
+    return { release, done, pid };
   }
 
   it('a memory whose node is minted but whose legacy stamp is null still conflicts with a concurrent delete', async () => {
@@ -140,15 +150,16 @@ describe('#5063 C2 — the first-spec-mark conflict probe keys on the node mint,
         content: 'draft spec', role: null, nodeType: 'info', tags: [],
       },
     });
-    // The state PR 2 leaves behind: the columns exist but nothing wrote them.
-    await db.$executeRaw`UPDATE memories SET corpus_minted_at = NULL, corpus_minted_by = NULL WHERE id = ${m.id}`;
+    // The state PR 2 (#5063) leaves behind: the node is minted and the memory has no stamp column at all.
 
     // Stand-in for deleteMemory: the row FOR UPDATE and the tombstone, held open.
-    const { release, done } = await holdOpen(async (tx) => {
+    const { release, done, pid: holderPid } = await holdOpen(async (tx) => {
       await tx.$queryRaw`SELECT id FROM memories WHERE id = ${m.id} FOR UPDATE`;
       await tx.memory.update({ where: { id: m.id }, data: { deletedAt: new Date() } });
     });
-    const marking = resolvers.Mutation.updateNode({}, { input: { id: n.id, tags: ['spec'] } } as never, ctx());
+    // Settled at once into a value, so a failing waitFor below cannot leave an unhandled rejection behind.
+    const marking = resolvers.Mutation.updateNode({}, { input: { ref: n.id, tags: ['spec'] } } as never, ctx())
+      .then(() => null as unknown, (e: unknown) => e);
     try {
       // A memory FOR SHARE wait appears while the delete holds the row (the
       // write door's own ownership FOR SHARE, and after the re-key the
@@ -158,16 +169,18 @@ describe('#5063 C2 — the first-spec-mark conflict probe keys on the node mint,
       // SUCCEEDS; only the re-keyed probe (a minted node exists) makes the
       // marking lose this race.
       await vi.waitFor(async () => {
+        // Any backend blocked by the stand-in delete's backend, by pid (not by matching SQL text). The holder only
+        // touches the memory row, so what waits on it is the marking's memory FOR SHARE.
         const waits = await db.$queryRaw<Array<{ pid: number }>>`
           SELECT pid FROM pg_stat_activity
-          WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FROM memories WHERE id%FOR SHARE%'`;
+          WHERE datname = current_database() AND ${holderPid}::int = ANY(pg_blocking_pids(pid))`;
         expect(waits.length).toBeGreaterThan(0);
       }, { timeout: 5_000, interval: 25 });
     } finally { release(); }
     await done;
-    await expect(marking).rejects.toSatisfy(
-      (e: unknown) => e instanceof GraphQLError && e.extensions.code === 'NODE_WRITE_CONFLICT',
-    );
+    const outcome = await marking;
+    expect(outcome).toBeInstanceOf(GraphQLError);
+    expect((outcome as GraphQLError).extensions.code).toBe('NODE_WRITE_CONFLICT');
     expect(await db.node.findUniqueOrThrow({ where: { id: n.id } })).toMatchObject({ tags: [] });
   }, 20_000);
 
@@ -223,8 +236,11 @@ describe('#5063 C4–C6 — controls, green on main by construction', () => {
     const m = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'c6' }, ctx());
     await specNode(m.id, 'c6:010');
     await approveAll(m.id);
+    // Backdate by a minute (an explicit updatedAt wins over @updatedAt), so the bump is visible with no sleeping.
+    // Assumes no DB trigger rewrites updated_at; the mint's bump is stamped by the app clock like this value, and a
+    // minute covers any ordinary skew between the two.
+    await db.memory.update({ where: { id: m.id }, data: { updatedAt: new Date(Date.now() - 60_000) } });
     const before = (await db.memory.findUniqueOrThrow({ where: { id: m.id } })).updatedAt;
-    await new Promise((r) => setTimeout(r, 15));
     await mint(m.id);
     const after = (await db.memory.findUniqueOrThrow({ where: { id: m.id } })).updatedAt;
     expect(after.getTime()).toBeGreaterThan(before.getTime());
@@ -250,7 +266,7 @@ describe('#5063 C5 — the dry-run spec-replace plan hash is byte-stable (R3)', 
     await db.node.create({ data: { id: N1_ID, memoryId: m.id, loc: 'c5:010', name: 'c5:010', content: 'alpha beta gamma', role: 'spec', nodeType: 'info', tags: ['spec'] } });
     await db.node.create({ data: { id: N2_ID, memoryId: m.id, loc: 'c5:020', name: 'c5:020', content: 'beta zeta', role: 'spec', nodeType: 'info', tags: ['spec'] } });
     const preview = await resolvers.Mutation.searchReplaceInSpecNodes(null, {
-      input: { memoryRef: m.id, nodeIds: [N1_ID, N2_ID], oldText: 'beta', newText: 'delta', fields: ['content'], dryRun: true },
+      input: { memoryRef: m.id, nodeRefs: [N1_ID, N2_ID], oldText: 'beta', newText: 'delta', fields: ['content'], dryRun: true },
     } as never, ctx());
     expect(preview.plan).toMatch(/^[0-9a-f]{64}$/);
     expect(preview.plan).toBe('b7b30519c7d3f1f7f5bb5dbc11eefaffa761b37af5d1fdbcef7811b8c0ac0972');

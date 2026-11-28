@@ -91,8 +91,8 @@ async function readableChatForToolChoice(ctx: Context, chatId: string) {
     }),
     chatId,
   );
-  if (!chatNode) throw chatNotFoundError(chatId);
-  if (!(await isMemoryReadableCached(ctx, chatNode.memoryId))) throw chatNotFoundError(chatId);
+  if (!chatNode) throw chatNotFoundError();
+  if (!(await isMemoryReadableCached(ctx, chatNode.memoryId))) throw chatNotFoundError();
   return chatNode;
 }
 
@@ -103,14 +103,14 @@ export const chatbotAiConfigQueries = {
       where: { id: chatNode.memoryId },
       select: { id: true, appId: true, sharedMemoryOfAgentId: true, userMemoryOfAgentId: true },
     });
-    if (!memory) throw chatNotFoundError(chatId);
+    if (!memory) throw chatNotFoundError();
     const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
     const readable = memEncInfo.isEncrypted ? translateSessionExpired(memEncInfo.id, () => decryptNodeFields(chatNode, memEncInfo)) : chatNode;
     const storedChoice = ((readable.data as Record<string, unknown> | null) ?? {}).aiConfigChoice;
     try {
       // The Agent comes from the turn's own lookup (#4076), so a retained pointer, an uninstalled Agent, a soft-deleted
       // one and the legacy-link order all resolve exactly as the turn resolves them.
-      const { agent } = await resolveChatHomeAgent(ctx.db, memory, ctx);
+      const { agent } = await resolveChatHomeAgent(ctx.db, memory, ctx, chatNode.id);
       return await effectiveChatToolChoice(ctx.db, { appId: memory.appId, agentId: (agent as { id: string } | null)?.id ?? null, storedChoice });
     } catch (e) {
       return rethrowAiConfigTyped(e);
@@ -197,9 +197,9 @@ export async function storedChatAiConfigChoice(ctx: Context, chatId: string, app
     }),
     chatId,
   );
-  if (!chatNode || !appId) throw chatNotFoundError(chatId);
+  if (!chatNode || !appId) throw chatNotFoundError();
   const memory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId }, select: { appId: true } });
-  if (!memory || memory.appId !== appId) throw chatNotFoundError(chatId);
+  if (!memory || memory.appId !== appId) throw chatNotFoundError();
   const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
   if (memEncInfo.isEncrypted) translateSessionExpired(memEncInfo.id, () => decryptNodeFields(chatNode, memEncInfo));
   return ((chatNode.data as Record<string, unknown> | null) ?? {}).aiConfigChoice;

@@ -169,7 +169,7 @@ export async function createAssetReferenceNode(
     } as never,
     ctx,
     'create',
-    { authoring: attestedAuthoring(ctx) },
+    { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: attestedAuthoring(ctx) },
   );
 
   logAssetEvent({

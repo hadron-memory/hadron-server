@@ -26,6 +26,7 @@ import { AmbiguousLegacyUrnError } from '../lib/entityRef/errors.js';
 import { userUrn } from '../lib/userHandle.js';
 import type { AuthContext } from '../middleware/auth.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
+import { refusalText } from '../lib/refEcho.js';
 
 type Resolver<A, R> = (parent: unknown, args: A, ctx: Context) => Promise<R>;
 type Input = Record<string, unknown>;
@@ -75,7 +76,7 @@ export function questionErrorText(e: unknown) {
     const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
     return refused([`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n'));
   }
-  if (e instanceof UrnNotQualifiedError || e instanceof AmbiguousLegacyUrnError) return refused(`[bad_user_input] ${e.message}`);
+  if (e instanceof UrnNotQualifiedError || e instanceof AmbiguousLegacyUrnError) return refused(`[bad_user_input] ${refusalText(e)}`);
   throw e;
 }
 

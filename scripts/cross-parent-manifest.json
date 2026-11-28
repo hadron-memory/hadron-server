@@ -68,6 +68,7 @@
     "AiModelPriceList": "envelope",
     "CreditLedgerEntryList": "envelope",
     "CreditBalance": "value",
+    "ExpiringCredit": "value",
     "AiSpendRow": "value",
     "AiSpendSummary": "envelope",
     "NodeMintStatus": "value",
@@ -78,6 +79,7 @@
     "NodeApprovalReceipt": "envelope",
     "LintWarning": "value",
     "LintWarningPage": "envelope",
+    "SpecLintFinding": "value",
     "ApproveMemoryNodesResult": "envelope",
     "QuestionOption": "value",
     "QuestionRecommendation": "value",
@@ -614,6 +616,18 @@
       "resolver": "src/api/graphql/schema/resolvers.types.ts::sharedMemory",
       "gate": "canReadMemoryRecord"
     },
+    "App.attachedMemories": {
+      "target": "AppAttachedMemory",
+      "class": "self-gated",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::attachedMemories",
+      "gate": "holdsContentReadIndependently"
+    },
+    "AppAttachedMemory.memory": {
+      "target": "Memory",
+      "class": "parent-implies-child",
+      "audience": "Only an entry whose memory the viewer reads in their own right is listed by App.attachedMemories (holdsContentReadIndependently, per link); the field is that same row, so no entry names a memory its viewer cannot read.",
+      "resolver": "src/api/graphql/schema/resolvers.types.ts::attachedMemories"
+    },
     "App.selfJoin": {
       "target": "AppSelfJoin",
       "class": "self-gated",
@@ -911,7 +925,7 @@
     },
     "CreditLedgerEntryList.items": {
       "class": "parent-implies-child",
-      "audience": "org ADMIN of the named org or platform admin (requireOrgRole ADMIN); the org's own ledger; scalars only",
+      "audience": "an organization's ledger: org ADMIN of the named org or platform admin (requireOrgRole ADMIN); a person's ledger: that person or a platform admin, never an impersonated session or an App key, and one FORBIDDEN whether or not the person exists (requirePersonRecordRead); the named owner's own entries only; scalars only",
       "resolver": "src/api/graphql/schema/resolvers.metering.ts::requireOrgRole",
       "target": "CreditLedgerEntry"
     },
@@ -1224,6 +1238,12 @@
       "audience": "hostSetup gated by withReadableApp: App participants plus the App's own key; a host key reads only its own host's rows, a revoked host scope reads nothing (#4222)",
       "resolver": "src/api/graphql/schema/resolvers.hostAssignment.ts::withReadableApp",
       "target": "HostWorkerAssignment"
+    },
+    "JoinAgentTeamHostPayload.host": {
+      "class": "parent-implies-child",
+      "audience": "joinAgentTeamHost's caller only: a person who manages the App as themselves (createAppKey's gate); the host is the record this join just wrote (#5259)",
+      "resolver": "src/api/graphql/schema/resolvers.agentTeamHost.ts::asKeyIssuer",
+      "target": "AgentTeamHost"
     },
     "HostWorkerAssignment.worker": {
       "class": "parent-implies-child",
@@ -1758,6 +1778,18 @@
     "GrantSigningRequest.requestedBy": {
       "class": "open",
       "evidence": "#3649 slice B: the same SigningRequester shape as SigningRequest.requestedBy, shown to whoever may read the grant (#3789 read gate); the private follow-up (hadron-internal#30) covers both; details withheld",
+      "target": "SigningRequester"
+    },
+    "GrantSigningSelection.items": {
+      "class": "parent-implies-child",
+      "audience": "a caller who may read EVERY grant in the selection through the one-grant read gate (one unreadable grant, or grants of two Apps, make the selection null)",
+      "resolver": "src/api/graphql/schema/resolvers.grantSigning.ts::readableSelection",
+      "evidence": "#5001: the items are this selection's own per-grant requests, shown to a reader of all of its grants; the field resolver reads only what the parent already admitted",
+      "target": "GrantSigningRequest"
+    },
+    "GrantSigningSelection.requestedBy": {
+      "class": "open",
+      "evidence": "#5001: the same SigningRequester shape as GrantSigningRequest.requestedBy, shown to whoever may read every grant in the selection; the private follow-up (hadron-internal#30) covers all of them; details withheld",
       "target": "SigningRequester"
     },
     "PrincipalGrantsPage.items": {

@@ -1,5 +1,8 @@
 import { encryptChatEngineStateWithKey, buildEngineStateIncompleteError } from '../../../lib/chatRootEngineState.js';
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { softDeleteMemoryAssets } from '../../../lib/asset/memoryDelete.js';
+import { requireOwnerHeadroom } from '../../../lib/ownerLimits/gate.js';
+import { ownerLimitCaller } from '../../../lib/ownerLimits/nodes.js';
 import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../../../integrations/github/syncNotAttempted.js';
 import { applyOrgDefaultsAtCreation } from './resolvers.memoryConfigOrgDefault.js';
@@ -9,6 +12,7 @@ import { generateId } from '../../../lib/id.js';
 import { UrnNotQualifiedError } from '../../../lib/urn.js';
 import { AmbiguousLegacyUrnError } from '../../../lib/entityRef/errors.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
+import { nextFreeDerivedSlug } from '../../../lib/derivedSlug.js';
 import { generateUniqueHandle, ensureUserHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
 import {
@@ -108,6 +112,7 @@ import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import {
   agentSlugFromUrn,
   deriveSlugFromName,
+  UrnParseError,
   assertFullyQualifiedUrn,
   parseUrn,
   validateUserSlug,
@@ -117,7 +122,7 @@ import { GraphQLError } from 'graphql';
 import { withAuthorizedMemoryTx } from './authorizedTx.js';
 // Spec 049 §8.5 — the memory-level lock Channel creation shares with deleteMemory.
 import { lockMemoryForChannelChange } from '../../../lib/channels.js';
-import { assertNoMintedCorpusRemoval, reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
+import { assertNoMintedCorpusRemoval, reclaimTombstonedMemory, tombstoneReclaimableBy } from '../../../lib/mintedSpecPermanence.js';
 import { questionError, memoryHoldsQuestionLog } from '../../../lib/questions/index.js';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { validateMemorySchema, MemorySchemaError } from '../../../lib/memorySchema.js';
@@ -125,13 +130,13 @@ import { validateMemorySource, GitSourceError } from '../../../lib/gitSource.js'
 import { validateGitBranch, GitRefError } from '../../../lib/gitRef.js';
 import { syncGraphFromGithub } from '../../../integrations/github/syncGraphFromGithub.js';
 import { recordNodeUsage } from '../../../lib/usageRecorder.js';
-import { createNode } from '../../../controller/operations/createNode.js';
 import {
   ALL_NODE_MERGE_FIELDS,
   type NodeMergeField,
 } from '../../../lib/nodeMerge.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 import {
+  requireCallerIdentity,
   type Context,
   requireRole,
   requireOrgRole,
@@ -164,7 +169,7 @@ import {
   resolveRequiredMemoryRef,
   getAccessibleMemoryIds,
   type MergeMemoriesInput,
-  assertMemoryRootLoc,
+  deriveMemorySlug,
 } from './resolvers.helpers.js';
 import { requireOrgAction } from '../../../lib/auth/orgAction.js';
 import { isInstallMemoryRow } from '../../../lib/auth/installMemory.js';
@@ -172,7 +177,26 @@ import { installDeleteAllowed, lockInstallAuthorityFirst } from './installMemory
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { refuseBillingMemberRole } from '../../../lib/auth/billingRole.js';
 import { forbiddenError } from '../../../lib/refusals.js';
+import { isUserHolding, userHoldingCreatorMayRead } from '../../../lib/auth/userHolding.js';
 import { withFsProjectionRollback } from '../../../lib/fsProjectionRollback.js';
+
+/**
+ * #5184 — a personal or private memory with an App keeps its slug
+ * (`hrn:node:hadronmemory.com:specs:cor:dmo:060:20`, "The slug never changes",
+ * S10). `updateMemory` calls this only for a `urn` argument, after the manage
+ * gate and again on the locked row.
+ *
+ * One test on the row, so it covers memories made before the rule. The row does
+ * not record how it came by its App, so an attached memory, and a session's
+ * memory that kept its `appId`, are covered too. The display name stays free.
+ */
+function assertMemorySlugMayChange(memory: { class: string; appId: string | null }): void {
+  if (memory.appId !== null && (memory.class === 'personal' || memory.class === 'private')) {
+    throw new GraphQLError('A personal or private memory in an App keeps its slug. Its display name can be changed.', {
+      extensions: { code: 'APP_MEMORY_SLUG_FIXED', memoryClass: memory.class },
+    });
+  }
+}
 
 /**
  * #561 — refuse a `Memory.source` that is not a GitHub repository URL.
@@ -389,6 +413,7 @@ export const memoryMutations = {
       { input }: { input: MergeMemoriesInput },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       const { source: rawSource, target: rawTarget } = input;
       const deleteSourceMem = input.deleteSourceMem ?? false;
       const fields = new Set<NodeMergeField>(input.include ?? ALL_NODE_MERGE_FIELDS);
@@ -491,6 +516,7 @@ export const memoryMutations = {
           deleteSourceMem,
           editor,
           principal: ctx,
+          ownerLimitCaller: ownerLimitCaller(ctx),
         });
       } catch (e) {
         // Surface the same typed error mergeNodes does, with the offending loc.
@@ -543,6 +569,7 @@ export const memoryMutations = {
       {
         orgRef,
         name,
+        slug,
         shortDescription,
         description,
         data,
@@ -567,6 +594,7 @@ export const memoryMutations = {
         orgRef?: string | null; name: string;
         shortDescription?: string; description?: string; data?: Record<string, unknown> | null; tags?: string[];
         license?: string; category0?: string; category1?: string; category2?: string;
+        slug?: string | null;
         iconUrl?: string; heroUrl?: string; homeUrl?: string;
         source?: string | null; readBranch?: string; writeBranch?: string; visibility?: string;
         // Both are nullable in the GraphQL schema — a client may pass an
@@ -708,10 +736,8 @@ export const memoryMutations = {
         );
       }
 
-      // #2730: the root node's loc is `name`; refuse an unprojectable one here,
-      // after the gates and before ensureUserHandle, the tombstone reclaim or
-      // any create.
-      assertMemoryRootLoc(name);
+      // #5149: the name's only refusals, after the gates and before ensureUserHandle, the tombstone reclaim or any create.
+      const memorySlug = deriveMemorySlug(name, slug); // #5203 S1: a supplied slug is validated, not derived
       assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
 
       // The URN root is the owner principal's bare namespace atom — an org
@@ -726,14 +752,26 @@ export const memoryMutations = {
         : (await ctx.db.organization.findUniqueOrThrow({ where: { id: resolvedOrgId! }, select: { urn: true } })).urn;
       // #574: slugify the display name — a raw name would persist a
       // case-sensitive / space-bearing URN that can't round-trip through parseUrn.
-      const memoryUrn = `${memRoot}:${deriveSlugFromName(name)}`;
-      // Check for existing memory with the same URN
-      const existing = await ctx.db.memory.findUnique({ where: { urn: memoryUrn } });
+      // #5203 S3: a slug DERIVED from the name never refuses the create (hrn:node:hadronmemory.com:specs:cor:urn:010:01):
+      // it skips a reserved word and every row holding the URN, live or deleted, as `urn` or `legacyUrn` (the probe
+      // mintMemoryUrnV2 uses), so a deleted holder is never reclaimed and stays restorable. A SUPPLIED slug keeps
+      // today's answers below: a deleted holder is reclaimed, a live one refused CONFLICT.
+      const memoryUrn = slug != null
+        ? `${memRoot}:${memorySlug}`
+        : `${memRoot}:${await nextFreeDerivedSlug(memorySlug, async (candidate) =>
+          (await ctx.db.memory.count({
+            where: { OR: [{ urn: `${memRoot}:${candidate}` }, { legacyUrn: `${memRoot}:${candidate}` }] },
+          })) > 0)}`;
+      // Check for existing memory with the same URN (a supplied slug only: a derived one was minted free above)
+      const existing = slug != null ? await ctx.db.memory.findUnique({ where: { urn: memoryUrn } }) : null;
       if (existing) {
-        if (existing.deletedAt) {
+        if (existing.deletedAt && tombstoneReclaimableBy(existing, ctx.userId)) {
+          // Reusing an org-owned memory's URN takes memory.create on every arm, the personal one included (private#47).
+          if (existing.userId === null && !userOwned) await requireOrgAction(ctx, resolvedOrgId!, 'memory.create');
           // #1468 — refused for a stamped corpus still holding a spec.
-          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
+          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id, [ctx.userId]));
         } else {
+          // A live holder, or a personal/private memory of another user (hadron-internal#70): one answer.
           throw new GraphQLError(`A memory with URN "${memoryUrn}" already exists`, {
             extensions: { code: 'CONFLICT' },
           });
@@ -745,6 +783,8 @@ export const memoryMutations = {
       // Memory is never persisted in a zero-owner state (which would
       // be effectively unreachable to anyone, including the creator).
       const memory = await withFsProjectionRollback(() => ctx.db.$transaction(async (tx) => {
+        // #5016: every class this door creates is free-standing and counts; the owner is the row's own, the caller already authorized.
+        await requireOwnerHeadroom(tx, { owner: userOwned ? { userId: ctx.userId! } : { organizationId: resolvedOrgId! }, key: 'memories', caller: ctx.userId ? { userId: ctx.userId } : null });
         const created = await tx.memory.create({
           data: {
             id: generateId(),
@@ -828,19 +868,13 @@ export const memoryMutations = {
             },
           });
         }
-        // #2728: the root node is created in the Memory's own transaction, so a root failure rolls the Memory
-        // (and a group's owner row) back instead of leaving a rootless row a retry would duplicate.
-        const rootName = name.split(':').pop() ?? name;
-        await createNode({
-          memoryId: created.id,
-          loc: name,
-          name: rootName,
-          description: 'Root node for this memory.',
-        }, tx);
+        // #3952 (R11): a new memory has no root node. It was built from the display name, so a name with a space
+        // gave a loc no client can address (D-2026-05-11-013) and an unapproved node that blocked the first mint
+        // (cor:dmo:120:06/:07). Existing roots are left alone (R12).
         // #3426 (C3): the ONE site where the org's default templates are applied — an org-owned knowledge or group memory
         // created here. Not personal/private (the owner alone manages those), not user-owned, and no other creation path
         // (App, install, agent, chat, worker, clone, extract). No flag opts a caller out, so `source` changes nothing.
-        // Inside this transaction: a failure rolls the memory, its root node and its rules back together.
+        // Inside this transaction: a failure rolls the memory and its rules back together.
         if (resolvedOrgId && (requestedClass === 'knowledge' || requestedClass === 'group')) {
           await applyOrgDefaultsAtCreation(tx, { memoryId: created.id, orgId: resolvedOrgId, actor: ctx.userId ?? ctx.clientId ?? 'system' });
         }
@@ -899,6 +933,7 @@ export const memoryMutations = {
       },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // #1381: resolve the ref (id OR URN, cor:api:140:01) so a miss is a typed
       // MEMORY_NOT_FOUND rather than Prisma's own error text, and conceal a
       // memory the caller cannot open exactly as that miss. `id` is the
@@ -907,6 +942,15 @@ export const memoryMutations = {
       ({ id } = await resolveMemoryRef(ctx.db, ref));
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
       await concealUnreadableDenial(ctx, id, ref, () => requireMemoryManageAccess(ctx, memory));
+      // #5184: before any other argument is judged or any ref resolved.
+      if (urn !== undefined) assertMemorySlugMayChange(memory);
+      // #5200 (cor:api:260:01): every caller-text field this update writes, refused typed when it cannot be stored (a NUL or an
+      // unpaired surrogate), after the gate above (a caller who may not manage the memory keeps that answer, whatever the text
+      // holds) and before the transaction. `name` is the display column only: it gets this check and no root-loc check.
+      assertStorableText({
+        name, urn, shortDescription, description, data, tags, schema, license, category0, category1, category2,
+        iconUrl, heroUrl, homeUrl, source, readBranch, writeBranch,
+      });
       // #4140 (cor:api:140:01): `orgRef` resolves only AFTER the memory's own gate (resource before
       // counterparty), and the resolved id is what is compared (here and under the row lock below), so a
       // URN of the memory's OWN org is a no-op. An unknown org is the resolver's typed
@@ -1020,7 +1064,16 @@ export const memoryMutations = {
           );
         }
         // #574: slugify an explicit client slug (lowercase, illegal chars → '-').
-        const slug = deriveSlugFromName(urn);
+        // #5200: a slug with no ASCII letter or digit is the same typed refusal #5149 gives a name, not an untyped parse error.
+        let slug: string;
+        try {
+          slug = deriveSlugFromName(urn);
+        } catch (err) {
+          if (!(err instanceof UrnParseError)) throw err;
+          throw new GraphQLError('Invalid memory slug: it must contain at least one ASCII letter or digit.', {
+            extensions: { code: 'BAD_USER_INPUT' },
+          });
+        }
         newUrn = `${org.urn}:${slug}`;
       }
 
@@ -1119,6 +1172,10 @@ export const memoryMutations = {
             extensions: { code: 'CONFLICT' },
           });
         }
+        // #5184: judged again on the locked row. The staleness check above does
+        // not compare `appId`, so an attach that committed since the first read
+        // is caught only here.
+        if (urn !== undefined) assertMemorySlugMayChange(lockedMemory);
         if (newOrgId != null && newOrgId !== lockedRow?.organizationId) {
           throw new GraphQLError('Use transferMemoryOwnership to change a memory owner.', {
             extensions: { code: 'USE_TRANSFER_MEMORY_OWNERSHIP' },
@@ -1291,6 +1348,7 @@ export const memoryMutations = {
       { memoryRef }: { memoryRef: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId } });
       // #1316: a caller who cannot open the memory's record is denied as if
@@ -1316,6 +1374,7 @@ export const memoryMutations = {
     },
 
     deleteMemory: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+      requireCallerIdentity(ctx);
       // includeDeleted: a re-delete on an already-soft-deleted memory must
       // return true (FR-014 idempotency). The default resolveMemoryRef
       // would throw MemoryNotFoundError on the second call.
@@ -1417,10 +1476,13 @@ export const memoryMutations = {
         if (row && row.deleted_at === null) {
           await assertNoMintedCorpusRemoval(tx, resolvedId, 'delete the corpus', { includeTombstones: false });
         }
-        await tx.memory.updateMany({
+        const deletedAt = new Date();
+        const { count } = await tx.memory.updateMany({
           where: { id: resolvedId, deletedAt: null },
-          data: { deletedAt: new Date() },
+          data: { deletedAt },
         });
+        // #5124: the memory's files go with it, at the same instant, so the janitor reclaims them. A re-delete touches nothing.
+        if (count === 1) await softDeleteMemoryAssets(tx, resolvedId, deletedAt);
       });
       return true;
     },
@@ -1430,6 +1492,7 @@ export const memoryMutations = {
       { ref, targetUrn }: { ref: string; targetUrn: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // 007-entity-id-or-urn: ref may be ID, bare URN, or prefixed URN
       // (conventions:ref-param-naming — bare `ref` since the memory is the
       // obvious entity).
@@ -1443,6 +1506,8 @@ export const memoryMutations = {
       // as if it were missing (MEMORY_NOT_FOUND), so the denial itself does not
       // disclose that the memory exists; one who can keeps the Forbidden.
       await concealUnreadableDenial(ctx, source.id, ref, async () => {
+        // hadron-internal#89 (cor:cht:010:02): a copy is a read-out, so a per-user chat holding is cloned by its creator alone, acting as themselves.
+        if (isUserHolding(source) && !userHoldingCreatorMayRead(ctx, source)) throw forbiddenError();
         if (source.class === 'personal' || source.class === 'private') {
           if (!ctx.userId || source.userId !== ctx.userId) {
             throw new GraphQLError(
@@ -1523,27 +1588,23 @@ export const memoryMutations = {
         select: { urn: true },
       });
 
-      // Cross-org gate (#604): dropping a memory into a DIFFERENT org requires
-      // the caller to be an ACTUAL member of the target org whose role is not
-      // READER. findFirst + deletedAt:null so a revoked membership can't
-      // authorize (findings:revoked-membership-auth-gates); no global-role
-      // bypass — "member and not read-only" means real membership.
-      if (targetOrgId !== source.organizationId) {
-        if (!ctx.userId) {
-          throw new GraphQLError(
-            'Cloning into another organization requires an authenticated user.',
-            { extensions: { code: 'UNAUTHENTICATED' } },
-          );
-        }
-        const membership = await ctx.db.orgMember.findFirst({
-          where: { organizationId: targetOrgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
-        });
-        if (!membership || membership.role === 'READER') {
-          throw new GraphQLError(
-            'Forbidden: cloning into an organization requires a non-reader membership there.',
-            { extensions: { code: 'FORBIDDEN' } },
-          );
-        }
+      // Target-org gate, on EVERY arm and before any URN collision is looked at (#604; hadron-internal#78): the
+      // caller must be an ACTUAL, non-READER member of the target org. findFirst + deletedAt:null so a revoked
+      // membership can't authorize (findings:revoked-membership-auth-gates); no global-role bypass.
+      if (!ctx.userId) {
+        throw new GraphQLError(
+          'Cloning into an organization requires an authenticated user.',
+          { extensions: { code: 'UNAUTHENTICATED' } },
+        );
+      }
+      const membership = await ctx.db.orgMember.findFirst({
+        where: { organizationId: targetOrgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
+      });
+      if (!membership || membership.role === 'READER') {
+        throw new GraphQLError(
+          'Forbidden: cloning into an organization requires a non-reader membership there.',
+          { extensions: { code: 'FORBIDDEN' } },
+        );
       }
 
       const newUrn = `${targetOrg.urn}:${targetSlug}`;
@@ -1554,10 +1615,13 @@ export const memoryMutations = {
       // is hard-deleted, a live one is an error.
       const existing = await ctx.db.memory.findUnique({ where: { urn: newUrn } });
       if (existing) {
-        if (existing.deletedAt) {
+        if (existing.deletedAt && tombstoneReclaimableBy(existing, ctx.userId)) {
+          // Reusing an org-owned memory's URN takes the authority createMemory's org-shared reuse takes (hadron-internal#78).
+          if (existing.userId === null) await requireOrgAction(ctx, targetOrgId, 'memory.create');
           // #1468 — refused for a stamped corpus still holding a spec.
-          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
+          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id, [ctx.userId]));
         } else {
+          // A live holder, or a personal/private memory of another user (hadron-internal#70): one answer.
           throw new GraphQLError(`A memory with URN "${newUrn}" already exists`, {
             extensions: { code: 'CONFLICT' },
           });
@@ -1566,6 +1630,7 @@ export const memoryMutations = {
 
       const isUserOwned = source.class === 'personal' || source.class === 'private';
       const { memoryId } = await cloneMemoryGraph(ctx.db, {
+        ownerLimitCaller: ownerLimitCaller(ctx),
         sourceMemoryId: source.id,
         name,
         newUrn,
@@ -1596,6 +1661,7 @@ export const memoryMutations = {
       { parentRef, targetUrn, move: rawMove }: { parentRef: string; targetUrn: string; move?: boolean | null },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       const move = rawMove ?? false;
 
       // Resolve the parent node (PK or fully-qualified URN). A miss surfaces as
@@ -1605,8 +1671,8 @@ export const memoryMutations = {
         ({ id: parentId } = await resolveNodeRefForCaller(ctx, parentRef));
       } catch (e) {
         if (e instanceof NodeNotFoundError) {
-          throw new GraphQLError(`Node not found: "${parentRef}"`, {
-            extensions: { code: 'NODE_NOT_FOUND', ref: parentRef },
+          throw new GraphQLError('Node not found', {
+            extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
         throw e;
@@ -1619,8 +1685,8 @@ export const memoryMutations = {
       // its memory. Treat an extract from a tombstoned source as not-found so a
       // stale node id can't resurrect deleted content into a new live memory.
       if (source.deletedAt) {
-        throw new GraphQLError(`Node not found: "${parentRef}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: parentRef },
+        throw new GraphQLError('Node not found', {
+          extensions: { code: 'NODE_NOT_FOUND' },
         });
       }
 
@@ -1628,8 +1694,8 @@ export const memoryMutations = {
       // URN-widened parentRef must not become a cross-tenant exfiltration path
       // (review:entity-ref-args #3). Denial reads as not-found (no oracle).
       if (!(await canReadMemory(ctx.db, ctx, source.id))) {
-        throw new GraphQLError(`Node not found: "${parentRef}"`, {
-          extensions: { code: 'NODE_NOT_FOUND', ref: parentRef },
+        throw new GraphQLError('Node not found', {
+          extensions: { code: 'NODE_NOT_FOUND' },
         });
       }
 
@@ -1652,7 +1718,9 @@ export const memoryMutations = {
       }
 
       // A move must leave at least one live node OUTSIDE the subtree, else it
-      // empties the source (and orphans its root). Checked by node set, NOT by
+      // empties the source (and orphans its root, where it has one). Since #3952 a
+      // new memory has no root, so its only subtree can no longer be moved out whole;
+      // that refusal is kept on purpose (#5148 asks whether to allow it). Checked by node set, NOT by
       // `parent.loc === source.name`: Memory.name is mutable (updateMemory) and
       // a rename does not rename the root node loc, so a name-based guard is
       // wrong both ways (misses a renamed root, false-flags a node at the new
@@ -1715,9 +1783,9 @@ export const memoryMutations = {
         const membership = await ctx.db.orgMember.findFirst({
           where: { organizationId: targetOrgId, userId: ctx.userId, ...LIVE_ORG_MEMBERSHIP },
         });
-        if (!membership) {
+        if (!membership || membership.role === 'READER') {
           throw new GraphQLError(
-            'You must be a member of the organization to extract a personal/private subtree into it.',
+            'Forbidden: extracting a personal/private subtree into an organization requires a non-reader membership there.',
             { extensions: { code: 'FORBIDDEN' } },
           );
         }
@@ -1777,10 +1845,13 @@ export const memoryMutations = {
       const newUrn = `${targetOrg.urn}:${targetSlug}`;
       const existing = await ctx.db.memory.findUnique({ where: { urn: newUrn } });
       if (existing) {
-        if (existing.deletedAt) {
+        if (existing.deletedAt && tombstoneReclaimableBy(existing, ctx.userId)) {
+          // Reusing an org-owned memory's URN takes the authority createMemory's org-shared reuse takes (hadron-internal#78).
+          if (existing.userId === null) await requireOrgAction(ctx, targetOrgId, 'memory.create');
           // #1468 — refused for a stamped corpus still holding a spec.
-          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id));
+          await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, existing.id, [ctx.userId]));
         } else {
+          // A live holder, or a personal/private memory of another user (hadron-internal#70): one answer.
           throw new GraphQLError(`A memory with URN "${newUrn}" already exists`, {
             extensions: { code: 'CONFLICT' },
           });
@@ -1791,6 +1862,7 @@ export const memoryMutations = {
       // slug (a valid loc), and the display name is the slug the caller chose.
       const vectorIndexEnabled = newClass === 'knowledge';
       const { memoryId } = await extractParentNodeGraph(ctx.db, {
+        ownerLimitCaller: ownerLimitCaller(ctx),
         sourceMemoryId: source.id,
         parentLoc: parent.loc,
         newUrn,
@@ -1828,6 +1900,7 @@ export const memoryMutations = {
       { ref, token, expiresAt }: { ref: string; token: string; expiresAt?: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // #1381: resolve (typed miss, URN accepted) and conceal as updateMemory does.
       const { id } = await resolveMemoryRef(ctx.db, ref);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
@@ -1858,6 +1931,7 @@ export const memoryMutations = {
       { agentRef, memoryRef, role }: { agentRef: string; memoryRef: string; role?: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // 007-entity-id-or-urn: agentId and memoryId may be IDs, bare URNs,
       // or prefixed URNs. Resolve both to definite IDs before any
       // subsequent checks. #1944: the Agent through the read gate, so one
@@ -1985,6 +2059,7 @@ export const memoryMutations = {
       { agentRef, memoryRef }: { agentRef: string; memoryRef: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // #1944: an Agent the caller can't read answers as absent.
       const agent = await resolveReadableAgentRef(ctx, agentRef);
       const resolvedAgentId = agent.id;
@@ -2022,6 +2097,7 @@ export const memoryMutations = {
       { memoryRef, orgRef, role }: { memoryRef: string; orgRef: string; role: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // #764 (was 007-entity-id-or-urn): memoryRef/orgRef accept id / URN /
       // (org) handle. #4142 (S6 chunk F) dropped the deprecated memoryId/orgId
       // aliases: the refs are required and the only way in.
@@ -2088,6 +2164,7 @@ export const memoryMutations = {
       { memoryRef, orgRef, role }: { memoryRef: string; orgRef: string; role: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       const resolvedMemoryId = await resolveRequiredMemoryRef(ctx.db, memoryRef);
       // #1381: hidden from this caller ⇒ resolveRefArg's own miss, decided HERE,
       // before the org resolves — an org error arriving first would tell an
@@ -2125,6 +2202,7 @@ export const memoryMutations = {
       { memoryRef, orgRef }: { memoryRef: string; orgRef: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       const resolvedMemoryId = await resolveRequiredMemoryRef(ctx.db, memoryRef);
       // #1381: unlike create/update, a caller who cannot open the memory CAN
       // succeed here — an admin of the subscribing org removing its own
@@ -2215,6 +2293,7 @@ export const memoryMutations = {
     },
 
     syncMemory: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+      requireCallerIdentity(ctx);
       // #1381: resolve (typed miss, URN accepted) and conceal as updateMemory does.
       const { id } = await resolveMemoryRef(ctx.db, ref);
       const memory = await ctx.db.memory.findUniqueOrThrow({
@@ -2223,7 +2302,7 @@ export const memoryMutations = {
       });
       await concealUnreadableDenial(ctx, id, ref, () => requireMemoryManageAccess(ctx, memory, 'CONTRIBUTOR'));
 
-      const result = await syncGraphFromGithub(memory);
+      const result = await syncGraphFromGithub(memory, { ownerLimitCaller: ownerLimitCaller(ctx) });
       if (result.notAttemptedReason) {
         throw new GraphQLError(syncNotAttemptedMessage(result.notAttemptedReason), {
           extensions: { code: SYNC_NOT_ATTEMPTED, reason: result.notAttemptedReason },
@@ -2232,6 +2311,8 @@ export const memoryMutations = {
       // `fault` is judged on its own: an exception with an empty message must not read as success.
       if (result.fault) throw new Error(result.error ?? 'sync fault');
       if (result.error) {
+        // #5015 — the owner-limit refusal in this caller's own form, extensions included (the stored record keeps the no-number form).
+        if (result.ownerLimitError) throw result.ownerLimitError;
         if (result.errorCode) throw new GraphQLError(result.error, { extensions: { code: result.errorCode } });
         // #1789: the text is the stored `Memory.syncError` the caller can already read, so it keeps its text; it needs a code
         // of its own to be a typed refusal rather than a fault.
@@ -2249,6 +2330,7 @@ export const memoryMutations = {
     },
 
     pushMemoryToGit: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+      requireCallerIdentity(ctx);
       // #1381: resolve (typed miss, URN accepted) and conceal as updateMemory does.
       const { id } = await resolveMemoryRef(ctx.db, ref);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id } });
@@ -2269,6 +2351,7 @@ export const memoryMutations = {
       { memoryRef, externalUserId }: { memoryRef: string; externalUserId: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       if (!ctx.appId) throw forbiddenError('Forbidden: App Key required');
       // 007-entity-id-or-urn: memoryRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
@@ -2533,6 +2616,7 @@ export const memoryMutations = {
       { memoryRef }: { memoryRef: string },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // 007-entity-id-or-urn: memoryRef may be ID, bare URN, or prefixed URN.
       const { id: resolvedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
       const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: resolvedMemoryId } });
@@ -2949,6 +3033,7 @@ export const memoryMutations = {
       }: { memoryRef: string; granteeRef: string; role: MemoryShareRoleType },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       if (!ctx.userId) {
         throw new GraphQLError('createMemoryShare requires an authenticated user', {
           extensions: { code: 'UNAUTHENTICATED' },
@@ -3012,6 +3097,7 @@ export const memoryMutations = {
       }: { memoryRef: string; granteeRef?: string | null },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       if (!ctx.userId) {
         throw new GraphQLError('deleteMemoryShare requires an authenticated user', {
           extensions: { code: 'UNAUTHENTICATED' },
@@ -3109,6 +3195,7 @@ export const memoryMutations = {
       }: { memoryRef: string; granteeRef: string; role: MemoryShareRoleType },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       if (!ctx.userId) {
         throw new GraphQLError('updateMemoryShareRole requires an authenticated user', {
           extensions: { code: 'UNAUTHENTICATED' },
@@ -3166,6 +3253,12 @@ export const memoryMutations = {
       },
       ctx: Context,
     ) => {
+      // A caller without a user is refused before the memory resolves, as on the share doors (cor:api:140:02).
+      if (!ctx.userId) {
+        throw new GraphQLError('Authenticated user required', {
+          extensions: { code: 'UNAUTHENTICATED' },
+        });
+      }
       // #764: memoryRef/userRef accept id/URN/handle/email. Resolve the memory
       // (a miss maps to the uniform member FORBIDDEN — no existence oracle) +
       // run the owner gate FIRST, then resolve the user — so an unauthorized
@@ -3229,6 +3322,12 @@ export const memoryMutations = {
       },
       ctx: Context,
     ) => {
+      // A caller without a user is refused before the memory resolves, as on the share doors (cor:api:140:02).
+      if (!ctx.userId) {
+        throw new GraphQLError('Authenticated user required', {
+          extensions: { code: 'UNAUTHENTICATED' },
+        });
+      }
       // #764: resolve memory (miss → uniform member FORBIDDEN, no existence
       // oracle) + owner-gate FIRST, then resolve the user (auth before
       // revealing user existence — #816 review).

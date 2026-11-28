@@ -10,7 +10,10 @@ import { stringify } from 'yaml';
 import { createHash, randomBytes } from 'crypto';
 import { APP_KEY_PREFIX } from '../middleware/auth.js';
 import type { PrismaClient, Role } from '../generated/prisma/index.js';
+import type { Request, Response } from 'express';
+import { vi, expect } from 'vitest';
 import { drainNodeUsage } from '../lib/usageRecorder.js';
+import { clearPriceCache } from '../lib/metering/priceCache.js';
 
 /** Build a deterministic test App key with the canonical `hdr_app_` prefix. */
 export function buildAppKey(suffix?: string): string {
@@ -168,9 +171,9 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // hadron_server, which nothing below deletes) — clear them first.
   await db.aiServiceConfig.deleteMany();
   await db.hadronServer.deleteMany();
-  // Spec 046 — usage metering (prices are FK-free; ledger FKs org only).
-  await db.aiModelPrice.deleteMany();
-  await db.creditLedgerEntry.deleteMany();
+  // Spec 046 — usage metering. Price rows are cleared LAST, with the usage events that reference them (#5021).
+  // #5010: the ledger is append-only by trigger (a row DELETE is refused); TRUNCATE fires no row trigger.
+  await db.$executeRawUnsafe('TRUNCATE credit_ledger_entries');
   // Spec 043 — Slack integration (receipts have no FK; connections FK org + app).
   await db.slackEventReceipt.deleteMany();
   await db.slackConnection.deleteMany();
@@ -215,7 +218,7 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // fires no row triggers. #1706: agent_team_alarm_schedule references the events, so it is
   // truncated with them. #1708: so is worker_delivery_task_events, for the same reason.
   // #2022: a task's stop holds go with it.
-  await db.$executeRawUnsafe('TRUNCATE alarm_escalation_ends, dark_worker_episodes, lead_cadence_episodes, lead_cadence_clocks, post_limit_episodes, host_sweep_episodes, saturation_episodes, team_dark_episodes, host_sweep_runs, start_failing_episodes, worker_delivery_task_events, agent_team_alarm_schedule, agent_team_events, automation_adoption_events, app_memory_write_grant_events, app_memory_write_grants, app_automation_read_grant_events, app_automation_read_grants, secret_read_clients, grant_events, grant_signatures, grant_signing_requests, grants, agent_task_stop_holds, agent_match_outcomes, agent_task_counters, agent_task_blockers, agent_tasks');
+  await db.$executeRawUnsafe('TRUNCATE alarm_escalation_ends, dark_worker_episodes, lead_cadence_episodes, lead_cadence_clocks, post_limit_episodes, host_sweep_episodes, saturation_episodes, team_dark_episodes, host_sweep_runs, start_failing_episodes, worker_delivery_task_events, agent_team_alarm_schedule, agent_team_events, automation_adoption_events, app_memory_write_grant_events, app_memory_write_grants, app_automation_read_grant_events, app_automation_read_grants, secret_read_clients, grant_events, grant_signatures, grant_selection_signatures, grant_signing_selections, grant_signing_requests, grants, agent_task_stop_holds, agent_match_outcomes, agent_task_counters, agent_task_blockers, agent_tasks');
   // #974 Workers before agents: workers_agent_id_fkey is RESTRICT.
   await db.worker.deleteMany();
   await db.node.deleteMany();
@@ -289,9 +292,18 @@ export async function cleanDb(db: PrismaClient): Promise<void> {
   // for an untracked writer overlapping parent deletion: new asynchronous
   // usage producers must use trackUsageWrite and finish before this boundary.
   // Safe in this position because every UsageEvent FK is nullable
-  // and `SetNull` — node, session, app, user, organization — and `memoryId` is a
-  // denormalized column with no FK at all (#796).
+  // and `SetNull` — node, session, app, user, organization, app run — and `memoryId` is a
+  // denormalized column with no FK at all (#796). The one exception, `priceRowId`,
+  // RESTRICTs, which is why price rows are cleared here and not earlier.
   await db.usageEvent.deleteMany();
+  // #5021: price rows are kept by trigger (a row DELETE is refused); TRUNCATE fires no row trigger. Postgres
+  // refuses to truncate a table another table references unless both are truncated, so usage_events joins it
+  // (already empty: the deleteMany above ran its rollup triggers). usage_events is listed first, the order a
+  // late usage insert takes them, so the two cannot deadlock.
+  await db.$executeRawUnsafe('TRUNCATE usage_events, ai_model_prices');
+  // The price cache describes rows that no longer exist: a cached row's id would make the next unit's insert
+  // fail its price-row key (#5021), so the cache is reset with the table.
+  clearPriceCache();
   // #992 — reinstall the per-chat seq unique index if a reader fixture
   // dropped it (see restoreChatSeqUniqueness): vitest workers reuse one
   // clone across files, and rows are gone by here, so reinstalling is safe.
@@ -750,4 +762,252 @@ export async function createDbRunConsentPrincipal(db: PrismaClient, organization
   const user = await db.user.create({ data: { id, handle: `consent-${id}`, githubUsername: `consent-${id}` } });
   await db.orgMember.create({ data: { organizationId, userId: user.id, role: 'READER' } });
   return { userId: user.id, appId, organizationId, roles: [] as Role[] };
+}
+
+/**
+ * #3952: a new memory no longer gets a root node. Tests whose fixture relied on that auto root (a node at
+ * the memory's own name, "Root node for this memory.") seed one explicitly with this helper.
+ */
+export async function seedRootNode(db: PrismaClient, memoryId: string, loc: string) {
+  return db.node.create({ data: { memoryId, loc, name: loc.split(':').pop() ?? loc, description: 'Root node for this memory.' } });
+}
+
+/**
+ * #5088 F10: a MINT RECORD for a memory, written the one way the schema admits it. A tombstoned, minted node whose
+ * mint stands on its own: `minted_at` set, owner-info only, no mint revision or hash. That is the shape
+ * `chk_node_mint_complete` admits for a backfilled marker, so a change to that constraint is fixed here once, not in
+ * every suite. Always tombstoned (there is no live option), so no live-loc assertion sees it; `role: null` by default (a non-spec node).
+ * `client` is the Prisma client or a transaction client, for a mint driven inside a transaction.
+ */
+export async function createMintMarker(
+  client: Pick<PrismaClient, 'node'>,
+  memoryId: string,
+  opts: { loc?: string; mintedAt?: Date; role?: string | null; nodeType?: string } = {},
+) {
+  const loc = opts.loc ?? 'zz:mint-marker';
+  const mintedAt = opts.mintedAt ?? new Date();
+  return client.node.create({
+    data: {
+      id: generateId(), memoryId, loc, name: loc, content: 'minted elsewhere; tombstoned',
+      role: opts.role ?? null, ...(opts.nodeType !== undefined ? { nodeType: opts.nodeType } : {}), tags: [],
+      mintedAt, mintedByInfo: 'test', deletedAt: mintedAt,
+    },
+  });
+}
+
+// ── Shared OAuth / MCP test helpers (#160) ───────────────────────────
+
+/**
+ * Node's `http.ServerResponse.setHeader` takes a number, a string or a
+ * readonly string[] (the array form carries multi-valued headers such as
+ * Set-Cookie). The mock stores whatever it was given, verbatim.
+ */
+export type McpHeaderValue = string | number | readonly string[];
+
+/**
+ * A minimal Express Request for `handleMcpRequest` and the OAuth metadata
+ * handlers. `host` undefined means `localhost:4000`; `null` means the
+ * request carries NO Host header (`req.get('host')` returns undefined).
+ * Includes `on` / `pipe` so a request that gets past the early-return
+ * paths into the MCP transport does not crash on stream wiring.
+ */
+export function makeMcpReq(
+  opts: {
+    authorization?: string;
+    protocol?: 'http' | 'https';
+    host?: string | null;
+  } = {},
+): Request {
+  const host = opts.host === undefined ? 'localhost:4000' : opts.host;
+  return {
+    method: 'POST',
+    headers: opts.authorization ? { authorization: opts.authorization } : {},
+    protocol: opts.protocol ?? 'http',
+    body: { jsonrpc: '2.0', method: 'initialize', id: 1 },
+    get: (name: string) =>
+      name.toLowerCase() === 'host' ? (host ?? undefined) : undefined,
+    on: vi.fn(),
+    pipe: vi.fn(),
+  } as unknown as Request;
+}
+
+/**
+ * A minimal Express Response that records status, headers and the JSON
+ * body (read them back as `_status`, `_headers`, `_body`). The raw-stream
+ * methods the MCP transport calls after an early-return path are no-ops.
+ */
+export function makeMcpRes(): Response & {
+  _status: number;
+  _headers: Record<string, McpHeaderValue>;
+  _body: unknown;
+} {
+  const headers: Record<string, McpHeaderValue> = {};
+  let status = 200;
+  let body: unknown;
+  const res = {
+    setHeader: vi.fn((name: string, value: McpHeaderValue) => {
+      headers[name] = value;
+      return res;
+    }),
+    getHeader: vi.fn((name: string) => headers[name]),
+    status: vi.fn((code: number) => {
+      status = code;
+      return res;
+    }),
+    json: vi.fn((payload: unknown) => {
+      body = payload;
+      return res;
+    }),
+    // Node's writeHead(code, [statusMessage], [headers]): take the headers from
+    // whichever trailing argument is an object (the array-of-pairs form is not
+    // modelled; no test here uses it).
+    writeHead: vi.fn((code: number, ...rest: unknown[]) => {
+      status = code;
+      const h = rest.find((a) => a !== null && typeof a === 'object' && !Array.isArray(a));
+      if (h) Object.assign(headers, h as Record<string, McpHeaderValue>);
+      return res;
+    }),
+    write: vi.fn(() => true),
+    end: vi.fn(),
+    on: vi.fn(),
+    once: vi.fn(),
+    off: vi.fn(),
+    removeListener: vi.fn(),
+    addListener: vi.fn(),
+    emit: vi.fn(),
+    // Stub limits (unlike Node): headersSent stays false and getHeader is
+    // case-sensitive. No test here depends on either.
+    headersSent: false,
+    get _status() {
+      return status;
+    },
+    get _headers() {
+      return headers;
+    },
+    get _body() {
+      return body;
+    },
+  };
+  return res as unknown as Response & {
+    _status: number;
+    _headers: Record<string, McpHeaderValue>;
+    _body: unknown;
+  };
+}
+
+/**
+ * The value of the Set-Cookie named `name` on a fetch Response, or
+ * undefined. Built on `getSetCookie()`: per the Fetch spec `get('set-cookie')`
+ * returns only a joined string when several Set-Cookie headers exist.
+ */
+export function extractSetCookie(
+  res: { headers: { getSetCookie(): string[] } },
+  name: string,
+): string | undefined {
+  const line = res.headers.getSetCookie().find((c) => c.startsWith(`${name}=`));
+  return line === undefined ? undefined : line.slice(name.length + 1).split(';')[0];
+}
+
+/**
+ * Walk the full OAuth authorization-code dance as a signed-in user:
+ * GET /oauth/authorize (consent + CSRF), POST /oauth/authorize (approve),
+ * POST /oauth/token (PKCE redeem). Returns the raw access token.
+ */
+export async function walkOAuthDance(opts: {
+  baseUrl: string;
+  clientId: string;
+  redirectUri: string;
+  resource: string;
+  /** The signed-in user's JWT, sent as the `hadron_token` cookie. */
+  jwt: string;
+  scope?: string;
+  state?: string;
+}): Promise<string> {
+  const { baseUrl, clientId, redirectUri, resource, jwt } = opts;
+  const scope = opts.scope ?? 'mcp';
+  const state = opts.state ?? 'oauth-dance-state';
+  // PKCE: 32 bytes -> 43-char base64url verifier, SHA-256 -> challenge.
+  const verifier = randomBytes(32).toString('base64url');
+  const challenge = createHash('sha256').update(verifier).digest('base64url');
+
+  // 1. GET /oauth/authorize: render consent and issue the CSRF cookie.
+  const query = new URLSearchParams({
+    response_type: 'code',
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    code_challenge: challenge,
+    code_challenge_method: 'S256',
+    resource,
+    state,
+  });
+  const getRes = await fetch(`${baseUrl}/oauth/authorize?${query.toString()}`, {
+    redirect: 'manual',
+    headers: { cookie: `hadron_token=${jwt}` },
+  });
+  expect(getRes.status, 'consent GET').toBe(200);
+  const html = await getRes.text();
+  const csrfToken = html.match(/name="_csrf"\s+value="([^"]+)"/);
+  expect(csrfToken).not.toBeNull();
+  const grantProof = html.match(/name="grant_proof"\s+value="([^"]+)"/);
+  expect(grantProof).not.toBeNull();
+  const csrfCookie = extractSetCookie(getRes, '_hadron_csrf');
+  expect(csrfCookie, '_hadron_csrf cookie must be in Set-Cookie response').toBeDefined();
+
+  // 2. POST /oauth/authorize: approve.
+  const postRes = await fetch(`${baseUrl}/oauth/authorize`, {
+    method: 'POST',
+    redirect: 'manual',
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded',
+      cookie: `hadron_token=${jwt}; _hadron_csrf=${csrfCookie}`,
+    },
+    body: new URLSearchParams({
+      _csrf: csrfToken![1],
+      decision: 'approve',
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      code_challenge: challenge,
+      code_challenge_method: 'S256',
+      resource,
+      scope,
+      state,
+      grant_proof: grantProof![1],
+    }).toString(),
+  });
+  expect(postRes.status, 'consent POST').toBe(302);
+  const location = postRes.headers.get('location');
+  expect(location).not.toBeNull();
+  const rawAuthCode = new URL(location!).searchParams.get('code');
+  expect(rawAuthCode).not.toBeNull();
+
+  // 3. POST /oauth/token: redeem.
+  const tokenRes = await fetch(`${baseUrl}/oauth/token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      code: rawAuthCode!,
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      code_verifier: verifier,
+      resource,
+    }).toString(),
+  });
+  expect(tokenRes.status, 'token redemption').toBe(200);
+  return ((await tokenRes.json()) as { access_token: string }).access_token;
+}
+
+/**
+ * #5213: the database refuses a price row dated in the past, so a fixture whose price must already be in force (and
+ * which pins that) inserts it as the owner role with the opt-out set for that one transaction. The serve role cannot
+ * (priceRowKept5021.test.ts B4); the tests run single-role as the owner.
+ */
+export async function createPriceRowForTest(
+  db: PrismaClient,
+  args: Parameters<PrismaClient['aiModelPrice']['create']>[0],
+) {
+  return db.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(`SET LOCAL hadron.allow_past_price_row = 'on'`);
+    return tx.aiModelPrice.create(args);
+  });
 }

@@ -112,18 +112,18 @@ function heldTransactionDb(ready: ReturnType<typeof latch<number>>, release: Ret
 }
 
 
-const input = () => ({ memoryIds: [memoryId], nodeIds: [nodeId, nodeId, ordinaryId],
+const input = () => ({ memoryRefs: [memoryId], nodeRefs: [nodeId, nodeId, ordinaryId],
   fields: ['content'], oldText: 'alpha', newText: 'beta', dryRun: false });
 const replace = (context: Context) => resolvers.Mutation.searchReplaceInNodes({}, { input: input() }, context);
 function promote(context: Context, signal: 'review' | 'task') {
   return writeNodeCore({ memoryId, loc: 'candidate', ...(signal === 'review' ? { role: 'review' } : { isRunnable: true }) },
-    context, 'update', { targetNodeId: nodeId, ownsKind: signal,
+    context, 'update', { ownerLimit: 'refuse', sizeCeiling: 'check', targetNodeId: nodeId, ownsKind: signal,
       authoring: { kind: 'trustedHuman', authenticatedUserId: userId } });
 }
 /** The review door clearing its own kind (#4725: the demotion race case). */
 function demote(context: Context) {
   return writeNodeCore({ memoryId, loc: 'candidate', role: null }, context, 'update',
-    { targetNodeId: nodeId, ownsKind: 'review', authoring: { kind: 'trustedHuman', authenticatedUserId: userId } });
+    { ownerLimit: 'refuse', sizeCeiling: 'check', targetNodeId: nodeId, ownsKind: 'review', authoring: { kind: 'trustedHuman', authenticatedUserId: userId } });
 }
 async function drain(results: PromiseSettledResult<unknown>[]) {
   for (const result of results) if (result.status === 'rejected') throw result.reason;
@@ -262,7 +262,7 @@ describe('#1213 S3 dry run reads governed state at planning, like selection', ()
 describe('#4725 a dual-signal row (a runnable review) skips ONCE, at selection and under the lock', () => {
   it('fixture row with BOTH signals: selection counts one governed skip, not one per signal', async () => {
     const dualId = (await db.node.create({ data: { memoryId, loc: 'dual', name: 'dual', content: 'alpha', role: 'review', isRunnable: true } })).id;
-    const result = await resolvers.Mutation.searchReplaceInNodes({}, { input: { nodeIds: [dualId, ordinaryId],
+    const result = await resolvers.Mutation.searchReplaceInNodes({}, { input: { nodeRefs: [dualId, ordinaryId],
       fields: ['content'], oldText: 'alpha', newText: 'beta', dryRun: false } }, ctx());
     expect(result).toMatchObject({ nodesSelected: 2, nodesScanned: 1, nodesSkipped: 1, nodesChanged: 1,
       totalReplacements: 1, skipCounts: { governed: 1, protectedAddress: 0 } });
@@ -376,7 +376,7 @@ describe('#4725 more governed-skip race cases', () => {
       { organizationId: orgId, userId: orgAdmin, role: 'ADMIN' },
     ] });
     const notesId = (await db.node.create({ data: { memoryId, loc: 'notes', name: 'notes', content: 'alpha', role: 'notes' } })).id;
-    const notesInput = () => ({ nodeIds: [notesId, ordinaryId],
+    const notesInput = () => ({ nodeRefs: [notesId, ordinaryId],
       fields: ['content'], oldText: 'alpha', newText: 'beta', dryRun: false });
     const run = (who: string) => resolvers.Mutation.searchReplaceInNodes({}, { input: notesInput() },
       { db, roles: [], userId: who, clientId: `user:${who}` });

@@ -58,6 +58,9 @@ export default defineConfig({
       GRAPH_VIEW_DISABLED: 'false',
       // #5009 — a dev machine's default owner limits must not refuse a fixture's creation.
       OWNER_DEFAULT_LIMITS: '',
+      // #5022 — a dev machine's default monthly grant must not write a ledger entry on every balance read.
+      OWNER_DEFAULT_MONTHLY_GRANT: '',
+      NODE_CONTENT_MAX_BYTES: '',
       EMBEDDING_API_URL: '',
       EMBEDDING_SAGEMAKER_ENDPOINT_NAME: '',
       NATS_URL: '',

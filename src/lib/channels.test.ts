@@ -17,7 +17,7 @@
 
 import { describe, it, expect, beforeEach, beforeAll, afterAll } from 'vitest';
 import { db } from '../integrations/db/client.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, createMintMarker } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { ensureChannelWithRoot, lockMemoryForChannelChange } from './channels.js';
@@ -169,16 +169,16 @@ describe('protection (S4)', () => {
 
   it('a generic createNode under the Channel is refused; a sibling is not', async () => {
     await expect(
-      M.createNode({}, { input: { memoryId: appMem.urn, loc: 'chats:team:messages:0001', name: 'm' } }, ctx(admin.id)),
+      M.createNode({}, { input: { memoryRef: appMem.urn, loc: 'chats:team:messages:0001', name: 'm' } }, ctx(admin.id)),
     ).rejects.toMatchObject({ extensions: { code: 'LOC_PROTECTED', channelLoc: 'chats:team' } });
     await expect(
-      M.createNode({}, { input: { memoryId: appMem.urn, loc: 'chats:team', name: 'root' } }, ctx(admin.id)),
+      M.createNode({}, { input: { memoryRef: appMem.urn, loc: 'chats:team', name: 'root' } }, ctx(admin.id)),
     ).rejects.toMatchObject({ extensions: { code: 'LOC_PROTECTED' } });
     // An ancestor is protected too (moving `chats` would move the Channel).
     await expect(
-      M.createNode({}, { input: { memoryId: appMem.urn, loc: 'chats', name: 'chats' } }, ctx(admin.id)),
+      M.createNode({}, { input: { memoryRef: appMem.urn, loc: 'chats', name: 'chats' } }, ctx(admin.id)),
     ).rejects.toMatchObject({ extensions: { code: 'LOC_PROTECTED' } });
-    const ok = await M.createNode({}, { input: { memoryId: appMem.urn, loc: 'chats-notes', name: 'n' } }, ctx(admin.id));
+    const ok = await M.createNode({}, { input: { memoryRef: appMem.urn, loc: 'chats-notes', name: 'n' } }, ctx(admin.id));
     expect(ok.loc).toBe('chats-notes');
   });
 
@@ -202,7 +202,7 @@ describe('protection (S4)', () => {
     // RESERVED: a generic create at or under the address is still refused, so a
     // dead team chat cannot be occupied and then "restored" over.
     await expect(
-      M.createNode({}, { input: { memoryId: appMem.urn, loc: 'chats:team:messages:9999', name: 'squat' } }, ctx(admin.id)),
+      M.createNode({}, { input: { memoryRef: appMem.urn, loc: 'chats:team:messages:9999', name: 'squat' } }, ctx(admin.id)),
     ).rejects.toMatchObject({ extensions: { code: 'LOC_PROTECTED' } });
 
     // CLEANABLE: the orphaned subtree can now be deleted. Before #1226 this
@@ -436,11 +436,7 @@ describe('protection (S4)', () => {
       where: { loc_memoryId: { loc: 'chats:team:messages', memoryId: appMem.id } },
     });
     await M.deleteChannel({}, { ref: channel.id }, ctx(admin.id));
-    await db.node.create({ data: {
-      id: generateId(), memoryId: appMem.id, loc: 'zz:mint-marker', name: 'zz:mint-marker',
-      content: 'minted elsewhere; tombstoned', role: null, tags: [],
-      mintedAt: new Date('2026-09-01T00:00:00Z'), mintedByInfo: 'test', deletedAt: new Date('2026-09-01T00:00:00Z'),
-    } });
+    await createMintMarker(db, appMem.id, { mintedAt: new Date('2026-09-01T00:00:00Z') });
     await db.node.update({ where: { id: oldMessages.id }, data: {
       tags: ['spec'], deletedAt: new Date('2026-09-02T00:00:00Z'),
     } });
@@ -464,11 +460,7 @@ describe('protection (S4)', () => {
     await db.node.update({ where: { id: oldMessages.id }, data: {
       tags: ['spec'], deletedAt: new Date('2026-08-31T00:00:00Z'),
     } });
-    await db.node.create({ data: {
-      id: generateId(), memoryId: appMem.id, loc: 'zz:mint-marker', name: 'zz:mint-marker',
-      content: 'minted elsewhere; tombstoned', role: null, tags: [],
-      mintedAt: new Date('2026-09-01T00:00:00Z'), mintedByInfo: 'test', deletedAt: new Date('2026-09-01T00:00:00Z'),
-    } });
+    await createMintMarker(db, appMem.id, { mintedAt: new Date('2026-09-01T00:00:00Z') });
 
     await ensureChannelWithRoot(db, {
       memoryId: appMem.id, loc: 'chats:team', name: 'team', createdBy: admin.id,
@@ -740,9 +732,9 @@ describe('protection (S4)', () => {
         {},
         {
           input: {
-            id: source.id,
+            ref: source.id,
             content: 'must roll back with the rejected edge set',
-            edges: [{ targetId: oldMessage.nodeId, name: 'stale-target' }],
+            edges: [{ targetRef: oldMessage.nodeId, name: 'stale-target' }],
           },
         },
         ctx(admin.id),
@@ -872,7 +864,7 @@ describe('protection (S4)', () => {
     await M.deleteChannel({}, { ref: target.id }, ctx(admin.id));
 
     const err = await M.createNode(
-      {}, { input: { memoryId: appMem.urn, loc: 'chats:team:messages:9999', name: 'squat' } }, ctx(admin.id),
+      {}, { input: { memoryRef: appMem.urn, loc: 'chats:team:messages:9999', name: 'squat' } }, ctx(admin.id),
     ).catch((e: unknown) => e as { message: string; extensions: Record<string, unknown> });
 
     expect(err.extensions).toMatchObject({ code: 'LOC_PROTECTED', channelLive: false });
@@ -886,7 +878,7 @@ describe('protection (S4)', () => {
 
   it("a LIVE Channel's refusal still names its own posting operation (#1226 control)", async () => {
     const err = await M.createNode(
-      {}, { input: { memoryId: appMem.urn, loc: 'chats:team:messages:0009', name: 'm' } }, ctx(admin.id),
+      {}, { input: { memoryRef: appMem.urn, loc: 'chats:team:messages:0009', name: 'm' } }, ctx(admin.id),
     ).catch((e: unknown) => e as { message: string; extensions: Record<string, unknown> });
     expect(err.extensions).toMatchObject({ code: 'LOC_PROTECTED', channelLive: true });
     expect(err.message).toContain('createTeamChatMessage');
@@ -925,7 +917,7 @@ describe('protection (S4)', () => {
 
     // The reservation survived, so the address cannot be occupied.
     await expect(
-      M.createNode({}, { input: { memoryId: appMem.urn, loc: 'chats:team', name: 'squat' } }, ctx(admin.id)),
+      M.createNode({}, { input: { memoryRef: appMem.urn, loc: 'chats:team', name: 'squat' } }, ctx(admin.id)),
     ).rejects.toMatchObject({ extensions: { code: 'LOC_PROTECTED' } });
   });
 
@@ -1143,7 +1135,7 @@ describe('PR #1165 review round 2 — the remaining unlocked writers', () => {
     // A root-level generic create at a root-level Channel address is refused too.
     await ensureChannelWithRoot(db, { memoryId: appMem.id, loc: 'announce', name: 'announce', createdBy: admin.id });
     await expect(
-      M.createNode({}, { input: { memoryId: appMem.urn, loc: 'announce', name: 'a' } }, ctx(admin.id)),
+      M.createNode({}, { input: { memoryRef: appMem.urn, loc: 'announce', name: 'a' } }, ctx(admin.id)),
     ).rejects.toMatchObject({ extensions: { code: 'LOC_PROTECTED' } });
   });
 });

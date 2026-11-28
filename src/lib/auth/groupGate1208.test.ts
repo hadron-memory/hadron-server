@@ -245,7 +245,7 @@ describe('#1208 group read gates vs MemoryMember (cor:acl:010:01)', () => {
 
   it('an explicit orgId=A list does not include the caller\'s group memory in org B (#3595)', async () => {
     const Q = resolvers.Query as any;
-    const scoped = await Q.memories({}, { orgId: org.id }, gqlCtx(crossOrgMember.id));
+    const scoped = await Q.memories({}, { orgRef: org.id }, gqlCtx(crossOrgMember.id));
     expect(scoped.items.map((m: { id: string }) => m.id)).not.toContain(orgBGroupMem.id); // RED before the org-bound fix
     // Unscoped, the same caller's cross-org MemoryMember reach is retained.
     const unscoped = await Q.memories({}, {}, gqlCtx(crossOrgMember.id));

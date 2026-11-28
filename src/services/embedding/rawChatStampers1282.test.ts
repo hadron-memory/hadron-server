@@ -61,7 +61,7 @@ it('a cross-memory subtree move restamps controls but not record turns under the
   const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
   const destination = await db.memory.create({ data: { id: generateId(), organizationId: memory.organizationId, urn: `test:dest-${generateId()}`, name: 'Destination', class: 'knowledge', vectorIndexEnabled: true } });
   const root = await db.node.findUniqueOrThrow({ where: { id: ids[5]! } });
-  await db.$transaction(tx => moveNodeSubtree(tx, { source: root, destLoc: 'moved', destMemoryId: destination.id, editor: { userId: null } }));
+  await db.$transaction(tx => moveNodeSubtree(tx, { ownerLimitCaller: null, source: root, destLoc: 'moved', destMemoryId: destination.id, editor: { userId: null } }));
   const rows = await db.node.findMany({ where: { memoryId: destination.id } });
   expect(rows.length).toBe(5);
   for (const row of rows) expect(row.embeddingWorkToken === null).toBe(isRawChatNode(row));

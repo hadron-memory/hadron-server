@@ -1,0 +1,99 @@
+/** #5010: the migration refuses with HDPRF on a soft-deleted entry, applies cleanly otherwise, and shares one SQL source. */
+import { readdirSync, readFileSync } from 'node:fs';
+import { Client } from 'pg';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { db } from '../../integrations/db/client.js';
+import { cleanDb } from '../helpers.js';
+import { generateId } from '../../lib/id.js';
+
+const read = (p: string) => readFileSync(new URL(`../../../prisma/${p}`, import.meta.url), 'utf8');
+const MIGRATION = read('migrations/20261125130000_credit_ledger_append_only/migration.sql');
+const SOURCE = read('credit-ledger-invariants.sql');
+
+let pg: Client;
+let orgId: string;
+beforeAll(async () => { pg = new Client({ connectionString: process.env.DATABASE_URL }); await pg.connect(); });
+afterAll(async () => { await pg.end(); });
+beforeEach(async () => {
+  await cleanDb(db);
+  orgId = (await db.organization.create({ data: { id: generateId(), name: 'mig-org', urn: `mig-${generateId()}` } })).id;
+});
+
+/** Put the table in its pre-migration shape inside the open transaction (no trigger, no CHECK, cascade FK). */
+async function preMigrationShape() {
+  await pg.query('DROP TRIGGER IF EXISTS credit_ledger_entries_append_only ON credit_ledger_entries');
+  await pg.query('ALTER TABLE credit_ledger_entries DROP CONSTRAINT IF EXISTS chk_credit_ledger_not_soft_deleted');
+  await pg.query('ALTER TABLE credit_ledger_entries DROP CONSTRAINT credit_ledger_entries_organization_id_fkey');
+  await pg.query(`ALTER TABLE credit_ledger_entries ADD CONSTRAINT credit_ledger_entries_organization_id_fkey
+    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE ON UPDATE CASCADE`);
+}
+const fkAction = async () => (await pg.query(`SELECT confdeltype, confupdtype FROM pg_constraint WHERE conname = 'credit_ledger_entries_organization_id_fkey'`)).rows;
+const hasTrigger = async () => (await pg.query(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgname = 'credit_ledger_entries_append_only'`)).rows[0].n;
+const hasCheck = async () => (await pg.query(`SELECT count(*)::int AS n FROM pg_constraint WHERE conname = 'chk_credit_ledger_not_soft_deleted'`)).rows[0].n;
+
+describe('#5010 migration', () => {
+  it('pin 9: a soft-deleted entry stops it with SQLSTATE HDPRF and changes nothing', async () => {
+    await pg.query('BEGIN');
+    try {
+      await preMigrationShape();
+      await pg.query(`INSERT INTO credit_ledger_entries (id, organization_id, kind, amount_micro_cents, deleted_at) VALUES ($1, $2, 'grant', 1, now())`, [generateId(), orgId]);
+      await pg.query('SAVEPOINT before_migration');
+      let err: { code?: string; message?: string; detail?: string } | undefined;
+      try { await pg.query(MIGRATION); } catch (e) { err = e as { code?: string; message?: string; detail?: string }; }
+      expect(err?.code).toBe('HDPRF');
+      expect(err?.detail).toBe('count of rows with deleted_at set: 1');
+      expect(err?.message).not.toContain(orgId);
+      await pg.query('ROLLBACK TO SAVEPOINT before_migration');
+      // changes nothing: still the pre-migration shape (cascade FK, no trigger, no CHECK)
+      expect(await fkAction()).toEqual([{ confdeltype: 'c', confupdtype: 'c' }]);
+      expect([await hasTrigger(), await hasCheck()]).toEqual([0, 0]);
+    } finally {
+      await pg.query('ROLLBACK');
+    }
+  });
+
+  it('pin 10: with no soft-deleted entry it applies, and the FK then restricts', async () => {
+    await pg.query('BEGIN');
+    try {
+      await preMigrationShape();
+      await pg.query(`INSERT INTO credit_ledger_entries (id, organization_id, kind, amount_micro_cents) VALUES ($1, $2, 'grant', 1)`, [generateId(), orgId]);
+      expect(await fkAction()).toEqual([{ confdeltype: 'c', confupdtype: 'c' }]);
+      await pg.query(MIGRATION);
+      expect(await fkAction()).toEqual([{ confdeltype: 'r', confupdtype: 'r' }]);
+      expect([await hasTrigger(), await hasCheck()]).toEqual([1, 1]);
+      await pg.query('SAVEPOINT s');
+      await expect(pg.query('DELETE FROM organizations WHERE id = $1', [orgId])).rejects.toMatchObject({ code: '23503' });
+    } finally {
+      await pg.query('ROLLBACK');
+    }
+  });
+
+  it('pin 11: the newest migration to carry the shared invariants file ends with it, and post-push.sql includes it', () => {
+    // #5014 (A6) edits the file, so a later migration carries it: the newest one whose text contains the first line is the carrier.
+    const migrations = new URL('../../../prisma/migrations/', import.meta.url);
+    const first = SOURCE.split('\n')[0]!;
+    const dir = readdirSync(migrations).sort().reverse()
+      .find((d) => { try { return readFileSync(new URL(`${d}/migration.sql`, migrations), 'utf8').includes(first); } catch { return false; } });
+    expect(dir).toBeTruthy();
+    expect(readFileSync(new URL(`${dir}/migration.sql`, migrations), 'utf8').endsWith(SOURCE)).toBe(true);
+    expect(read('post-push.sql')).toContain('\\ir credit-ledger-invariants.sql');
+  });
+
+  it('pin 12: every ledger function pins search_path, in the installed database and in the migration text', async () => {
+    // #5238 adds the two owner-gone functions; the shared file (the newest carrier's tail, pin 11) holds all four.
+    const r = await pg.query(`SELECT proname, proconfig FROM pg_proc WHERE proname IN ('hadron_credit_ledger_user_merged', 'hadron_credit_ledger_entries_append_only', 'hadron_credit_ledger_org_gone', 'hadron_credit_ledger_user_gone') ORDER BY proname`);
+    expect(r.rows).toEqual([
+      { proname: 'hadron_credit_ledger_entries_append_only', proconfig: ['search_path=public, pg_temp'] },
+      { proname: 'hadron_credit_ledger_org_gone', proconfig: ['search_path=public, pg_temp'] },
+      { proname: 'hadron_credit_ledger_user_gone', proconfig: ['search_path=public, pg_temp'] },
+      { proname: 'hadron_credit_ledger_user_merged', proconfig: ['search_path=public, pg_temp'] },
+    ]);
+    expect(MIGRATION.match(/SET search_path = public, pg_temp/g)).toHaveLength(2);
+    expect(SOURCE.match(/SET search_path = public, pg_temp/g)).toHaveLength(4);
+    // #5083: the bodies read the schema-qualified tables, so a session TEMP table of the same name cannot answer them.
+    for (const table of ['user_merges', 'organizations', 'users']) {
+      expect(SOURCE).toMatch(new RegExp(`FROM public\\.${table} `));
+      expect(SOURCE).not.toMatch(new RegExp(`FROM ${table}\\b`));
+    }
+  });
+});

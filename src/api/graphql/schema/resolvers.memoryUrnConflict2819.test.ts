@@ -48,20 +48,27 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: orgId, userId: otherId, role: 'CONTRIBUTOR' } });
 });
 
+// #5203 S3 (cor:urn:010:01): a DERIVED slug never refuses, it iterates; the CONFLICT below is the answer to a
+// SUPPLIED slug a live memory holds, so these cases pass `slug` explicitly. A same-name create without one iterates.
 describe('already-existing memory URN is CONFLICT (#2819)', () => {
   it('a. createMemory twice in an org: CONFLICT with the unchanged message', async () => {
     await M.createMemory({}, { orgRef: orgId, name: 'Probe Yed', vectorIndexEnabled: false }, ctx());
-    const r = await refusal(M.createMemory({}, { orgRef: orgId, name: 'Probe Yed', vectorIndexEnabled: false }, ctx()));
+    const r = await refusal(M.createMemory({}, { orgRef: orgId, name: 'Probe Yed', slug: 'probe-yed', vectorIndexEnabled: false }, ctx()));
     expect(r.extensions?.code).toBe('CONFLICT');
     expect(r.message).toBe(`A memory with URN "${orgUrn}:probe-yed" already exists`);
+    // The same name with no slug supplied iterates instead (#5203 S3).
+    const derived = await M.createMemory({}, { orgRef: orgId, name: 'Probe Yed', vectorIndexEnabled: false }, ctx());
+    expect(derived.urn).toBe(`${orgUrn}:probe-yed-2`);
   });
 
   it('b. createMemory twice user-owned: CONFLICT', async () => {
     const args = { name: 'Mine', memoryClass: 'private' };
     await M.createMemory({}, args, ctx());
-    const r = await refusal(M.createMemory({}, args, ctx()));
+    const r = await refusal(M.createMemory({}, { ...args, slug: 'mine' }, ctx()));
     expect(r.extensions?.code).toBe('CONFLICT');
     expect(r.message).toBe('A memory with URN "cadmin:mine" already exists');
+    // The same name with no slug supplied iterates instead (#5203 S3).
+    expect((await M.createMemory({}, args, ctx())).urn).toBe('cadmin:mine-2');
   });
 
   it('c1. cloneMemory onto an existing memory URN: CONFLICT', async () => {
@@ -98,7 +105,7 @@ describe('already-existing memory URN is CONFLICT (#2819)', () => {
     });
     // Premise: the holder really is invisible to this caller.
     expect(await getAccessibleMemoryIds(ctx(), hiddenHolder.id)).toEqual([]);
-    const attempt = (name: string) => M.createMemory({}, { orgRef: orgId, name, vectorIndexEnabled: false }, ctx());
+    const attempt = (name: string) => M.createMemory({}, { orgRef: orgId, name, slug: name, vectorIndexEnabled: false }, ctx());
     const v = await refusal(attempt('visible'));
     const h = await refusal(attempt('hidden'));
     expect(v.extensions?.code).toBe('CONFLICT');
@@ -107,10 +114,13 @@ describe('already-existing memory URN is CONFLICT (#2819)', () => {
     expect(h.message.replace('hidden', 'X')).toBe(v.message.replace('visible', 'X'));
   });
 
-  it('e. a soft-deleted memory at the URN is still reclaimed', async () => {
+  it('e. a soft-deleted memory at a SUPPLIED slug is still reclaimed; a derived slug skips it (#5203 S3)', async () => {
     const first = await M.createMemory({}, { orgRef: orgId, name: 'gone', vectorIndexEnabled: false }, ctx());
     await db.memory.update({ where: { id: first.id }, data: { deletedAt: new Date() } });
-    const again = await M.createMemory({}, { orgRef: orgId, name: 'gone', vectorIndexEnabled: false }, ctx());
+    const derived = await M.createMemory({}, { orgRef: orgId, name: 'gone', vectorIndexEnabled: false }, ctx());
+    expect(derived.urn).toBe(`${orgUrn}:gone-2`);
+    expect(await db.memory.findUnique({ where: { id: first.id } })).not.toBeNull();
+    const again = await M.createMemory({}, { orgRef: orgId, name: 'gone', slug: 'gone', vectorIndexEnabled: false }, ctx());
     expect(again.urn).toBe(`${orgUrn}:gone`);
   });
 });

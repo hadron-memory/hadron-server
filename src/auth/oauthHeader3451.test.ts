@@ -7,11 +7,12 @@ import { HADRON_HEADER, HADRON_HEADER_STYLE } from './hadron-header.template.js'
 import { SIGNIN_PROMPT_TEMPLATE } from './signin-prompt.template.js';
 import { EMAIL_ENTRY_TEMPLATE, EMAIL_SENT_TEMPLATE, REVIEW_CODE_TEMPLATE } from './email-entry.template.js';
 import { CONSENT_TEMPLATE } from './consent.template.js';
+import { CODE_PAGE_TEMPLATE } from './code-page.template.js';
 import { LOGIN_ERROR_TEMPLATE } from './login-error.template.js';
 
 const pages = { signIn: SIGNIN_PROMPT_TEMPLATE, email: EMAIL_ENTRY_TEMPLATE,
   sent: EMAIL_SENT_TEMPLATE, review: REVIEW_CODE_TEMPLATE, consent: CONSENT_TEMPLATE,
-  error: LOGIN_ERROR_TEMPLATE };
+  error: LOGIN_ERROR_TEMPLATE, code: CODE_PAGE_TEMPLATE };
 // The header is static: substitution of the existing page placeholders must
 // neither supply nor remove any of its markup.
 const render = (template: string) => template.replace(/{{\w+}}/g, 'Test Client');

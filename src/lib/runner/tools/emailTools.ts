@@ -29,6 +29,8 @@ import { isResendToolConfigured, maskEmailAddress, sendResendEmail } from '../..
 import { decryptResendCredentials, isPlatformResendAllowed } from '../../resendSenders.js';
 import type { PrismaClient } from '../../../generated/prisma/index.js';
 import type { RunToolDef } from './types.js';
+import { requireOwnerRefOf } from '../../owner.js';
+import { requireOrgTenantForTool } from './orgOnly.js';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export const MAX_EMAIL_SUBJECT_CHARS = 200;
@@ -72,6 +74,8 @@ export const hadronSendEmail: RunToolDef = {
   },
   cost: 1,
   execute: async (ctx, args) => {
+    // #5077: organization-only; a person's run is refused before any query or counter.
+    const runOrgId = requireOrgTenantForTool(requireOwnerRefOf(ctx.run), 'hadron_send_email');
     const to = String(args.to ?? '').trim();
     const subject = typeof args.subject === 'string' ? args.subject.trim() : '';
     const text = typeof args.text === 'string' ? args.text.trim() : '';
@@ -91,14 +95,14 @@ export const hadronSendEmail: RunToolDef = {
     }
 
     const { db, run } = ctx;
-    const sender = await db.resendSender.findUnique({ where: { organizationId: run.organizationId } });
+    const sender = await db.resendSender.findUnique({ where: { organizationId: runOrgId } });
     if (sender && !sender.enabled) {
       throw new GraphQLError('This organization\'s Resend sender is disabled.', {
         extensions: { code: 'RESEND_SENDER_NOT_CONFIGURED' },
       });
     }
     const credentials = sender ? decryptResendCredentials(sender) : undefined;
-    const platformAllowed = !sender && isPlatformResendAllowed(run.organizationId);
+    const platformAllowed = !sender && isPlatformResendAllowed(runOrgId);
     if (!credentials && !platformAllowed) {
       throw new GraphQLError('This organization has no Resend sender configured.', {
         extensions: { code: 'RESEND_SENDER_NOT_CONFIGURED' },
@@ -110,14 +114,14 @@ export const hadronSendEmail: RunToolDef = {
       ctx.log(`hadron_send_email: skipped — app email quota exhausted (to ${masked})`);
       return { isError: true, error: 'Daily email quota for this App is exhausted. Do not retry today.' };
     }
-    if (!(await consumeQuota(db, 'org', run.organizationId, 'email.send', defaultQuotaLimit('org', 'email.send')))) {
+    if (!(await consumeQuota(db, 'org', runOrgId, 'email.send', defaultQuotaLimit('org', 'email.send')))) {
       await refundEmailQuota(db, 'app', run.appId);
       ctx.log(`hadron_send_email: skipped — organization email quota exhausted (to ${masked})`);
       return { isError: true, error: 'Daily email quota for this organization is exhausted. Do not retry today.' };
     }
-    if (!(await consumeActionTicket(db, run.organizationId, run.appId, 'comm.outbound', run.id))) {
+    if (!(await consumeActionTicket(db, { organizationId: runOrgId }, run.appId, 'comm.outbound', run.id))) {
       await refundEmailQuota(db, 'app', run.appId);
-      await refundEmailQuota(db, 'org', run.organizationId);
+      await refundEmailQuota(db, 'org', runOrgId);
       ctx.log(`hadron_send_email: skipped — no comm.outbound ticket (to ${masked})`);
       return {
         isError: true,

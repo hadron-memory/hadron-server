@@ -1,3 +1,4 @@
+import { assertMoveWithinSizeLimit, mapMoveExpiry, SubtreeMoveTimedOutError, SubtreeMoveTooLargeError } from '../lib/moveSizeLimit.js';
 import { respondSessionSuperseded } from '../lib/sessionSuperseded.js';
 import { SYNC_NOT_ATTEMPTED, syncNotAttemptedMessage } from '../integrations/github/syncNotAttempted.js';
 import { MCP_WORKER_BINDING_UNSUPPORTED, offTeamTool } from './disabledTools.js';
@@ -127,6 +128,7 @@ import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
 import { foreignEdgeMemoryIds } from '../lib/foreignEdgeMemories.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockLocForWrite, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
+import { createChatbotContainers, missingChatbotContainers } from '../lib/chatbotAncestors.js';
 import { lockMemoryForChannelChange } from '../lib/channels.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark, SPEC_MINTED_PERMANENT } from '../lib/mintedSpecPermanence.js';
 import { governedAmong, governedRemovalError, lockGovernedRowsIn, lockRemovalRows } from '../lib/governedRemoval.js';
@@ -172,7 +174,7 @@ import {
   mcpPrincipalKey,
   releaseOnceOnResponseEnd,
 } from './transportBounds.js';
-import { unstorableTextRefusal, refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
+import { ownerLimitResult, unstorableTextRefusal, refusalResult, toolErrorResult, withToolErrorBoundary } from './toolError.js';
 import { edgeTextFields, findUnstorableText, unstorableTextMessage, unstorableTextText } from '../lib/unstorableTextInput.js';
 import { refNamesNothing } from '../lib/entityRef/refNamesNothing.js';
 import { textResult } from './textResult.js';
@@ -417,6 +419,7 @@ import { admitOperationRate } from '../lib/rateLimit/index.js';
 import { transportRateIdentity } from '../lib/rateLimit/identity.js';
 // Spec 049 Phase 6 — the register block on hadron_whoami's bound rows.
 import { resolveRegister, renderDerivedBlocks } from '../lib/resolveRegister.js';
+import { collapseLineBreaks } from '../lib/collapseLineBreaks.js';
 import { attendeeMentionTokens } from '../lib/channelReadState.js';
 import { mentionReach } from '../lib/mentionReach.js';
 import {
@@ -428,6 +431,9 @@ import { resolveOrgRef } from '../lib/entityRef/orgRef.js';
 import { edgeDisplayOrder, edgeRunOrder } from '../lib/edgeOrder.js';
 import { Prisma, type PrismaClient, type SessionType, type NodeContentValidationOutcome } from '../generated/prisma/index.js';
 import { memoryIsVectorIndexed } from '../lib/embedding/indexing.js';
+import { ownerLimitCaller, requireNodeHeadroom } from '../lib/ownerLimits/nodes.js';
+import { assertNodeContentSize, resultingNodeContent } from '../lib/nodeContentLimit.js';
+import { refusalText } from '../lib/refEcho.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -850,7 +856,7 @@ export async function resolveEdgeRefs(
         select: { loc: true, memoryId: true },
       });
       if (!tgt || !(await canReadMemory(db, auth, tgt.memoryId, EXPLICIT_REF))) {
-        return { error: `Edge target not found: "${edge.targetId}"` };
+        return { error: 'Edge target not found' };
       }
       resolved.push({
         targetNodeId,
@@ -863,7 +869,7 @@ export async function resolveEdgeRefs(
       });
     } catch (err) {
       if (err instanceof NodeNotFoundError) {
-        return { error: `Edge target not found: "${err.ref}"` };
+        return { error: 'Edge target not found' };
       }
       throw err;
     }
@@ -932,7 +938,7 @@ export async function addEdge(args: {
       assertFullyQualifiedUrn(rawTarget, 'node');
     }
   } catch (e) {
-    if (e instanceof UrnNotQualifiedError) return { error: `Target: ${e.message}` };
+    if (e instanceof UrnNotQualifiedError) return { error: `Target: ${refusalText(e)}` };
     throw e;
   }
 
@@ -947,14 +953,14 @@ export async function addEdge(args: {
     });
     // #1316: a node in a memory hidden from this caller answers as a missing one.
     if (!found || found.deletedAt || (await isMemoryHiddenFrom(auth, found.memoryId, 'write'))) {
-      return { error: `Source node not found: "${rawSource}".` };
+      return { error: 'Source node not found.' };
     }
     sourceNode = { id: found.id, loc: found.loc, memoryId: found.memoryId };
   } else {
     try {
       assertFullyQualifiedUrn(rawSource, 'node');
     } catch (e) {
-      if (e instanceof UrnNotQualifiedError) return { error: `Source: ${e.message}` };
+      if (e instanceof UrnNotQualifiedError) return { error: `Source: ${refusalText(e)}` };
       throw e;
     }
     const { memoryUrn: sourceMemoryUrn, loc: sourceLoc, fragment: sourceFrag } =
@@ -968,14 +974,14 @@ export async function addEdge(args: {
     // confirms the memory exists.
     const sourceMem = await resolveVisibleMemoryByUrn(auth, sourceMemoryUrn, 'write');
     if (!sourceMem) {
-      return { error: `Source memory not found: "${sourceMemoryUrn}".` };
+      return { error: 'Source memory not found.' };
     }
     const found = await db.node.findUnique({
       where: { loc_memoryId: { loc: sourceLoc, memoryId: sourceMem.id } },
       select: { id: true, loc: true, memoryId: true, deletedAt: true },
     });
     if (!found || found.deletedAt) {
-      return { error: `Source node not found: "${rawSource}".` };
+      return { error: 'Source node not found.' };
     }
     sourceNode = { id: found.id, loc: found.loc, memoryId: found.memoryId };
   }
@@ -989,7 +995,7 @@ export async function addEdge(args: {
     ({ id: targetNodeId } = await resolveNodeRefForAuth(rawTarget, auth, sourceNode.memoryId));
   } catch (e) {
     if (e instanceof NodeNotFoundError) {
-      return { error: `Edge target not found: "${e.ref}"` };
+      return { error: 'Edge target not found' };
     }
     throw e;
   }
@@ -1001,7 +1007,7 @@ export async function addEdge(args: {
     select: { loc: true, memoryId: true },
   });
   if (!target || !(await canReadMemory(db, auth, target.memoryId, EXPLICIT_REF))) {
-    return { error: `Edge target not found: "${rawTarget}"` };
+    return { error: 'Edge target not found' };
   }
 
   // Spec 037: the edge's identity is its loc within the source memory.
@@ -1026,8 +1032,8 @@ export async function addEdge(args: {
       sourceNode,
       { id: targetNodeId, loc: target.loc, memoryId: target.memoryId },
     );
-    if (!locked.source) return `Source node not found: "${rawSource}".`;
-    if (!locked.target) return `Edge target not found: "${rawTarget}"`;
+    if (!locked.source) return 'Source node not found.';
+    if (!locked.target) return 'Edge target not found';
 
     // Ownership may transfer after preflight while this transaction waits on
     // the endpoint keys. Fence both Memories through the insert, then rerun
@@ -1036,13 +1042,13 @@ export async function addEdge(args: {
       await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memoryId} FOR SHARE`;
     }
     if (!(await canReadMemory(tx as typeof db, auth, sourceNode.memoryId, EXPLICIT_REF))) {
-      return `Source node not found: "${rawSource}".`;
+      return 'Source node not found.';
     }
     if (!(await canWriteToMemory(tx as typeof db, auth, sourceNode.memoryId, EXPLICIT_REF))) {
       return `Write access denied for source memory.${await explainWriteRefusal(tx as typeof db, auth, sourceNode.memoryId)}`;
     }
     if (!(await canReadMemory(tx as typeof db, auth, target.memoryId, EXPLICIT_REF))) {
-      return `Edge target not found: "${rawTarget}"`;
+      return 'Edge target not found';
     }
     // Writer level of the source node, on the locked source.
     try {
@@ -1230,9 +1236,9 @@ async function replaceOutgoingEdgesInTransaction(
     memoryId: edge.targetMemoryId,
   }));
   const live = await liveEdgeEndpointSet(tx, [source, ...targets]);
-  if (!live.has(source.id)) return `Source node not found: "${source.id}".`;
+  if (!live.has(source.id)) return 'Source node not found.';
   const missing = args.resolved.find((edge) => !live.has(edge.targetNodeId));
-  if (missing) return `Edge target not found: "${missing.targetNodeId}"`;
+  if (missing) return 'Edge target not found';
 
   // Derived INCLUDE edges (#2040) belong to the content writer.
   await tx.edge.deleteMany({ where: { sourceId: args.sourceNodeId, governedKind: null } });
@@ -1277,9 +1283,9 @@ async function addOutgoingEdgesInTransaction(
   const source = { id: args.sourceNodeId, loc: args.sourceLoc, memoryId: args.sourceMemoryId };
   const targets = args.resolved.map((edge) => ({ id: edge.targetNodeId, loc: edge.targetLoc, memoryId: edge.targetMemoryId }));
   const live = await liveEdgeEndpointSet(tx, [source, ...targets]);
-  if (!live.has(source.id)) return { error: `Source node not found: "${source.id}".` };
+  if (!live.has(source.id)) return { error: 'Source node not found.' };
   const missing = args.resolved.find((edge) => !live.has(edge.targetNodeId));
-  if (missing) return { error: `Edge target not found: "${missing.targetNodeId}"` };
+  if (missing) return { error: 'Edge target not found' };
   let added = 0;
   let unchanged = 0;
   for (const e of args.resolved) {
@@ -1352,10 +1358,11 @@ function safeEmitEntityUrnV2(type: 'memory' | 'app' | 'agent' | 'org', bareUrn: 
 /**
  * Tenant-editable text (an org, App or memory name) inside a line-parsed answer: control characters (CR, LF, the
  * Unicode line separators) collapse to a space so a name can never forge an extra `signed in as:` or `active memory:`
- * line, and it is cut at `max` characters. Shared by the #1412 org block and the #4290 whoami header.
+ * line, and it is cut at `max` characters. Shared by the #1412 org block, the #4290 whoami header and the whoami
+ * session rows (worker name, role and App name, #4587).
  */
 function oneLineText(name: string, max = 100): string {
-  const flat = name.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ');
+  const flat = collapseLineBreaks(name);
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
@@ -1465,7 +1472,7 @@ async function resolveParentForRead(
   | { ok: true; loc: string; memoryId?: string }
   | { ok: false; kind: 'invalid' | 'notFound'; message: string }
 > {
-  const missing = () => ({ ok: false as const, kind: 'notFound' as const, message: `Node "${parentRel}" not found.` });
+  const missing = () => ({ ok: false as const, kind: 'notFound' as const, message: 'Node not found.' });
   const readable = async (id: string) =>
     await canReadMemory(db, auth, id, EXPLICIT_REF);
   try {
@@ -1494,7 +1501,7 @@ async function resolveParentForRead(
     }
     return { ok: true, ...resolved };
   } catch (e) {
-    if (e instanceof UrnNotQualifiedError) return { ok: false, kind: 'invalid', message: e.message };
+    if (e instanceof UrnNotQualifiedError) return { ok: false, kind: 'invalid', message: refusalText(e) };
     throw e;
   }
 }
@@ -1772,8 +1779,8 @@ type ReadProjectionNode = {
   abstract: string | null;
   abstractOriginHash: string | null;
   memory: { isEncrypted: boolean };
-  outgoingEdges: Array<{ name: string | null; loc: string; governedKind?: unknown; target: { id: string; loc: string; memoryId: string; name: string } }>;
-  incomingEdges: Array<{ name: string | null; loc: string; governedKind?: unknown; source: { id: string; loc: string; memoryId: string; name: string } }>;
+  outgoingEdges: Array<{ name: string | null; loc: string; memoryId: string; governedKind?: unknown; target: { id: string; loc: string; memoryId: string; name: string } }>;
+  incomingEdges: Array<{ name: string | null; loc: string; memoryId: string; governedKind?: unknown; source: { id: string; loc: string; memoryId: string; name: string } }>;
 };
 
 const readProjectionInclude = {
@@ -2016,15 +2023,16 @@ function inheritedReadRow<T extends ReadProjectionNode>(node: T): T {
  * #1647 (cor:api:140:03, concealment): a readable near endpoint does not authorize returning an unreadable far
  * endpoint's metadata. Drops edges whose far node lives in another memory the caller cannot read, as if absent, so the
  * far URN, id and name never reach the projection. Same-memory edges ride the near node's own gate.
+ * hadron-internal#79: the memory that holds the edge is asked the same way.
  */
 async function concealUnreadableEdgeEnds<N extends {
   memoryId: string;
-  outgoingEdges: Array<{ target: { memoryId: string } }>;
-  incomingEdges: Array<{ source: { memoryId: string } }>;
+  outgoingEdges: Array<{ memoryId: string; target: { memoryId: string } }>;
+  incomingEdges: Array<{ memoryId: string; source: { memoryId: string } }>;
 }>(auth: AuthContext | undefined, node: N): Promise<N> {
   const foreign = new Set<string>();
-  for (const e of node.outgoingEdges) if (e.target.memoryId !== node.memoryId) foreign.add(e.target.memoryId);
-  for (const e of node.incomingEdges) if (e.source.memoryId !== node.memoryId) foreign.add(e.source.memoryId);
+  for (const e of node.outgoingEdges) for (const id of [e.memoryId, e.target.memoryId]) if (id !== node.memoryId) foreign.add(id);
+  for (const e of node.incomingEdges) for (const id of [e.memoryId, e.source.memoryId]) if (id !== node.memoryId) foreign.add(id);
   if (foreign.size === 0) return node;
   const readable = new Set<string>();
   if (auth) {
@@ -2033,8 +2041,8 @@ async function concealUnreadableEdgeEnds<N extends {
   const ok = (memoryId: string) => memoryId === node.memoryId || readable.has(memoryId);
   return {
     ...node,
-    outgoingEdges: node.outgoingEdges.filter((e) => ok(e.target.memoryId)),
-    incomingEdges: node.incomingEdges.filter((e) => ok(e.source.memoryId)),
+    outgoingEdges: node.outgoingEdges.filter((e) => ok(e.memoryId) && ok(e.target.memoryId)),
+    incomingEdges: node.incomingEdges.filter((e) => ok(e.memoryId) && ok(e.source.memoryId)),
   };
 }
 
@@ -3460,7 +3468,7 @@ export function createMcpServerInstance(
         const who = app ? safeEmitEntityUrnV2('app', app.urn) : auth.appId;
         scope = auth.userId
           ? `Scope: user · active App ${who} — this App's agent memories + org-readable memories + your personal memories scoped to this App.`
-          : `Scope: App key · ${who} (App-scoped) — this App's agent memories only; personal and org-readable memories require user authentication and are not shown to an App key.`;
+          : `Scope: App key · ${who} (App-scoped) — this App's agent memories and the memories linked to it only; personal and org-readable memories require user authentication and are not shown to an App key, except a memory the App's owner linked.`;
       } else if (auth.userId) {
         scope = `Scope: user · no active App — the union across your Apps + org-readable memories + all your personal memories. Select one with hadron_set_active_app to narrow the view.`;
       } else {
@@ -3553,7 +3561,7 @@ export function createMcpServerInstance(
       // #1316: an unreadable memory takes the missing branch, not "Access denied".
       const mem = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'read');
       if (!mem) {
-        return refusalResult(`Memory not found: '${memoryUrn}'. Use hadron_list_memories to see what's available.`);
+        return refusalResult(`Memory not found. Use hadron_list_memories to see what's available.`);
       }
 
       // Store the bare URN from the DB row (the canonical form for downstream
@@ -3580,6 +3588,13 @@ export function createMcpServerInstance(
     },
   );
 
+  // #5203 S3 (#5197 blind F5): a refused NAME answers with the typed `[bad_user_input]` prefix, as an unstorable one does;
+  // every other refusal keeps its text.
+  const createMemoryRefusalText = (e: unknown): string =>
+    e instanceof GraphQLError && e.extensions?.code === 'BAD_USER_INPUT'
+      ? `[bad_user_input] ${e.message}`
+      : `Error: ${e instanceof Error ? e.message : 'create failed'}`;
+
   // ── hadron_create_memory (#2511) ──────────────────────────────────────────────
   //
   // A thin door onto the createMemory mutation: it calls the resolver, so the
@@ -3592,7 +3607,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_create_memory',
-    "Create a memory. `memoryClass` is 'knowledge' (default), 'group', 'personal' or 'private'. knowledge and group are shared with an organization, so they need `org` and the organization's memory.create permission (a group's creator becomes its first owner). personal and private are owner-only: omit `org` to create one in your own namespace, or pass `org` to create it in an organization you belong to. Exactly the same rules as the createMemory GraphQL mutation. System and App memories are not created here. This does not select the new memory: pass its URN to hadron_set_active_memory.",
+    "Create a memory. `memoryClass` is 'knowledge' (default), 'group', 'personal' or 'private'. knowledge and group are shared with an organization, so they need `org` and the organization's memory.create permission (a group's creator becomes its first owner). personal and private are owner-only: omit `org` to create one in your own namespace, or pass `org` to create it in an organization you belong to (reusing the name of a deleted organization-owned memory there also needs memory.create). Exactly the same rules as the createMemory GraphQL mutation. System and App memories are not created here. This does not select the new memory: pass its URN to hadron_set_active_memory.",
     SHAPE_HADRON_CREATE_MEMORY,
     async ({ name, memoryClass, org, shortDescription, description, tags, visibility }) => {
       const ctx: Context = {
@@ -3616,7 +3631,7 @@ export function createMcpServerInstance(
             'Use hadron_set_active_memory to work in it.',
         );
       } catch (e) {
-        return toolErrorResult(e, () => unstorableTextText(e) ?? `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_memory:resolver');
+        return toolErrorResult(e, () => unstorableTextText(e) ?? createMemoryRefusalText(e), 'hadron_create_memory:resolver');
       }
     },
   );
@@ -3639,7 +3654,7 @@ export function createMcpServerInstance(
         const created = await resolvers.Mutation.createAppMemory({}, { appRef: app, name, shortDescription, description, tags }, ctx);
         return textResult(`Memory created: ${safeEmitEntityUrnV2('memory', created.urn)} (class: app, id: ${created.id}).`);
       } catch (e) {
-        return toolErrorResult(e, () => unstorableTextText(e) ?? `Error: ${e instanceof Error ? e.message : 'create failed'}`, 'hadron_create_app_memory:resolver');
+        return toolErrorResult(e, () => unstorableTextText(e) ?? createMemoryRefusalText(e), 'hadron_create_app_memory:resolver');
       }
     },
   );
@@ -3683,7 +3698,7 @@ export function createMcpServerInstance(
             + ` Current revision state: ${receipt.state}.`,
         );
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return refusalResult(`[bad_user_input] ${e.message}`);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(`[bad_user_input] ${refusalText(e)}`);
         return toolErrorResult(e, () => codedRefusalText(e), 'hadron_record_content_validation:resolver');
       }
     },
@@ -4064,7 +4079,7 @@ export function createMcpServerInstance(
       return { ...toolErrorResult(error, () => {
         if (error instanceof ScopeGraphQLError) return `[${String(error.extensions.code ?? 'ERROR').toLowerCase()}] ${error.message}`;
         if (error instanceof MemoryNotFoundError) return '[not_found] Memory not found.';
-        if (error instanceof UrnNotQualifiedError) return `[bad_user_input] ${error.message}`;
+        if (error instanceof UrnNotQualifiedError) return `[bad_user_input] ${refusalText(error)}`;
         throw error;
       }, 'node_recovery'), isError: true as const };
     }
@@ -4101,9 +4116,9 @@ export function createMcpServerInstance(
       e instanceof OrganizationNotFoundError ||
       e instanceof MemoryNotFoundError
     ) {
-      return refusalResult(`[not_found] No match for "${(e as { ref?: string }).ref ?? ''}".`);
+      return refusalResult('[not_found] No match for the given ref.');
     }
-    if (e instanceof UrnNotQualifiedError) return refusalResult(`[bad_user_input] ${e.message}`);
+    if (e instanceof UrnNotQualifiedError) return refusalResult(`[bad_user_input] ${refusalText(e)}`);
     throw e;
   };
 
@@ -4456,7 +4471,7 @@ export function createMcpServerInstance(
         row = r.winner;
       }
       if (!row || !(await canReadScope(ctx, row))) {
-        return refusalResult(`[not_found] No readable scope matches "${scope}"${auth.appId ? '' : ' — a bare name needs an active App; pass the scope id or select an App first'}. See hadron_list_scopes.`);
+        return refusalResult(`[not_found] No readable scope matches${auth.appId ? '' : ' — a bare name needs an active App; pass the scope id or select an App first'}. See hadron_list_scopes.`);
       }
       activeScopeId = row.id;
       await saveActiveScope(db, auth, clientKey, row.id);
@@ -4477,7 +4492,7 @@ export function createMcpServerInstance(
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(refusalText(e));
         throw e;
       }
 
@@ -4487,7 +4502,7 @@ export function createMcpServerInstance(
       // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
       const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memory) {
-        return refusalResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult('Memory not found.');
       }
       const memoryId = memory.id;
       // Default name to the last loc atom (e.g. `services:db-helpers` → `db-helpers`).
@@ -4656,6 +4671,10 @@ export function createMcpServerInstance(
               priorRole: current.role, priorRunnable: current.isRunnable,
               role: current.role, runnable: current.isRunnable, mintHuman: true, authoredChange: sectionChanged,
             }, attestedAuthoring(recoveryCtx(), authoredWith));
+            // #5019 (cor:dmo:060:19) — the section stores its description as its body too, so both count. #5223: after
+            // the authoring gate — a size refusal counts stored fields, so a writer that gate refuses must not learn
+            // the over/under bit.
+            assertNodeContentSize(() => resultingNodeContent({ content, description: description ?? null }, currentForDiff));
             await createNodeRevision(tx, {
               id: generateId(),
               ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), { changes }),
@@ -4668,7 +4687,18 @@ export function createMcpServerInstance(
           }
           if (!prior || prior.deletedAt) {
             await assertMemoryEncryptionStateForWrite(tx, memoryId, parentMemoryState.isEncrypted, auth);
+            const kept = prior ? await tx.node.findUnique({ where: { id: prior.id } }) : null;
+            assertNodeContentSize(() => resultingNodeContent(
+              { content, description: description ?? null }, kept && parentKey ? decryptNodeFieldsWithKey({ ...kept }, parentKey) : kept,
+            ));
           }
+          // #5015 (cor:acl:150:04) — only a fresh insert adds a live node here: the upsert leaves a tombstone deleted and
+          // a live section is an update. The memory row is held FOR SHARE just above, so the owner read is the one at
+          // commit; the owner-limit key is this write's last lock (gate ruling 5).
+          // #5390 — a fresh conversation-family section (`prompts:<name>`) also gets its missing container parents, counted with it.
+          const containers = prior ? [] : await missingChatbotContainers(tx, memoryId, [loc]);
+          if (!prior) await requireNodeHeadroom(tx, { memoryId, amount: 1n + BigInt(containers.length), caller: ownerLimitCaller(auth) });
+          await createChatbotContainers(tx, memoryId, containers, auth.clientId ?? null);
           const row = await tx.node.upsert({
             ...upsertArgs,
             update: { ...upsertArgs.update, ...(sectionChanged ? (sectionStamp ?? clearNodeAuthorship()) : {}), revisionContentHash: revisionStateHashRefreshMarker() },
@@ -4769,13 +4799,13 @@ export function createMcpServerInstance(
       // Resolved scope handed to findNodes. When neither memoryUrn nor a
       // memory-resolvable parentRel is supplied, both stay undefined and
       // findNodes falls back to its own accessible-set scoping.
-      let filterMemoryIds: string[] | undefined;
+      let filterMemoryRefs: string[] | undefined;
       let filterLocPrefix: string | undefined;
 
       // #498 — at most one memory selector. memoryUrn (single), memoryUrns (a
       // set), and allMemories (everything accessible) are three ways to say
       // "where"; combining them is ambiguous. allMemories needs no scope work —
-      // leaving filterMemoryIds undefined makes findNodes use the accessible set
+      // leaving filterMemoryRefs undefined makes findNodes use the accessible set
       // (session-scoped downstream); it exists as the explicit, discoverable
       // form of "omit the scope" so agents reach for the org-wide probe.
       const memSelectors = [
@@ -4799,7 +4829,7 @@ export function createMcpServerInstance(
         try {
           assertFullyQualifiedUrn(memoryUrn, 'memory');
         } catch (e) {
-          if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
+          if (e instanceof UrnNotQualifiedError) return refusalResult(refusalText(e));
           throw e;
         }
         const mem = await resolveMemoryByUrn(memoryUrn);
@@ -4808,10 +4838,10 @@ export function createMcpServerInstance(
           !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))
         ) {
           return textResult(
-            `Memory not found or invalid: '${memoryUrn}'. Use hadron_list_memories to see what is available.`,
+            `Memory not found or invalid. Use hadron_list_memories to see what is available.`,
           );
         }
-        filterMemoryIds = [mem.id];
+        filterMemoryRefs = [mem.id];
       }
 
       // Scope to a SET of memories (#498). Each URN gets the SAME gates as the
@@ -4825,7 +4855,7 @@ export function createMcpServerInstance(
             try {
               assertFullyQualifiedUrn(urn, 'memory');
             } catch (e) {
-              if (e instanceof UrnNotQualifiedError) return { error: e.message };
+              if (e instanceof UrnNotQualifiedError) return { error: refusalText(e) };
               throw e;
             }
             const mem = await resolveMemoryByUrn(urn);
@@ -4834,7 +4864,7 @@ export function createMcpServerInstance(
               !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))
             ) {
               return {
-                error: `Memory not found or invalid: '${urn}'. Use hadron_list_memories to see what is available.`,
+                error: `Memory not found or invalid. Use hadron_list_memories to see what is available.`,
               };
             }
             return { id: mem.id };
@@ -4842,7 +4872,7 @@ export function createMcpServerInstance(
         );
         const bad = resolved.find((r): r is { error: string } => 'error' in r);
         if (bad) return refusalResult(bad.error);
-        filterMemoryIds = resolved.map((r) => (r as { id: string }).id);
+        filterMemoryRefs = resolved.map((r) => (r as { id: string }).id);
       }
 
       // Explicit org-wide scope (#498). Materialize the readable set so
@@ -4854,7 +4884,7 @@ export function createMcpServerInstance(
       // really means all. The resolver re-gates whatever ids we pass, so this
       // cannot broaden beyond the caller's actual reach.
       if (allMemories) {
-        filterMemoryIds =
+        filterMemoryRefs =
           accessibleMemoryIds ??
           (
             await db.memory.findMany({ where: { deletedAt: null }, select: { id: true } })
@@ -4871,7 +4901,7 @@ export function createMcpServerInstance(
             : refusalResult(parent.message);
         }
         filterLocPrefix = parent.loc;
-        if (parent.memoryId) filterMemoryIds = [parent.memoryId];
+        if (parent.memoryId) filterMemoryRefs = [parent.memoryId];
       }
 
       // Build a GraphQL Context from the MCP auth, including appId + sessionId so
@@ -4903,8 +4933,8 @@ export function createMcpServerInstance(
       }
       if (scopeRes?.memoryIds) {
         const inScope = new Set(scopeRes.memoryIds);
-        filterMemoryIds = filterMemoryIds ? filterMemoryIds.filter((id) => inScope.has(id)) : scopeRes.memoryIds;
-        if (filterMemoryIds.length === 0) {
+        filterMemoryRefs = filterMemoryRefs ? filterMemoryRefs.filter((id) => inScope.has(id)) : scopeRes.memoryIds;
+        if (filterMemoryRefs.length === 0) {
           // This valid empty result returns before the resolver. Charge it
           // here once through the same admission engine, without turning an
           // empty filter into an unscoped core retrieval.
@@ -4932,9 +4962,9 @@ export function createMcpServerInstance(
             // (subsumes the old matchesQuery "*" / "" path).
             query: isSurvey ? undefined : safeQuery,
             mode: effectiveMode,
-            orgId: scopeOrgId,
+            orgRef: scopeOrgId,
             filter: {
-              memoryIds: filterMemoryIds,
+              memoryRefs: filterMemoryRefs,
               isRunnable: isRunnable ?? undefined,
               hasOpenThreads: hasOpenThreads ?? undefined,
               role: role ?? undefined,
@@ -5018,7 +5048,7 @@ export function createMcpServerInstance(
         // #2772 (cor:api:090:04): the vector work budget ended the search before it found a page; never a silent empty.
         // #4779 adds two causes: an uncertified hybrid order (budget or keyword ceiling) and a page still short after one re-ranking.
         return textResult(
-          `${scopePrefix}Note: the search stopped early (the vector work budget ran out, the offset+limit window passed 20000 rows, a hybrid ranking could not be certified inside the budget or the keyword ceiling, or a page stayed short after one re-ranking, before a page was found); narrow the filters or lower the offset. [stopped_early]\n\nFound 0 node(s).`,
+          `${scopePrefix}Note: the search stopped early (the vector work budget ran out, the offset+limit window passed 20000 rows, a hybrid ranking could not be certified inside the budget, the vector rank depth or the keyword ceiling, or a page stayed short after one re-ranking, before a page was found); narrow the filters or lower the offset. [stopped_early]\n\nFound 0 node(s).`,
         );
       }
       if (result.reason === 'embedding_unavailable') {
@@ -5036,7 +5066,7 @@ export function createMcpServerInstance(
       const noteLines: string[] = [];
       if (degradedFlags.has('stopped_early')) {
         noteLines.push(
-          'Note: the search stopped early (the vector work budget ran out, the offset+limit window was cut at 20000 rows, a hybrid ranking could not be certified inside the budget or the keyword ceiling, or a page stayed short after one re-ranking), so this page may be shorter than, or ordered differently from, the true page. [degraded:stopped_early]',
+          'Note: the search stopped early (the vector work budget ran out, the offset+limit window was cut at 20000 rows, a hybrid ranking could not be certified inside the budget, the vector rank depth or the keyword ceiling, or a page stayed short after one re-ranking), so this page may be shorter than, or ordered differently from, the true page. [degraded:stopped_early]',
         );
       }
       if (degradedFlags.has('no_vector_index')) {
@@ -5097,6 +5127,7 @@ export function createMcpServerInstance(
             target: { loc: string; memoryId: string; deletedAt: Date | null } | null;
             name: string | null;
             loc: string;
+            memoryId: string;
           }>;
         };
         score: number | null;
@@ -5163,9 +5194,11 @@ export function createMcpServerInstance(
                   canReadMemory: (memoryId) => canReadMemory(db, auth, memoryId, EXPLICIT_REF),
                 })).map(({ edge, endpoint }) => ({ ...edge, target: endpoint }))
               : [])
-            : (n.outgoingEdges ?? []).filter(
-                (e) => e.target && e.target.deletedAt == null,
-              );
+            : (await concealUnreadableEdgeEnds(auth, {
+                memoryId: n.memoryId,
+                outgoingEdges: (n.outgoingEdges ?? []).flatMap((e) => (e.target && e.target.deletedAt == null ? [{ ...e, target: e.target }] : [])),
+                incomingEdges: [],
+              })).outgoingEdges;
           if (edges.length) {
             const edgeStrs = await Promise.all(
               edges.map(async (e) => {
@@ -5355,12 +5388,12 @@ export function createMcpServerInstance(
         // An inherited node was admitted through the child's memory above.
         (!o.inheritedFrom && !(await canReadMemory(db, auth, current.memoryId, EXPLICIT_REF)))
       ) {
-        return refusalResult(`Node "${o.rawUrn}" not found.`);
+        return refusalResult('Node not found.');
       }
       // The version actually served must still be the child's to show
       // (Diego, #1891 P2-1): not turned boot prompt, not overridden since.
       if (o.inheritedFrom && !(await stillInherited(db, o.inheritedFrom, current))) {
-        return refusalResult(`Node "${o.rawUrn}" not found.`);
+        return refusalResult('Node not found.');
       }
       if (o.inheritedFrom) markInherited([current], new Map([[current.memoryId, o.inheritedFrom]]));
       // Spec 041: decrypt when this session holds the key; mark locked
@@ -5437,7 +5470,7 @@ export function createMcpServerInstance(
       // surfaces cannot drift.
       if (ACTION_REF_RE.test(rawUrn)) {
         const entry = await resolveActionEntryRef(rawUrn);
-        if (!entry) return refusalResult(`Node "${rawUrn}" not found.`);
+        if (!entry) return refusalResult('Node not found.');
         return serveNodeReadProjection(entry, { rawUrn, contentScope, raw });
       }
 
@@ -5445,7 +5478,7 @@ export function createMcpServerInstance(
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(refusalText(e));
         throw e;
       }
 
@@ -5464,8 +5497,8 @@ export function createMcpServerInstance(
       });
       const sourceReadable = !!memory && await canReadMemory(db, auth, memory.id, EXPLICIT_REF);
       const missing = () => refusalResult(sourceReadable
-        ? `Node "${rawUrn}" not found.`
-        : `Memory not found: "${memoryUrn}".`);
+        ? 'Node not found.'
+        : 'Memory not found.');
 
       // The projection's include, named so the two candidate lookups below
       // cannot drift apart.
@@ -5553,7 +5586,7 @@ export function createMcpServerInstance(
 
   server.tool(
     'hadron_get_nodes',
-    "Batch read — return the full per-node projection (meta + edges + contentScope body, identical to hadron_get_node) for MANY nodes in one call. Two mutually-exclusive forms: (1) `refs` — an explicit list of node references, returned in input order; (2) `memoryUrn` + `locPrefix` — every readable node whose loc starts with the prefix in one memory, returned in loc order. Each `refs` entry is a node's primary key OR its fully-qualified URN, so a caller holding either form reads in ONE call. Optional `contentScope` ('content' default | 'abstract' | 'all') applies to every node, so abstract-only triage is cheap. Per-node authorization: unreadable or non-existent refs are reported in a separate Unavailable list (denied and not-found are indistinguishable) and never fail the batch. A ref whose SHAPE is wrong (relative/unqualified, or a URN of another entity kind) is a loud error instead — a caller mistake never hides among denials. Bounded by hard caps — exceeding the node-count cap is a loud error; exceeding the response-size cap returns a partial result flagged `truncated` (never a silent short read). Spec cor:api:040.",
+    "Batch read — return the full per-node projection (meta + edges + contentScope body, identical to hadron_get_node) for MANY nodes in one call. Two mutually-exclusive forms: (1) `refs` — an explicit list of node references, returned in input order; (2) `memoryUrn` + `locPrefix` — every readable node whose loc starts with the prefix in one memory, returned in loc order. Each `refs` entry is a node's primary key OR its fully-qualified URN, so a caller holding either form reads in ONE call. Optional `contentScope` ('content' default | 'abstract' | 'all') applies to every node, so abstract-only triage is cheap. Per-node authorization: unreadable or non-existent refs are reported in a separate Unavailable list (denied and not-found are indistinguishable) and never fail the batch. A ref whose SHAPE is wrong (relative/unqualified, or a URN of another entity kind) is a loud error instead — a caller mistake never hides among denials; that refusal names the FIRST wrong-type entry by its 0-based position in `refs`, ending '(the ref at index N)' (the wrong-type screen covers the whole list before the per-ref qualification split, so a wrong-type entry is named even when an unqualified entry precedes it; an unqualified-only batch keeps its own no-position refusal). Bounded by hard caps — exceeding the node-count cap is a loud error; exceeding the response-size cap returns a partial result flagged `truncated` (never a silent short read). Spec cor:api:040.",
     SHAPE_HADRON_GET_NODES,
     async ({ refs, memoryUrn, locPrefix, contentScope, raw }) => {
       // Defensive contentScope validation — parity with hadron_get_node (covers
@@ -5596,7 +5629,7 @@ export function createMcpServerInstance(
         const mem = await resolveMemoryByUrn(memoryUrn!);
         if (!mem || !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))) {
           // Don't leak existence — mirror the single read's phrasing.
-          return refusalResult(`Memory not found: "${memoryUrn}".`);
+          return refusalResult('Memory not found.');
         }
         prefixReadMemoryId = mem.id;
         // Count cap (cor:api:040:02): take MAX+1 to detect overflow, then fail
@@ -5633,6 +5666,30 @@ export function createMcpServerInstance(
             `hadron_get_nodes: ${refs!.length} refs exceeds the ${BATCH_READ_MAX_NODES}-node cap. Split into smaller batches; the batch read does not silently truncate.`,
           );
         }
+        // #5268 — a wrong-type URN (`hrn:mem:…`, `hrn:app:…`) is a coercion
+        // bug, not a miss, and the refusal names the failing ref by its
+        // POSITION: the 0-based index in the caller's `refs` as sent, of the
+        // FIRST wrong-type ref in caller order (first occurrence). The screen
+        // runs as a synchronous PRE-PASS over the raw list, before the dedup
+        // and the PK/URN split below lose the caller's positions (#5268
+        // spec-FIT condition); an unqualified ref is NOT screened here (the
+        // spec-FIT left it out), and because the screen covers the whole list
+        // before the split loop's qualification check, a wrong-type ref is
+        // named even when an unqualified ref precedes it — the same
+        // precedence nodeBatch(refs:) has, where this screen's rejection
+        // always beat the per-ref UrnNotQualifiedError. The position is not
+        // caller-typed, so the no-echo rule of #5168 / cor:api:140:01 holds;
+        // the shared parser reports only the URN KIND, never the value. MCP
+        // text results carry no extensions, so the position lives in the
+        // message alone.
+        for (let i = 0; i < refs!.length; i++) {
+          const ref = refs![i];
+          if (isId(ref)) continue;
+          const typeErr = validateUrnType(parseUrnInput(ref), 'node');
+          if (typeErr) {
+            return textResult(`hadron_get_nodes: ${typeErr} (the ref at index ${i})`);
+          }
+        }
         // Dedup the input strings up front so a repeated ref isn't rendered (and
         // billed via a UsageEvent) twice. This only collapses byte-identical
         // repeats; the load-bearing dedup is on the RESOLVED node below, since a
@@ -5662,12 +5719,9 @@ export function createMcpServerInstance(
             pkRefs.push(raw);
             continue;
           }
-          // A wrong-type URN (`hrn:mem:…`, `hrn:app:…`) is a coercion bug, not a
-          // miss — the same screen hadron_get_node and nodeBatch(refs:) apply.
-          const typeErr = validateUrnType(parseUrnInput(raw), 'node');
-          if (typeErr) {
-            return textResult(`hadron_get_nodes: ${typeErr} (ref "${raw}")`);
-          }
+          // A wrong-type URN never reaches here: the synchronous pre-pass
+          // above already refused it with the caller's index (#5268), so this
+          // loop only splits refs whose type screen passed.
           try {
             assertFullyQualifiedUrn(raw, 'node');
             // Tolerant, exactly as hadron_get_node is: cor:api:040:01 promises
@@ -6056,14 +6110,14 @@ export function createMcpServerInstance(
       try {
         assertFullyQualifiedUrn(rawParent, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return refusalResult(`Parent: ${e.message}`);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(`Parent: ${refusalText(e)}`);
         throw e;
       }
       if (rawCurrent) {
         try {
           assertFullyQualifiedUrn(rawCurrent, 'node');
         } catch (e) {
-          if (e instanceof UrnNotQualifiedError) return refusalResult(`Current: ${e.message}`);
+          if (e instanceof UrnNotQualifiedError) return refusalResult(`Current: ${refusalText(e)}`);
           throw e;
         }
       }
@@ -6071,10 +6125,10 @@ export function createMcpServerInstance(
       const { memoryUrn, loc: parentLoc } = splitNodeUrn(rawParent);
       const memory = await resolveMemoryByUrn(memoryUrn);
       if (!memory) {
-        return refusalResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult('Memory not found.');
       }
       if (!(await canReadMemory(db, auth, memory.id, EXPLICIT_REF))) {
-        return refusalResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult('Memory not found.');
       }
       const prefix = parentLoc + ':';
 
@@ -6104,14 +6158,14 @@ export function createMcpServerInstance(
       } else {
         const { memoryUrn: currentMemoryUrn, loc: currentLoc } = splitNodeUrn(rawCurrent);
         if (currentMemoryUrn !== memoryUrn) {
-          return textResult(`Current URN's memory (${currentMemoryUrn}) doesn't match parent's memory (${memoryUrn}).`);
+          return textResult('The current node is not in the parent\'s memory.');
         }
         const idx = children.findIndex((n) => n.loc === currentLoc);
         if (idx === -1) {
-          return refusalResult(`Current node "${currentLoc}" not found among children of "${parentLoc}".`);
+          return refusalResult('Current node not found among the parent\'s children.');
         }
         if (idx + 1 >= children.length) {
-          return textResult(`No more nodes after "${currentLoc}".`);
+          return textResult('No more nodes after the current node.');
         }
         next = children[idx + 1];
       }
@@ -6214,20 +6268,20 @@ export function createMcpServerInstance(
           try {
             assertFullyQualifiedUrn(memoryUrn, 'memory');
           } catch (e) {
-            if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
+            if (e instanceof UrnNotQualifiedError) return refusalResult(refusalText(e));
             throw e;
           }
           const mem = await resolveMemoryByUrn(memoryUrn);
           if (!mem) {
             return textResult(
-              `Memory not found or invalid: '${memoryUrn}'. Use hadron_list_memories to see what is available.`,
+              `Memory not found or invalid. Use hadron_list_memories to see what is available.`,
             );
           }
           // #188 (Gemini): canReadMemory gate — same shape as the
           // hadron_find_nodes memoryUrn branch.
           if (!(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))) {
             return textResult(
-              `Memory not found or invalid: '${memoryUrn}'. Use hadron_list_memories to see what is available.`,
+              `Memory not found or invalid. Use hadron_list_memories to see what is available.`,
             );
           }
           memoryId = mem.id;
@@ -6495,7 +6549,7 @@ export function createMcpServerInstance(
           })
         : null;
       if (!row || row.userId !== auth.userId) {
-        return refusalResult(`Memory "${memoryUrn}" not found.`);
+        return refusalResult('Memory not found.');
       }
       if (!row.isEncrypted) {
         return textResult(`Memory "${row.urn}" is not encrypted.`);
@@ -6537,7 +6591,7 @@ export function createMcpServerInstance(
         ? await db.memory.findUnique({ where: { id: mem.id }, select: { id: true, userId: true } })
         : null;
       if (!row || row.userId !== auth.userId) {
-        return refusalResult(`Memory "${memoryUrn}" not found.`);
+        return refusalResult('Memory not found.');
       }
       sessionKeyCache.release(`mcp:${sid}`, row.id);
       return textResult(`Memory locked for this session: ${memoryUrn}.`);
@@ -6592,7 +6646,7 @@ export function createMcpServerInstance(
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(refusalText(e));
         throw e;
       }
 
@@ -6603,7 +6657,7 @@ export function createMcpServerInstance(
       // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
       const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memory) {
-        return refusalResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult('Memory not found.');
       }
       const memoryId = memory.id;
 
@@ -6699,7 +6753,7 @@ export function createMcpServerInstance(
             }
           } catch (e) {
             if (e instanceof UrnNotQualifiedError) {
-              return textResult(`Edge target: ${e.message}`);
+              return textResult(`Edge target: ${refusalText(e)}`);
             }
             throw e;
           }
@@ -7051,6 +7105,17 @@ export function createMcpServerInstance(
             runnable: mergedGovernedState(pre, { role, isRunnable }).isRunnable,
             mintHuman: true, authoredChange: true,
           }, attestedAuthoring(recoveryCtx(), authoredWith));
+          // #5019 (cor:dmo:060:19) — the resulting node in plaintext: this tool clears an omitted body or description, and a
+          // revived tombstone keeps its omitted data and properties. #5160: after the role and authoring gates, as in
+          // writeNodeCore; the snapshot above rolls back with a refusal. A kept field is measured at rest (ciphertext, never
+          // smaller than its plaintext) only when the key lapses during this call: without one the call was refused above.
+          assertNodeContentSize(() => {
+            const sizeKey = memEncRow?.isEncrypted ? sessionKeyCache.getByMemoryId(memoryId) : null;
+            return resultingNodeContent(
+              { content: content ?? null, description: description ?? null, data: nodeData, properties },
+              pre && sizeKey ? decryptNodeFieldsWithKey({ ...pre }, sizeKey) : pre,
+            );
+          });
           // #1460 — the locked tombstone can retain vectors from its old
           // plaintext. Purge both kinds before the upsert makes it searchable.
           if (pre?.deletedAt) {
@@ -7073,6 +7138,14 @@ export function createMcpServerInstance(
           const autoSeq = seq === undefined && pre == null;
           if (autoSeq && !loc.includes(':')) await lockRootSiblings(tx, memoryId);
           const nestedSeq = autoSeq ? await nextSiblingSeq(tx, memoryId, loc) : null;
+          // #5015 (cor:acl:150:04) — every write that reaches here adds a live node (a live loc refused above): an insert,
+          // or a tombstone revived. The memory row is held FOR SHARE (assertMemoryEncryptionStateForWrite), so the owner
+          // read is the one at commit; the owner-limit key is this write's last lock (gate ruling 5).
+          // #5390 — parity with writeNodeCore: a conversation, stage or prompt node also gets its missing container parents,
+          // under the ancestor keys held above, counted with it (cor:acl:150:04).
+          const containers = await missingChatbotContainers(tx, memoryId, [loc]);
+          await requireNodeHeadroom(tx, { memoryId, amount: 1n + BigInt(containers.length), caller: ownerLimitCaller(auth) });
+          await createChatbotContainers(tx, memoryId, containers, auth.clientId ?? null);
           const written = await tx.node.upsert({
             ...upsertArgs,
             create: { ...upsertArgs.create, ...(authoredStamp ?? {}), ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
@@ -7209,7 +7282,7 @@ export function createMcpServerInstance(
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(refusalText(e));
         throw e;
       }
 
@@ -7219,7 +7292,7 @@ export function createMcpServerInstance(
       // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
       const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
       if (!memory) {
-        return refusalResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult('Memory not found.');
       }
 
       // Auth BEFORE any node-existence probe: returning "not found" for an
@@ -7294,7 +7367,7 @@ export function createMcpServerInstance(
       // a partial update, not a resurrect — a caller who wants a deleted loc
       // back must recreate it via hadron_create_node (which resurrects).
       if (!existing || existing.deletedAt) {
-        return refusalResult(`Node not found: "${rawUrn}"`);
+        return refusalResult('Node not found');
       }
 
       // Resolve edge targets BEFORE the revision snapshot + node update
@@ -7311,7 +7384,7 @@ export function createMcpServerInstance(
             }
           } catch (e) {
             if (e instanceof UrnNotQualifiedError) {
-              return textResult(`Edge target: ${e.message}`);
+              return textResult(`Edge target: ${refusalText(e)}`);
             }
             throw e;
           }
@@ -7339,7 +7412,7 @@ export function createMcpServerInstance(
           try {
             if (!isId(edge.targetUrn)) assertFullyQualifiedUrn(edge.targetUrn, 'node');
           } catch (e) {
-            if (e instanceof UrnNotQualifiedError) return textResult(`Edge target: ${e.message}`);
+            if (e instanceof UrnNotQualifiedError) return textResult(`Edge target: ${refusalText(e)}`);
             throw e;
           }
         }
@@ -7363,13 +7436,13 @@ export function createMcpServerInstance(
         const seen = new Set<string>();
         for (const ref of removeEdges) {
           // The one answer deleteEdge gives for an unknown, foreign or unreadable edge: no existence oracle.
-          const notFound = refusalResult(`Edge not found: "${ref}"`);
+          const notFound = refusalResult('Edge not found');
           let edgeId: string;
           try {
             ({ id: edgeId } = await resolveEdgeRef(db, ref));
           } catch (e) {
             if (e instanceof EdgeNotFoundError) return notFound;
-            if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
+            if (e instanceof UrnNotQualifiedError) return refusalResult(refusalText(e));
             throw e;
           }
           const owned = await db.edge.findUnique({ where: { id: edgeId }, select: { sourceId: true, memoryId: true } });
@@ -7604,6 +7677,8 @@ export function createMcpServerInstance(
               : current;
             const changedFields = diffNodeChanges(currentForDiff, plaintextUpdates);
             if (changedFields.length === 0 && !edgeWrite) return;
+            // #5019 (cor:dmo:060:19) — parity with writeNodeCore: the resulting node, before the snapshot; edges are not content.
+            if (changedFields.length > 0) assertNodeContentSize(resultingNodeContent(plaintextUpdates, currentForDiff));
             // #1328 — parity with writeNodeCore, before the snapshot.
             const authoredChange = authoredContentChanged(changedFields);
             const authoredStamp = await assertAuthoring(tx, memory.id, {
@@ -7852,7 +7927,7 @@ export function createMcpServerInstance(
     // own concealment answered instead, echoing the RESOLVED id it was handed —
     // the victim memory's internal id, to a caller who cannot read it.
     const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
-    if (!memory) return refusalResult(`Memory not found: "${memoryUrn}".`);
+    if (!memory) return refusalResult('Memory not found.');
     try {
       validateLoc(loc);
     } catch (e) {
@@ -7904,7 +7979,7 @@ export function createMcpServerInstance(
         resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<{ id: string }>>
       )[doorName](
         {},
-        { input: { memoryId: memory.id, loc, ...fields, ...signal }, ...(mergeExports ? { mergeExports: true } : {}), ...(taskIndex ? { index: taskIndex } : {}), ...(taskSkill ? { skill: taskSkill } : {}) },
+        { input: { memoryRef: memory.id, loc, ...fields, ...signal }, ...(mergeExports ? { mergeExports: true } : {}), ...(taskIndex ? { index: taskIndex } : {}), ...(taskSkill ? { skill: taskSkill } : {}) },
         ctx,
       );
       return textResult(`${kind} node ${mode === 'create' ? 'created' : 'updated'}: ${rawUrn} (id: ${node.id})${taskIndex ? ` · listed in the tasks index of ${taskIndex.agent} (trigger: ${taskIndex.trigger.trim()})` : ''}${renderIncludePinWarnings(await includePinWarningsFor(ctx, node))}`);
@@ -8173,8 +8248,8 @@ export function createMcpServerInstance(
               authoredWith,
               oldText,
               newText,
-              nodeIds: nodeUrns,
-              memoryIds: memoryUrns,
+              nodeRefs: nodeUrns,
+              memoryRefs: memoryUrns,
               prefix,
               fields,
               caseInsensitive: caseInsensitive ?? false,
@@ -8367,7 +8442,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
       try {
         assertFullyQualifiedUrn(rawUrn, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(refusalText(e));
         throw e;
       }
 
@@ -8376,12 +8451,12 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
       if (fragRefusal) return refusalResult(fragRefusal);
       const memory = await resolveMemoryByUrn(memoryUrn);
       if (!memory) {
-        return refusalResult(`Node "${rawUrn}" not found.`);
+        return refusalResult('Node not found.');
       }
       if (!(await canWriteToMemory(db, auth, memory.id, EXPLICIT_REF))) {
         // Match the "not found" phrasing used elsewhere on access denial
         // so the response doesn't distinguish absence from denial.
-        return refusalResult(`Node "${rawUrn}" not found.`);
+        return refusalResult('Node not found.');
       }
 
       // Find the node by (loc, memoryId). Already-tombstoned nodes are
@@ -8390,10 +8465,10 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
       const existing = await db.node.findUnique({
         where: { loc_memoryId: { loc, memoryId: memory.id } },
       });
-      if (!existing) return refusalResult(`Node "${rawUrn}" not found.`);
+      if (!existing) return refusalResult('Node not found.');
       if (existing.deletedAt && !hard) {
         return textResult(
-          `Node "${rawUrn}" is already soft-deleted. Pass hard: true to remove the row entirely.`,
+          'The node is already soft-deleted. Pass hard: true to remove the row entirely.',
         );
       }
 
@@ -8566,7 +8641,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
 
       if ('refused' in result) {
         if (result.refused === 'access') {
-          return refusalResult(`Node "${rawUrn}" not found.`);
+          return refusalResult('Node not found.');
         }
         if (result.refused === 'crossMemAccess') {
           return textResult(
@@ -8574,7 +8649,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
           );
         }
         if (result.refused === 'changed') {
-          return textResult(`Node "${rawUrn}" moved while this delete waited; re-read it and retry.`);
+          return textResult('The node moved while this delete waited; re-read it and retry.');
         }
         if (result.refused === 'mintedSpec') {
           return refusalResult(`[spec_minted_permanent] ${result.message}`);
@@ -8594,7 +8669,7 @@ Refuses if the node has descendants under its URN prefix unless \`recursive: tru
         if (result.refused === 'descendants') {
           const mode = hard ? 'hard delete' : 'soft delete';
           return textResult(
-            `Node "${rawUrn}" has ${result.count} descendant(s). ` +
+            `The node has ${result.count} descendant(s). ` +
               `${mode} refuses without recursive: true. ` +
               `Pass recursive: true to apply the same ${hard ? 'hard' : 'soft'} delete to every descendant.`,
           );
@@ -8650,13 +8725,13 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       try {
         assertFullyQualifiedUrn(rawFrom, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return refusalResult(`Source: ${e.message}`);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(`Source: ${refusalText(e)}`);
         throw e;
       }
       try {
         assertFullyQualifiedUrn(rawTo, 'node');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return refusalResult(`Target: ${e.message}`);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(`Target: ${refusalText(e)}`);
         throw e;
       }
 
@@ -8676,11 +8751,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // #2206 (B): a move carries the node's content (and its render, below) to the caller, so a source memory the
       // caller may write but not read answers as one it cannot see.
       if (!fromMemory || (await isWriteBeyondRead(db, auth, fromMemory.id))) {
-        return refusalResult(`Source memory not found: "${fromMemoryUrn}".`);
+        return refusalResult('Source memory not found.');
       }
       const toMemory = await resolveVisibleMemoryByUrn(auth, toMemoryUrn, 'write');
       if (!toMemory) {
-        return refusalResult(`Target memory not found: "${toMemoryUrn}".`);
+        return refusalResult('Target memory not found.');
       }
 
       try {
@@ -8692,7 +8767,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       const existing = await db.node.findUnique({
         where: { loc_memoryId: { loc: fromLoc, memoryId: fromMemory.id } },
       });
-      if (!existing) return refusalResult(`Node "${rawFrom}" not found.`);
+      if (!existing) return refusalResult('Node not found.');
 
       if (!(await canWriteToMemory(db, auth, fromMemory.id, EXPLICIT_REF))) {
         return refusalResult(`Write access denied for source memory.${await explainWriteRefusal(db, auth, fromMemory.id)}`);
@@ -8731,7 +8806,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
       let edgeUrnChanges: MoveNodeSubtreeResult['edgeUrnChanges'] = [];
       try {
-        const completed = await withArchivePlanRetries(async (timeout) => {
+        const completed = await mapMoveExpiry(() => withArchivePlanRetries(async (timeout) => {
           let relocated: MoveNodeSubtreeResult['moved'] = [];
           let linkWarnings: MoveNodeSubtreeResult['linkWarnings'] = [];
           let edgeUrnChanges: MoveNodeSubtreeResult['edgeUrnChanges'] = [];
@@ -8859,6 +8934,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
               // 6 bytes are the ms timestamp, so an 8-char slice was timestamp-only
               // entropy (PR-189). Descendant-slot collisions are always refused —
               // moveNodeSubtree throws SubtreeMoveCollisionError (caught below).
+              // #5128 (cor:api:190:01): an over-limit subtree is refused before the occupant is touched or any node is
+              // locked or written; the read and write gates above have already run (advisory locks above are not the move's work).
+              await assertMoveWithinSizeLimit(tx, existing);
               const existingTarget = await tx.node.findUnique({
                 where: { loc_memoryId: { loc: toLoc, memoryId: toMemory.id } },
               });
@@ -8909,6 +8987,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
                 authorizeLockedMemory: (memoryId) => assertLockedMemoryWriteAccess(tx, attemptAuth, memoryId),
                 principal: attemptAuth,
                 canReadMemoryId: memoryId => canReadMemory(tx as typeof db, attemptAuth, memoryId, EXPLICIT_REF),
+                ownerLimitCaller: ownerLimitCaller(auth),
               });
               relocated = subtreeResult.moved;
               linkWarnings = subtreeResult.linkWarnings;
@@ -8969,7 +9048,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           // here (mirrors extractParentNodeGraph / cloneMemory).
           { timeout });
           return { result: attemptResult, relocated, linkWarnings, edgeUrnChanges };
-        });
+        }));
         result = completed.result;
         relocated = completed.relocated;
         linkWarnings = completed.linkWarnings;
@@ -8985,7 +9064,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           return refusalResult(`[chat_message_seq_conflict] ${CHAT_SEQ_CONFLICT_MESSAGE}`);
         }
         if (e instanceof ArchivePlanExhaustedError) return refusalResult('The node was moved concurrently; re-read it and retry.');
-        if (e instanceof MoveSourceBeyondReadError) return refusalResult(`Source memory not found: "${fromMemoryUrn}".`);
+        if (e instanceof MoveSourceBeyondReadError) return refusalResult('Source memory not found.');
         if (e instanceof MemoryWriteAccessChangedDuringWriteError) return refusalResult(e.message);
         // A descendant-slot collision (or a move-into-own-subtree) aborts the
         // whole transaction — including any overwrite eviction — and surfaces as
@@ -8998,6 +9077,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
         }
         if (e instanceof SubtreeMoveIntoSelfError) {
           return refusalResult('Cannot move a node into its own subtree.');
+        }
+        if (e instanceof SubtreeMoveTooLargeError) {
+          return refusalResult(`[move_too_large] ${e.message}`);
+        }
+        if (e instanceof SubtreeMoveTimedOutError) {
+          return refusalResult(`[move_timed_out] ${e.message}`);
         }
         if (e instanceof ScopeGraphQLError && e.extensions?.code === SPEC_MINTED_PERMANENT) {
           return refusalResult(`[spec_minted_permanent] ${e.message}`);
@@ -9109,7 +9194,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       // ONE message naming nothing (cor:api:140:03): other tenant, unreadable
       // memory, unknown Agent, missing or malformed code all read alike.
       if (ACTION_REF_RE.test(rawUrn)) {
-        const unreadable = () => refusalResult(`Node "${rawUrn}" not found.`);
+        const unreadable = () => refusalResult('Node not found.');
         const entry = await resolveActionEntryRef(rawUrn, { agentGate: false });
         if (!entry) return unreadable();
         // Carry the RESOLVED entry's id, never a re-emitted node URN: the emitted
@@ -9149,7 +9234,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     try {
       assertFullyQualifiedUrn(rawUrn, 'node');
     } catch (e) {
-      if (e instanceof UrnNotQualifiedError) return { error: e.message };
+      if (e instanceof UrnNotQualifiedError) return { error: refusalText(e) };
       throw e;
     }
     const { memoryUrn, loc, fragment } = splitNodeUrn(rawUrn);
@@ -9157,10 +9242,10 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     if (actionFragRefusal) return { error: actionFragRefusal };
     const memory = await resolveMemoryByUrn(memoryUrn);
     if (!memory || !(await canReadMemory(db, auth, memory.id))) {
-      return { error: `Memory not found: "${memoryUrn}".` };
+      return { error: 'Memory not found.' };
     }
     const node = await findRunNode({ loc_memoryId: { loc, memoryId: memory.id } });
-    if (!node) return { error: `Node "${rawUrn}" not found.` };
+    if (!node) return { error: 'Node not found.' };
     return { node, loc };
   }
 
@@ -9597,7 +9682,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (matches.length === 0) {
         return {
           done: textResult(
-            `No memory matching "${hint}". Use hadron_list_memories to see what is available.`,
+            `No memory matches. Use hadron_list_memories to see what is available.`,
           ),
         };
       }
@@ -9682,14 +9767,16 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
    * one and replies with its id. Delegates to GraphQL `appRun(ref:)`
    * (findings:node-write-surface-invariants: MCP tools delegate, never
    * re-implement), so the gate is exactly that resolver's: a platform admin, a
-   * READER in the run's organization, the run's own App key, or a user with a
+   * READER in the run's organization, whoever manages the App a person owns
+   * (#5077: its owner or an owner-role member, never a platform admin, for a
+   * run with no organization), the run's own App key, or a user with a
    * live App relationship for a run on their behalf or a MANUAL run they
    * started (`mayReadAppRunWithoutOrgRole`). A denial reads as not found, the
    * same answer as a missing run, so the tool is no existence oracle.
    */
   server.tool(
     'hadron_get_run',
-    "Read an app run you started (or may read): its status, where it is or stopped (curNodeUrn), why it failed (failure), what it extracted (data, the run envelope) and the path it walked (hops: one entry per completed hop, with the edge it took). Pass the run id or hrn:apprun URN that hadron_run_task printed. Gated like appRun: you may read a run if you are a READER in its organization; if it runs on your behalf or you started it manually, while you keep a live relationship with its App (App member or active subscriber); or if you hold that App's own key. A run you cannot read answers 'not found', the same as one that does not exist. Read-only.",
+    "Read an app run you started (or may read): its status, where it is or stopped (curNodeUrn), why it failed (failure), what it extracted (data, the run envelope) and the path it walked (hops: one entry per completed hop, with the edge it took). Pass the run id or hrn:apprun URN that hadron_run_task printed. Gated like appRun: you may read a run if you are a READER in its organization, or you manage the App a person owns (its owner or an owner-role member); if it runs on your behalf or you started it manually, while you keep a live relationship with its App (App member or active subscriber); or if you hold that App's own key. A run you cannot read answers 'not found', the same as one that does not exist. Read-only.",
     SHAPE_HADRON_GET_RUN,
     async ({ ref }) => {
       if (!auth.userId && !auth.appId) return refusalResult('Not authenticated.');
@@ -9697,13 +9784,17 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (!runRef) return textResult('Pass the run id or hrn:apprun URN that hadron_run_task printed.');
       let run: Record<string, unknown> | null;
       try {
-        run = (await resolvers.Query.appRun({}, { ref: runRef }, chatCtx())) as Record<string, unknown> | null;
+        // #5077 (F3a-2): the read gate refuses an impersonated session and a refused session binding (isRefusedPrincipal) a
+        // person's run, so it must see both, as GraphQL does (Rook, SEC10 on #5441).
+        run = (await resolvers.Query.appRun({}, { ref: runRef }, {
+          ...chatCtx(), ...mcpRequestSessionContext(auth), impersonation: auth.impersonation ?? undefined,
+        })) as Record<string, unknown> | null;
       } catch (e) {
         // A denied read is indistinguishable from a missing run (no oracle).
         if (/^(Forbidden|Unauthenticated)/.test((e as Error)?.message ?? '')) run = null;
         else throw e;
       }
-      if (!run) return refusalResult(`Run "${runRef}" not found.`);
+      if (!run) return refusalResult('Run not found.');
       return textResult(renderAppRun(run));
     },
   );
@@ -9750,9 +9841,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             userId: auth.userId ?? undefined,
             apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
-            sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],
             organizationId: auth.organizationId ?? undefined,
+            // #5077 (F3a-2): the door refuses an impersonated session and a refused session binding (isRefusedPrincipal) on
+            // a person's App, so it must see both, as GraphQL does (Rook, SEC10 on #5441).
+            ...mcpRequestSessionContext(auth),
+            impersonation: auth.impersonation ?? undefined,
           };
           try {
             const runId = await resolvers.Mutation.runTask(
@@ -10193,7 +10287,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (appScopeError) return appScopeError;
 
       const session = await db.session.findUnique({ where: { id } });
-      if (!session) return refusalResult(`Session "${id}" not found.`);
+      if (!session) return refusalResult('Session not found.');
       // #931: same write gate as the GraphQL endSession — previously this raw
       // update was ungated, so any App-scoped caller holding a session id
       // could end another App's (or user's) session. Allowed: a PURE App-key
@@ -10549,9 +10643,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
           // The un-bound case is the one worth calling out: it is the shape in
           // which a team-chat post silently lands under the human's name.
           (worker
-            ? `    working as: ${worker.name}${worker.role ? ` (${worker.role})` : ''} (worker id: ${worker.id})${urn ? `\n    ${urn}` : ''}${url ? `\n    URL: ${url}` : ''}\n`
+            ? `    working as: ${oneLineText(worker.name)}${worker.role ? ` (${oneLineText(worker.role)})` : ''} (worker id: ${worker.id})${urn ? `\n    ${urn}` : ''}${url ? `\n    URL: ${url}` : ''}\n`
             : '    working as: nobody — this session is NOT bound to a worker, so anything it posts is attributed to you, not a teammate.\n') +
-          (app ? `    app: ${app.name}\n` : '') +
+          (app ? `    app: ${oneLineText(app.name)}\n` : '') +
           `    started: ${s.startedAt.toISOString()}${s.type ? ` · ${s.type}` : ''}` +
           (s.endedAt ? '' : `\n    ${renderSessionLiveness(sessionLapsesAt(s, lastEventForLiveness.get(s.id)), nowForLiveness, s.expiresAt)}`) +
           (s.plan ? `\n    plan: ${s.plan}` : '') +
@@ -11735,7 +11829,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
           { ref: trimmed, appRef: refNamesItsApp ? null : appRef },
           ctx,
         );
-        if (!worker) return refusalResult(`Worker not found: ${workerRef}`);
+        if (!worker) return refusalResult('Worker not found');
 
         // Resolved through the SAME field resolvers GraphQL serves, so this
         // surface and the briefing hadron_start_session prints cannot drift —
@@ -11986,7 +12080,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
           { ref: trimmed, appRef: refNamesItsApp ? null : appRef },
           ctx,
         );
-        if (!target) return refusalResult(`Worker not found: ${workerRef}`);
+        if (!target) return refusalResult('Worker not found');
 
         // Forward a key ONLY when the caller supplied it (PR #1019 review,
         // Copilot): the resolver distinguishes omitted-preserves by PRESENCE.
@@ -12055,7 +12149,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
       };
       try {
         const target = await resolvers.Query.worker({}, { ref: trimmed, appRef: refNamesItsApp ? null : appRef }, ctx);
-        if (!target) return textResult(`Worker not found: ${workerRef}`);
+        if (!target) return textResult('Worker not found');
         const worker = await resolvers.Mutation.changeWorkerAgent({}, { workerRef: target.id, agentRef: agent }, ctx);
         return textResult(
           `**${worker.name}** now casts agent ${worker.agentId}${worker.role ? ` (role ${worker.role})` : ''}. ` +
@@ -12099,7 +12193,7 @@ function ageOf(at: Date, now: Date = new Date()): string {
       try {
         const resolveRef = async (ref: string) => {
           const w = await resolvers.Query.worker({}, { ref, appRef: isId(ref) || hasSchemePrefix(ref) ? null : appRef }, ctx);
-          if (!w) throw new Error(`Worker not found: ${ref}`);
+          if (!w) throw new Error('Worker not found');
           return w.id as string;
         };
         const workerId = await resolveRef(trimmed);
@@ -12288,14 +12382,14 @@ function ageOf(at: Date, now: Date = new Date()): string {
       try {
         assertFullyQualifiedUrn(memoryUrn, 'memory');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(refusalText(e));
         throw e;
       }
 
       // #1316: an unreadable memory takes the missing branch.
       const memory = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'read');
       if (!memory) {
-        return refusalResult(`Memory not found: "${memoryUrn}".`);
+        return refusalResult('Memory not found.');
       }
 
       // #819 — the checks themselves now live in src/lib/memoryValidation.ts,
@@ -12326,13 +12420,13 @@ function ageOf(at: Date, now: Date = new Date()): string {
       try {
         assertFullyQualifiedUrn(memoryUrn, 'memory');
       } catch (e) {
-        if (e instanceof UrnNotQualifiedError) return refusalResult(e.message);
+        if (e instanceof UrnNotQualifiedError) return refusalResult(refusalText(e));
         throw e;
       }
 
       // #1316: hidden from this caller ⇒ the missing branch; a reader keeps the denial.
       const memoryRef = await resolveVisibleMemoryByUrn(auth, memoryUrn, 'write');
-      if (!memoryRef) return refusalResult(`Memory not found: "${memoryUrn}".`);
+      if (!memoryRef) return refusalResult('Memory not found.');
       if (!(await canWriteToMemory(db, auth, memoryRef.id, EXPLICIT_REF))) {
         return refusalResult('Access denied.');
       }
@@ -12344,10 +12438,12 @@ function ageOf(at: Date, now: Date = new Date()): string {
       if (!memory) return refusalResult('Memory not found.');
       // Import and call syncGraphFromGithub
       const { syncGraphFromGithub, describeSyncOutcome } = await import('../integrations/github/syncGraphFromGithub.js');
-      const result = await syncGraphFromGithub(memory as Parameters<typeof syncGraphFromGithub>[0]);
+      const result = await syncGraphFromGithub(memory as Parameters<typeof syncGraphFromGithub>[0], { ownerLimitCaller: ownerLimitCaller(auth) });
       if (result.notAttemptedReason) return refusalResult(`[${SYNC_NOT_ATTEMPTED}] ${syncNotAttemptedMessage(result.notAttemptedReason)}`);
 
       if (result.fault) throw new Error(result.error ?? 'sync fault');
+      // #5015 — the owner-limit refusal in this caller's own form, as the trusted refusal its GraphQL twin throws.
+      if (result.ownerLimitError) return ownerLimitResult(result.ownerLimitError);
       if (result.error) return refusalResult(`Sync failed${result.errorCode ? ` [${result.errorCode}]` : ''}: ${result.error}`);
       // #1061 — one write per node the sync actually wrote. This tool is the
       // ONE entry point to a git sync that has a principal to attribute to; the
@@ -13351,7 +13447,7 @@ const governedDoorArgs = {
   urn: z.string().describe('Fully-qualified node URN (hrn:node:<root>:<memory>:<loc>).'),
   name: z.string().optional().describe('Node name. Required when creating.'),
   description: z.string().optional().describe('Short description'),
-  abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars).'),
+  abstract: z.string().optional().describe('Paragraph-length summary (max 2000 chars); for the long form use `content`.'),
   content: z.string().optional().describe('Markdown content'),
   // The same lenient schema as the generic node tools ("a,b" or an array),
   // so a call the generic tool accepted replays through the door

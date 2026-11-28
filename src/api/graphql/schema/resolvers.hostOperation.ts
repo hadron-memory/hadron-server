@@ -101,8 +101,10 @@ import {
   type ResetHost,
 } from '../../../lib/contextReset/contextReset.js';
 
-const appNotFound = (appRef: string): GraphQLError => taskError('APP_NOT_FOUND', 'App not found.', { appRef });
-const opNotFound = (id: string): GraphQLError => taskError('HOST_OPERATION_NOT_FOUND', 'Host operation not found.', { id });
+// #5168: the refusal never relays the caller's ref (it is their own text, possibly a pasted secret).
+const appNotFound = (_appRef: string): GraphQLError => taskError('APP_NOT_FOUND', 'App not found.');
+// #5168: the miss does not relay the caller's id.
+const opNotFound = (_id: string): GraphQLError => taskError('HOST_OPERATION_NOT_FOUND', 'Host operation not found.');
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
 
 /** At most this many operations per collection or page. */
@@ -721,7 +723,7 @@ export const hostOperationMutations = {
       }
       const [reg] = await tx.$queryRaw<{ id: string }[]>`
         SELECT id FROM host_registrations WHERE app_id = ${freshApp.id} AND host_id = ${hostId} FOR SHARE`;
-      if (!reg) throw taskError('HOST_NOT_FOUND', 'No host with that id is registered in this App.', { hostId });
+      if (!reg) throw taskError('HOST_NOT_FOUND', 'No host with that id is registered in this App.'); // #5225: hostId not relayed
       if (validated.type === 'worker.end') {
         const listed = await tx.hostRegistrationWorker.findFirst({ where: { registrationId: reg.id, workerId }, select: { workerId: true } });
         if (!listed) throw taskError('BAD_HOST_OPERATION_ARGS', 'That host does not register this worker.');
@@ -849,7 +851,7 @@ async function issueWorkerStart(
       // Diego P2-2: the registration, its worktree and the lapse count hold still through the insert.
       await fenceHostDecision(tx, freshApp.id);
       const [reg] = await liveRegistrationsFor(tx, freshApp.id, workerId, now, hostId);
-      if (!reg) throw taskError('HOST_NOT_FOUND', 'No live host with that id registers this worker.', { hostId });
+      if (!reg) throw taskError('HOST_NOT_FOUND', 'No live host with that id registers this worker.'); // #5225: hostId not relayed
       if (!reg.worktrees.includes(args.worktree!)) {
         throw taskError('BAD_HOST_OPERATION_ARGS', 'A worker starts only in a worktree that host registers for it (cor:agt:070:06).');
       }

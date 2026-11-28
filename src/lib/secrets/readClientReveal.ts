@@ -11,7 +11,7 @@ import { parseRunPolicySnapshot } from '../runner/runPolicy.js';
  * event commit before the value leaves this function. A client id that is unknown, belongs to another holder or another App is
  * the one uniform SECRET_READ_CLIENT_NOT_FOUND, so a client id is no existence oracle. Past that, the refusal names the state.
  */
-import { deleteLockedAppSecret } from './autoDelete.js';
+import { deleteLockedAppSecret, secretArmedForAutoDelete } from './autoDelete.js';
 import { GraphQLError } from 'graphql';
 import { Prisma } from '../../generated/prisma/index.js';
 import type { Context } from '../../api/graphql/schema/resolvers.js';
@@ -26,6 +26,7 @@ import { judgeSecretReadClientIssuer, SECRET_READ_CLIENT_SUPERSEDED } from './re
 import { isAppParticipant } from '../auth/appParticipantRead.js';
 import { isRunPrincipal } from '../auth/runPrincipal.js';
 import { authorizationDenied } from '../auth/authorizationDenied.js';
+import { isOwnedBy, orgIdOf, requireOwnerRefOf } from '../owner.js';
 
 export const SECRET_READ_CLIENT_NOT_FOUND = 'SECRET_READ_CLIENT_NOT_FOUND';
 
@@ -139,8 +140,9 @@ async function revealAs(ctx: Context, clientId: string, holder: Holder): Promise
     const value = await currentAppSecretValue(tx, { id: secret.id, ownerId: secret.ownerId });
     const after = await tx.grant.findUniqueOrThrow({ where: { id: client.grantId }, select: { maxUses: true, useCount: true } });
     const terms = await tx.grant.findUniqueOrThrow({ where: { id: client.grantId }, select: { values: true, signatureId: true } });
+    // #5335: and only when the secret is armed (a protected secret needs `deleteAfterUse`), judged now, under the secret lock.
     if (terms.signatureId && (terms.values as Record<string, unknown>)['auto-delete'] === 'delete'
-        && after.maxUses !== null && after.useCount >= after.maxUses) {
+        && after.maxUses !== null && after.useCount >= after.maxUses && await secretArmedForAutoDelete(tx, secret.id)) {
       await deleteLockedAppSecret(tx, secret);
     }
     return { value: JSON.stringify(value), secretName: secret.name, readsLeft: after.maxUses === null ? null : after.maxUses - after.useCount };
@@ -224,13 +226,17 @@ async function prepareSecretUseOnce(
   const run = tool.run;
   const agentId = run.agentId;
   if (!agentId || tool.principal.clientId !== `run:${run.id}` || tool.principal.appId !== run.appId) throw notFound();
+  // #5077: a secret use spends an organization's `secret.use` ticket, and `action_tickets` has no person column, so a run of
+  // an App a person owns holds none: refused before any anchor or query.
+  const runOrgId = orgIdOf(requireOwnerRefOf(run));
+  if (runOrgId === null) throw refusal('ACTION_TICKET_REQUIRED', 'No secret-use ticket is available.');
   const pre = await tool.db.secretReadClient.findUnique({ where: { id: clientId }, select: { appId: true, secretId: true, secretName: true, grantId: true } });
   if (!pre || pre.appId !== run.appId) throw notFound();
   const app = await tool.db.app.findUnique({ where: { id: run.appId }, select: { id: true, organizationId: true, ownerUserId: true } });
   const initial = await tool.db.grant.findUnique({ where: { id: pre.grantId }, select: { issuerUserId: true } });
-  if (!app || app.organizationId !== run.organizationId || !initial) throw notFound();
+  if (!app || !isOwnedBy(app, { organizationId: runOrgId }) || !initial) throw notFound();
   const issuer = initial.issuerUserId;
-  const anchors = [{ kind: 'app' as const, id: app.id }, { kind: 'org' as const, id: run.organizationId },
+  const anchors = [{ kind: 'app' as const, id: app.id }, { kind: 'org' as const, id: runOrgId },
     ...(issuer ? [{ kind: 'user' as const, id: issuer }] : []), { kind: 'agent' as const, id: agentId }];
   const internal = { ...tool.principal, userId: undefined, db: tool.db } as Context;
   let known: { ownerId: string; secretId: string; secretName: string } | null = null;
@@ -238,8 +244,8 @@ async function prepareSecretUseOnce(
   return await withAuthorizedTx(internal, anchors, async () => undefined, async (tx, txCtx) => {
     // Lock the run before judging its policy and budget; cancellation and budget edits serialize with this spend.
     await tx.$queryRaw`SELECT id FROM app_runs WHERE id = ${run.id} FOR UPDATE`;
-    const actual = await tx.appRun.findUnique({ where: { id: run.id }, select: { appId: true, agentId: true, organizationId: true, status: true, policy: true, budgetTokens: true, budgetActions: true } });
-    if (!actual || actual.appId !== run.appId || actual.agentId !== agentId || actual.organizationId !== run.organizationId || actual.status !== 'RUNNING') throw notFound();
+    const actual = await tx.appRun.findUnique({ where: { id: run.id }, select: { appId: true, agentId: true, organizationId: true, ownerUserId: true, status: true, policy: true, budgetTokens: true, budgetActions: true } });
+    if (!actual || actual.appId !== run.appId || actual.agentId !== agentId || !isOwnedBy(actual, { organizationId: runOrgId }) || actual.status !== 'RUNNING') throw notFound();
     if (!evaluatePolicyChain('tool.web_request', parseRunPolicySnapshot(actual.policy)) ||
         (actual.budgetTokens !== null && actual.budgetTokens <= 0) || actual.budgetActions === null || actual.budgetActions < 1) {
       throw refusal('TOOL_DENIED', 'The web request is denied.');
@@ -280,7 +286,7 @@ async function prepareSecretUseOnce(
     if (!isWebFetchAuth(auth) || metadata.type !== auth.type) throw notFound();
     assertSecretUseHeader(terms['binding-header'], auth, headers);
     const tickets = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM action_tickets
-      WHERE organization_id = ${run.organizationId} AND action = 'secret.use' AND consumed_at IS NULL
+      WHERE organization_id = ${runOrgId} AND action = 'secret.use' AND consumed_at IS NULL
         AND (app_id = ${run.appId} OR app_id IS NULL) AND (expires_at IS NULL OR expires_at > (clock_timestamp() AT TIME ZONE 'UTC'))
       ORDER BY (app_id IS NOT NULL) DESC, created_at ASC, id ASC FOR UPDATE SKIP LOCKED LIMIT 1`;
     if (!tickets[0]) throw refusal('ACTION_TICKET_REQUIRED', 'No secret-use ticket is available.');
@@ -301,7 +307,8 @@ async function prepareSecretUseOnce(
     // Liveness above already required activation; the signature is checked the same way the reveal path checks it.
     if (terms['auto-delete'] === 'delete' && grant.signatureId) {
       const after = await tx.grant.findUniqueOrThrow({ where: { id: grant.id }, select: { maxUses: true, useCount: true } });
-      if (after.maxUses !== null && after.useCount >= after.maxUses) await deleteLockedAppSecret(tx, secret);
+      // #5335: a protected secret is deleted only when armed by `deleteAfterUse`, judged now, under the secret lock.
+      if (after.maxUses !== null && after.useCount >= after.maxUses && await secretArmedForAutoDelete(tx, secret.id)) await deleteLockedAppSecret(tx, secret);
     }
     return { url, auth };
   }, { afterLock: (tx) => lockAppManagerMemberships(tx, issuer ?? undefined, app) });

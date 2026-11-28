@@ -11,7 +11,7 @@
 import { describe, it, expect, beforeEach, vi, beforeAll, afterAll } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { cleanDb, createMintMarker } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import type { AuthContext } from '../../../middleware/auth.js';
@@ -60,12 +60,7 @@ async function memory(name: string, state: { mintedAt?: Date; deletedAt?: Date |
  * live-loc assertion in this suite sees it.
  */
 async function marker(memoryId: string, loc: string, mintedAt: Date) {
-  return db.node.create({
-    data: {
-      id: generateId(), memoryId, loc, name: loc, content: 'minted elsewhere; tombstoned',
-      role: null, tags: [], mintedAt, mintedByInfo: 'test', deletedAt: mintedAt,
-    },
-  });
+  return createMintMarker(db, memoryId, { loc, mintedAt });
 }
 
 /** The mint stamp the guard now derives: MAX(nodes.minted_at), tombstones included. */
@@ -266,7 +261,7 @@ describe('#1468 — mergeNodes, moves and extract', () => {
 
 describe('#1468 — the spec marker stays on a minted spec (Vera #4403)', () => {
   const update = (id: string, input: Record<string, unknown>) =>
-    resolvers.Mutation.updateNode({}, { input: { id, ...input } } as never, ctx());
+    resolvers.Mutation.updateNode({}, { input: { ref: id, ...input } } as never, ctx());
   const tagsOf = async (id: string) => (await db.node.findUniqueOrThrow({ where: { id } })).tags;
 
   it("closes the bypass: dropping a minted spec's tag is refused, so the delete after it still refuses", async () => {
@@ -314,7 +309,7 @@ describe('#1468 — the spec marker stays on a minted spec (Vera #4403)', () => 
     const spec = await node(minted.id, 'pas:010', { tags: ['spec'] });
     const note = await node(minted.id, 'notes', { tags: ['spec-draft'] });
     await expect(resolvers.Mutation.searchReplaceInNodes({}, {
-      input: { oldText: '^spec', newText: 'was', regex: true, fields: ['tags'], nodeIds: [spec.id, note.id] },
+      input: { oldText: '^spec', newText: 'was', regex: true, fields: ['tags'], nodeRefs: [spec.id, note.id] },
     } as never, ctx())).rejects.toSatisfy(refusedPermanent);
     expect([await tagsOf(spec.id), await tagsOf(note.id)]).toEqual([['spec'], ['spec-draft']]);
   });
@@ -332,7 +327,7 @@ describe('#1468 — the spec marker stays on a minted spec (Vera #4403)', () => 
     const mintedAt = await mintedAtOf(minted.id);
     const tomb = await node(minted.id, 'pas:010', { tags: ['spec'], deletedAt: new Date(mintedAt.getTime() + 1000) });
     await expect(resolvers.Mutation.createNode({}, {
-      input: { memoryId: minted.id, loc: 'pas:010', name: 'n', content: 'x', tags: ['other'] },
+      input: { memoryRef: minted.id, loc: 'pas:010', name: 'n', content: 'x', tags: ['other'] },
     } as never, ctx())).rejects.toSatisfy(refusedPermanent);
     // MCP writes omitted tags as [], so the plain create is the unmark there.
     const text = await createTestableMcpServer(auth()).callToolText('hadron_create_node', {
@@ -434,15 +429,19 @@ describe('#1468 — whole-corpus removal', () => {
   it('createMemory refuses to reclaim the URN of a deleted minted corpus that still holds a spec', async () => {
     const dead = await memory('reuse', { mintedAt: new Date(), deletedAt: new Date() });
     await node(dead.id, 'pas:010', { tags: ['spec'] });
-    await expect(resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'reuse' } as never, ctx()))
+    // #5203 S3: only a SUPPLIED slug reclaims; a derived one iterates past the deleted corpus (pinned below).
+    await expect(resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'reuse', slug: 'reuse' } as never, ctx()))
       .rejects.toSatisfy(refusedPermanent);
+    expect(await db.memory.findUnique({ where: { id: dead.id } })).not.toBeNull();
+    const derived = await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'reuse' } as never, ctx());
+    expect(derived).toMatchObject({ urn: `${org.urn}:reuse-2` });
     expect(await db.memory.findUnique({ where: { id: dead.id } })).not.toBeNull();
   });
 
   it('control: createMemory still reclaims a deleted draft corpus', async () => {
     const dead = await memory('reuse', { deletedAt: new Date() });
     await node(dead.id, 'pas:010', { tags: ['spec'] });
-    await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'reuse' } as never, ctx());
+    await resolvers.Mutation.createMemory({}, { orgRef: org.id, name: 'reuse', slug: 'reuse' } as never, ctx());
     expect(await db.memory.findUnique({ where: { id: dead.id } })).toBeNull();
   });
 });
@@ -462,8 +461,13 @@ describe('#1468 — cascades: App reclaim, account erasure, anonymous expiry', (
     });
     await marker(appMem.id, 'suite-mem:mint-marker', new Date());
     await node(appMem.id, 'pas:010', { tags: ['spec'] });
-    await expect(resolvers.Mutation.createApp({}, { orgRef: org.id, agentRef: a.id, name: 'Suite' } as never, ctx()))
+    // #5203 S3: only a SUPPLIED urn reclaims; a derived one iterates past the deleted App.
+    await expect(resolvers.Mutation.createApp({}, { orgRef: org.id, agentRef: a.id, name: 'Suite', urn: 'suite' } as never, ctx()))
       .rejects.toSatisfy(refusedPermanent);
+    expect(await db.app.findUnique({ where: { id: retired.id } })).not.toBeNull();
+    expect(await db.memory.findUnique({ where: { id: appMem.id } })).not.toBeNull();
+    const derived = await resolvers.Mutation.createApp({}, { orgRef: org.id, agentRef: a.id, name: 'Suite' } as never, ctx());
+    expect(derived).toMatchObject({ urn: `${org.urn}:suite-2` });
     expect(await db.app.findUnique({ where: { id: retired.id } })).not.toBeNull();
     expect(await db.memory.findUnique({ where: { id: appMem.id } })).not.toBeNull();
   });
@@ -525,15 +529,19 @@ describe('#1468 — address reclaims that erase a deleted minted corpus (Codex P
 
   it('createAgent refuses to reclaim its -system address from a deleted minted corpus', async () => {
     const corpus = await deletedCorpusAt(`${org.urn}:spec-bot-system`);
-    await expect(resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Spec Bot' } as never, ctx()))
+    // #5203 S3: only a SUPPLIED slug reclaims; a derived one iterates past the deleted corpus at `<urn>-system`.
+    await expect(resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Spec Bot', slug: 'spec-bot' } as never, ctx()))
       .rejects.toSatisfy(refusedPermanent);
     expect(await db.memory.findUnique({ where: { id: corpus.id } })).not.toBeNull();
     expect(await db.agent.findFirst({ where: { urn: `${org.urn}:spec-bot` } })).toBeNull();
+    const derived = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Spec Bot' } as never, ctx());
+    expect(derived).toMatchObject({ urn: `${org.urn}:spec-bot-2` });
+    expect(await db.memory.findUnique({ where: { id: corpus.id } })).not.toBeNull();
   });
 
   it('control: createAgent still reclaims a deleted draft memory at its -system address', async () => {
     await memory('draft-bot-system', { deletedAt: new Date() });
-    const agent = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Draft Bot' } as never, ctx());
+    const agent = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Draft Bot', slug: 'draft-bot' } as never, ctx());
     expect(agent).toMatchObject({ urn: `${org.urn}:draft-bot` });
   });
 
@@ -644,7 +652,7 @@ describe('#1468 — a whole-corpus delete cannot race the first spec (Codex P1)'
       await tx.$queryRaw`SELECT id FROM memories WHERE id = ${minted.id} FOR UPDATE`;
       await tx.memory.update({ where: { id: minted.id }, data: { deletedAt: new Date() } });
     });
-    const marking = resolvers.Mutation.updateNode({}, { input: { id: n.id, tags: ['spec'] } } as never, ctx());
+    const marking = resolvers.Mutation.updateNode({}, { input: { ref: n.id, tags: ['spec'] } } as never, ctx());
     try {
       await vi.waitFor(async () => {
         const waits = await db.$queryRaw<Array<{ pid: number }>>`
@@ -677,23 +685,20 @@ describe('#1468 — race against a concurrent mint', () => {
     const racing = await memory('racing');
     const spec = await node(racing.id, 'pas:010', { tags: ['spec'] });
 
-    // Stand-in for the mint's fence + stamp: the memory row FOR UPDATE, the
-    // mint record written (a node gains minted_at, #5063 re-key), and the
-    // transaction held open.
+    // Stand-in for the mint's fence + stamp (#5088 F7: kept as a stand-in, mirroring the product's lock ORDER): the
+    // memory row FOR UPDATE, then every node row of the memory FOR UPDATE in id order (`fenceCorpusForMint`, so the
+    // spec row is held as the real mint holds it), the mint record written (a node gains minted_at, #5063 re-key),
+    // and the transaction held open. What it still does NOT do: run the mint's checks, stamp the live nodes, or set the fence's 500ms node-lock timeout (this test never waits on a node row, so the bound is never reached); this
+    // test pins only the delete's ordering behind a mint in flight. The product mint is driven in specCorpusMint.test.ts.
     let release!: () => void;
     let flipped!: () => void;
     const hold = new Promise<void>((r) => { release = r; });
     const isFlipped = new Promise<void>((r) => { flipped = r; });
     const mint = db.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM memories WHERE id = ${racing.id} FOR UPDATE`;
+      await tx.$queryRaw`SELECT id FROM nodes WHERE memory_id = ${racing.id} ORDER BY id FOR UPDATE`;
       const now = new Date();
-      await tx.node.create({
-        data: {
-          id: generateId(), memoryId: racing.id, loc: 'racing:mint-marker', name: 'racing:mint-marker',
-          content: 'minted elsewhere; tombstoned', role: null, tags: [],
-          mintedAt: now, mintedByInfo: 'test', deletedAt: now,
-        },
-      });
+      await createMintMarker(tx, racing.id, { loc: 'racing:mint-marker', mintedAt: now });
       flipped();
       await hold;
     }, { timeout: 20_000 });

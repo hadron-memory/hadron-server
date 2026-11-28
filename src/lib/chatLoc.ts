@@ -49,6 +49,7 @@ import { ancestorLocs } from './nodeSubtreeLock.js';
 import { teamSpaceAudienceFilter } from './auth/teamSpace.js';
 import { NOT_QUESTION_FAMILY_WHERE } from './questions/index.js';
 import { governedRoleWhereClauses } from './governedRole.js';
+import { groupMemberMemoryWhere } from './auth/groupMemberMemory.js';
 
 /**
  * #1717 — the shape of a chat root's address: a direct child of `chats`, as
@@ -272,6 +273,19 @@ export async function chatLocFilter(
             } as Prisma.NodeWhereInput,
           ]
         : []),
+      // #5027 Ask 6 (c), cor:acl:030:01 (Holger R1/R4, 2026-11-27): a chat has no access of its own, so a chat in a
+      // group, personal or private home is a candidate for whoever the host memory's read gate admits. These arms are
+      // the identity halves of that gate, as relation filters, so the filter stays a superset; each call site's own
+      // content gate still decides. Group: its MemoryMembers (the shared predicate; bounded to the support session's
+      // org under impersonation). Personal and private: the owner. No share-grantee arm: every home startChat accepts carries
+      // an App, and the shared gate admits no grantee to an App personal memory (option B; #5389 widens both together).
+      // Impersonation never reaches the identity-scoped personal/private arm.
+      { memory: groupMemberMemoryWhere(userId, { restrictToOrgId: principal.impersonation?.orgId ?? null }) },
+      ...(principal.impersonation
+        ? []
+        : [
+            { memory: { class: { in: ['personal', 'private'] as never }, userId } },
+          ]),
     ],
   };
 }

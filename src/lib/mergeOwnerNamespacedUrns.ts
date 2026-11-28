@@ -99,8 +99,12 @@ export async function mergeOwnerNamespacedUrns(
       root: newRoot,
       desiredSlug: slugOf(m.urn),
       authorRoot,
+      // A tombstone neither merged account owns is a holder too (hadron-internal#75): it is never reclaimed, so mint past it.
       isTaken: (u) =>
-        tx.memory.findFirst({ where: { urn: u, deletedAt: null }, select: { id: true } }).then(Boolean),
+        tx.memory.findFirst({
+          where: { urn: u, OR: [{ deletedAt: null }, { userId: { notIn: [sourceUserId, targetUserId] } }] },
+          select: { id: true },
+        }).then(Boolean),
     });
     // Reclaim ONLY a soft-deleted holder sitting at this EXACT target URN. The
     // `memories_urn_key` unique spans tombstones (not partial on deleted_at), so
@@ -110,7 +114,7 @@ export async function mergeOwnerNamespacedUrns(
     // #1468 — through the shared reclaim, refused for a stamped corpus still
     // holding a spec.
     const dead = await tx.memory.findFirst({ where: { urn: newUrn, deletedAt: { not: null } }, select: { id: true } });
-    if (dead) await reclaimTombstonedMemory(tx, dead.id);
+    if (dead) await reclaimTombstonedMemory(tx, dead.id, [sourceUserId, targetUserId]);
     await tx.memory.update({
       where: { id: m.id },
       // Record the pre-merge URN so old `@source:slug` references still resolve

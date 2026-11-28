@@ -36,6 +36,8 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
   restoreNodeRevision: ['nodeRevRef'],
   deleteNodeRevision: ['nodeRevRef'],
   updateNodeRevision: ['nodeRevRef'],
+  // #5080 (gap 2): the mutation twin of AiServiceConfigFilter.ownerRef (the same owner gate).
+  createAiServiceConfig: ['ownerRef'],
   updateApp: ['ref'],
   deleteApp: ['ref'],
   regenerateAppKey: ['appRef'],
@@ -125,6 +127,8 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
   parkAgentTask: ['taskRef'],
   cloneAgentTask: ['taskRef'],
   makeAgentTaskReady: ['taskRef'],
+  // #5081 (gap 3): the signing switch's organization argument is `orgRef`, not `org`.
+  setOrgBootPromptSigning: ['orgRef'],
 };
 
 /**
@@ -141,6 +145,8 @@ const EXPECTED_QUERY_REF_ARGS: Record<string, string[]> = {
   nodeRevisions: ['nodeRef'],
   nodeRevision: ['nodeRevRef'], // #4138 (S2)
   appRuns: ['appRef', 'orgRef', 'parentRunRef'],
+  // #4139 (S3): nodeExport takes the node's ref (PK or URN).
+  nodeExport: ['ref'],
   // #4142 (S6 chunk A): the memory reads.
   usageEvents: ['memoryRef', 'nodeRef'],
   usageEventsPage: ['memoryRef', 'nodeRef'],
@@ -152,6 +158,27 @@ const EXPECTED_QUERY_REF_ARGS: Record<string, string[]> = {
   agentTasksPage: ['appRef', 'parentTaskRef'], // shares agentTasks' ListArgs (Bridget's LOCAL P2-1)
   agentTeamEvents: ['appRef', 'taskRef'],
   agentTeamEventsPage: ['appRef', 'taskRef'],
+  // #5081 (gap 3): the 20 Query fields whose organization argument was `orgId` (18) or `org` (2) are `orgRef`.
+  findNodes: ['orgRef'],
+  globalSearch: ['orgRef'],
+  edges: ['orgRef'],
+  impersonationSessions: ['orgRef'],
+  memories: ['orgRef'],
+  exchangeConnections: ['orgRef'],
+  exchangeConnectionsPage: ['orgRef'],
+  slackConnections: ['orgRef'],
+  telegramConnections: ['orgRef'],
+  mcpServers: ['orgRef'],
+  homeAssistantInstances: ['orgRef'],
+  resendSenders: ['orgRef'],
+  apps: ['orgRef'],
+  agents: ['orgRef'],
+  scopes: ['orgRef'],
+  channels: ['orgRef'],
+  registerEntries: ['orgRef'],
+  assets: ['orgRef'],
+  orgBootPromptSigning: ['orgRef'],
+  orgBootPromptSigningPreview: ['orgRef'],
 };
 
 /**
@@ -185,7 +212,7 @@ const ALLOWED_ID_ARGS = new Set([
 
 /** The legacy-`Id` check, one (field, arg) at a time, against a per-field allow-list. */
 const isStrayLegacyIdArg = (field: string, arg: string, allowed: ReadonlySet<string> = ALLOWED_ID_ARGS): boolean =>
-  /^(id|.*Id)$/.test(arg) && !allowed.has(`${field}.${arg}`);
+  /^(id|org|.*Id)$/.test(arg) && !allowed.has(`${field}.${arg}`);
 
 type Root = 'Query' | 'Mutation';
 
@@ -277,6 +304,162 @@ describe('#4368 — setAgentAssetUploadEnabled names its Agent with agentRef', (
   });
 });
 
+/**
+ * #5080 (gap 2): the input-type counterpart of the argument guards above. Every input-object field that names a ref-able entity
+ * takes `<entity>Ref` (cor:api:140:01); `<entity>Id` is reserved for a genuine primary key, an external label or a token. The walk
+ * covers EVERY input type: a field matching `^(id|.*Ids?)$` fails unless `ALLOWED_INPUT_ID_FIELDS` lists it with a reason.
+ */
+const EXPECTED_INPUT_REF_FIELDS: string[] = [
+  'NodeFilter.memoryRefs',
+  'EdgeFilter.memoryRef', 'EdgeFilter.sourceRef', 'EdgeFilter.targetRef',
+  'AppFilter.agentRef',
+  'AiServiceConfigFilter.ownerRef',
+  'NodeAuthoringCheckInput.memoryRef',
+  'CreateNodeInput.memoryRef',
+  'UpdateNodeInput.ref', 'UpdateNodeInput.memoryRef',
+  'ImportNodeInput.memoryRef',
+  'NodeEdgeInput.targetRef',
+  'SearchReplaceInNodesInput.nodeRefs', 'SearchReplaceInNodesInput.memoryRefs',
+  'SpecSearchReplaceInput.nodeRefs',
+  'BeginAssetUploadV2Input.memoryRef',
+  'CreateAgentTaskInput.parentTaskRef', 'CloneAgentTaskInput.parentTaskRef',
+  'TickerInput.channelRefs', 'TickerPatch.channelRefs',
+  'BatchThrough.channelRef',
+  // #5163: the compare-and-set guard of resumeSession, an id or a worker URN through resolveWorkerRef.
+  'ResumeSessionInput.expectedWorkerRef',
+];
+
+/** `Type.field` -> why it stays `*Id`. An empty reason, or an entry that no longer matches a field, fails. */
+const ALLOWED_INPUT_ID_FIELDS: Record<string, string> = {
+  // Ref-able entity, but exempt.
+  'NodeInput.memoryId': 'the legacy shape of the retired replaceSubtree, which refuses without writing (#4219 kept replaceSubtree(memoryId:) so legacy callers still reach REPLACE_SUBTREE_RETIRED)',
+  'LegacyNodeEdgeInput.targetId': 'the frozen edge shape of NodeInput.edges (the retired replaceSubtree); NodeEdgeInput is the live one',
+  'RegisterContextResetRecoveryInput.taskId': "an echo of the reset's own task, compared raw: it confirms a value the server handed the host and looks nothing up",
+  'SkillFileFactsInput.nodeId': "a value read from a provenance header on the caller's disk and reported as a fact, not a lookup",
+  // Names no ref-able entity.
+  'CreateNodeInput.id': 'a forced primary key for a create (importer/sync), never a selector (D2)',
+  'NodeInput.id': 'a forced primary key for a create, never a selector (D2)',
+  'SessionInput.id': 'Session: excluded, no ref resolver',
+  'SessionInput.parentSessionId': 'Session: excluded, no ref resolver',
+  'SessionInput.prevSessionId': 'Session: excluded, no ref resolver',
+  'UsageEventInput.sessionId': 'Session: excluded, no ref resolver',
+  'RegisterContextResetRecoveryInput.sessionId': 'Session: excluded, no ref resolver',
+  'EndAgentlessSessionInput.sessionId': 'Session: excluded, no ref resolver',
+  'SessionInput.customerId': 'an external label',
+  'GrantCreditsInput.sourceId': 'provenance: the id of the thing that sourced the credit, not a Hadron entity ref',
+  // Added after the #5080 walk (Billing A1, A7): the same provenance pair as GrantCreditsInput.sourceType/sourceId.
+  'AdjustCreditsInput.sourceId': 'provenance: the id of the thing that sourced the adjustment, not a Hadron entity ref',
+  'SetOwnerLimitsInput.sourceId': 'provenance: the id of the thing that sourced the change, not a Hadron entity ref',
+  'ClearOwnerLimitsInput.sourceId': 'provenance: the id of the thing that sourced the change, not a Hadron entity ref',
+  'CreateAgentTaskInput.externalId': 'an external label (an outside item URL, cor:agt:120:02)',
+  'ContextResetStepInput.resetId': 'a context reset has no URN or resolver',
+  'ClaimContextResetInput.resetId': 'a context reset has no URN or resolver',
+  'RegisterContextResetRecoveryInput.resetId': 'a context reset has no URN or resolver',
+  'AuthorizeContextResetStopInput.resetId': 'a context reset has no URN or resolver',
+  'ReportContextResetRelaunchedInput.resetId': 'a context reset has no URN or resolver',
+  'ReportContextResetRelaunchFailedInput.resetId': 'a context reset has no URN or resolver',
+  'AssignHostWorkerInput.hostId': "the host's token within the App (the one its key's host:operate scope names); no resolver",
+  'UnassignHostWorkerInput.hostId': "the host's token within the App; no resolver",
+  'JoinAgentTeamHostInput.hostId': "#5259: the host's token within the App (the one its key's host:operate scope will name); no resolver",
+  'UpdateAgentTeamHostInput.hostId': "#5259: the host's token within the App; no resolver",
+  'RemoveAgentTeamHostInput.hostId': "#5259: the host's token within the App; no resolver",
+  'IssueHostOperationInput.hostId': "the host's token within the App; no resolver",
+  'ReportHostOperationInput.id': 'a HostOperation primary key',
+  'RecordHostSweepRunInput.runId': 'a caller-chosen idempotency token',
+  'BeginAssetUploadInput.uploadRequestId': 'asset uploads: excluded',
+  'BeginAssetUploadV2Input.uploadRequestId': 'asset uploads: excluded',
+  'CompleteAssetUploadInput.uploadId': 'asset uploads: excluded',
+  'AgentTaskFindingInput.id': 'a finding label (F1, F2, ...)',
+  'DashboardWidgetInput.id': 'a widget-placement primary key',
+};
+
+const INPUT_ID_FIELD = /^(id|.*Ids?)$/;
+
+/** Every input field matching `INPUT_ID_FIELD` that is not allow-listed, every allow-list entry with no reason, and every stale one. */
+const inputIdProblems = (sdl: string = typeDefs, allowed: Record<string, string> = ALLOWED_INPUT_ID_FIELDS): string[] => {
+  const types = Object.values(buildSchema(sdl).getTypeMap()).filter(
+    (t): t is GraphQLInputObjectType => t instanceof GraphQLInputObjectType && !t.name.startsWith('__'),
+  );
+  const seen = new Set<string>();
+  const problems: string[] = [];
+  for (const t of types) {
+    for (const f of Object.keys(t.getFields())) {
+      const key = `${t.name}.${f}`;
+      seen.add(key);
+      if (INPUT_ID_FIELD.test(f) && !(key in allowed)) {
+        problems.push(`${key}: an input field naming an entity takes <entity>Ref (cor:api:140:01); list it in ALLOWED_INPUT_ID_FIELDS with a reason if it is a genuine primary key`);
+      }
+    }
+  }
+  for (const [key, reason] of Object.entries(allowed)) {
+    if (reason.trim() === '') problems.push(`${key}: allow-list entry has no reason (cor:api:140:01)`);
+    if (!seen.has(key)) problems.push(`${key}: stale allow-list entry, no such input field (cor:api:140:01)`);
+  }
+  return problems;
+};
+
+describe('#5080 — input-type fields that name an entity take <entity>Ref', () => {
+  const schema = buildSchema(typeDefs);
+  it.each(EXPECTED_INPUT_REF_FIELDS)('%s is declared', (key) => {
+    const [type, field] = key.split('.') as [string, string];
+    const t = schema.getType(type) as GraphQLInputObjectType | undefined;
+    expect(t, `${type} is missing from the SDL`).toBeDefined();
+    expect(Object.keys(t!.getFields()), `${key}: cor:api:140:01`).toContain(field);
+  });
+  it('lists all 22 renamed input fields (21 from #5080, ResumeSessionInput.expectedWorkerRef from #5163)', () => {
+    expect(EXPECTED_INPUT_REF_FIELDS).toHaveLength(22);
+  });
+  it('no input type declares an unlisted <entity>Id / id field', () => {
+    expect(inputIdProblems()).toEqual([]);
+  });
+  it('the old names are refused: each is an unknown input field', () => {
+    const old: Array<[string, string]> = [
+      ['NodeFilter', 'memoryIds'], ['EdgeFilter', 'memoryId'], ['EdgeFilter', 'sourceNodeId'], ['EdgeFilter', 'targetNodeId'],
+      ['AppFilter', 'agentId'], ['AiServiceConfigFilter', 'ownerId'], ['NodeAuthoringCheckInput', 'memoryId'],
+      ['CreateNodeInput', 'memoryId'], ['UpdateNodeInput', 'id'], ['UpdateNodeInput', 'memoryId'], ['ImportNodeInput', 'memoryId'],
+      ['NodeEdgeInput', 'targetId'], ['SearchReplaceInNodesInput', 'nodeIds'], ['SearchReplaceInNodesInput', 'memoryIds'],
+      ['SpecSearchReplaceInput', 'nodeIds'], ['BeginAssetUploadV2Input', 'memoryId'], ['CreateAgentTaskInput', 'parentTaskId'],
+      ['CloneAgentTaskInput', 'parentTaskId'], ['TickerInput', 'channelIds'], ['TickerPatch', 'channelIds'], ['BatchThrough', 'channelId'],
+      ['ResumeSessionInput', 'expectedWorkerId'],
+    ];
+    for (const [type, field] of old) {
+      expect(Object.keys((schema.getType(type) as GraphQLInputObjectType).getFields()), `${type}.${field} still exists`).not.toContain(field);
+    }
+    const arg = (schema.getMutationType() as GraphQLObjectType).getFields().createAiServiceConfig!.args.map((a) => a.name);
+    expect(arg).not.toContain('ownerId');
+  });
+  it('NodeInput (the retired replaceSubtree shape) keeps memoryId, and its edges keep targetId', () => {
+    const f = (schema.getType('NodeInput') as GraphQLInputObjectType).getFields();
+    expect(f.memoryId).toBeDefined();
+    expect(f.edges!.type.toString()).toBe('[LegacyNodeEdgeInput!]');
+    expect(Object.keys((schema.getType('LegacyNodeEdgeInput') as GraphQLInputObjectType).getFields())).toContain('targetId');
+  });
+});
+
+const INPUT_FIXTURE_SDL = `
+  type Query { x: String }
+  input Plain { name: String  ownerRef: ID }
+  input Strays { memoryId: ID  parentIds: [ID!]  id: ID  fine: String }
+`;
+describe('#5080 — the input walk fails where it must (fixture schema)', () => {
+  it('flags an unlisted id, <x>Id and <x>Ids field, and passes a Ref and a plain field', () => {
+    const problems = inputIdProblems(INPUT_FIXTURE_SDL, {});
+    expect(problems.map((p) => p.split(':')[0])).toEqual(['Strays.memoryId', 'Strays.parentIds', 'Strays.id']);
+    expect(problems[0]).toContain('cor:api:140:01');
+  });
+  it('an allow-listed field with a reason passes', () => {
+    expect(inputIdProblems(INPUT_FIXTURE_SDL, { 'Strays.memoryId': 'a pk', 'Strays.parentIds': 'a pk', 'Strays.id': 'a pk' })).toEqual([]);
+  });
+  it('an allow-list entry with an empty reason fails', () => {
+    const problems = inputIdProblems(INPUT_FIXTURE_SDL, { 'Strays.memoryId': ' ', 'Strays.parentIds': 'a pk', 'Strays.id': 'a pk' });
+    expect(problems).toEqual(['Strays.memoryId: allow-list entry has no reason (cor:api:140:01)']);
+  });
+  it('a stale allow-list entry fails', () => {
+    const problems = inputIdProblems(INPUT_FIXTURE_SDL, { 'Strays.memoryId': 'a pk', 'Strays.parentIds': 'a pk', 'Strays.id': 'a pk', 'Gone.thingId': 'old' });
+    expect(problems).toEqual(['Gone.thingId: stale allow-list entry, no such input field (cor:api:140:01)']);
+  });
+});
+
 /** A fixture schema (never the real SDL), so the negative cases pin the CHECKER and not today's drift. */
 const FIXTURE_SDL = `
   type Query { thing(ref: ID!, thingId: ID): String  other(otherRef: ID, filterId: ID): String  plain(limit: Int): String }
@@ -331,3 +514,18 @@ describe('#4357 P3-8 — the legacy-Id allowance is per field', () => {
   });
 });
 
+
+describe('#5081 (gap 3) — the 21 organization-scope arguments stay named in the guard tables', () => {
+  const QUERY = ['findNodes', 'globalSearch', 'edges', 'impersonationSessions', 'memories', 'exchangeConnections', 'exchangeConnectionsPage', 'slackConnections', 'telegramConnections', 'mcpServers', 'homeAssistantInstances', 'resendSenders', 'apps', 'agents', 'scopes', 'channels', 'registerEntries', 'assets', 'orgBootPromptSigning', 'orgBootPromptSigningPreview'];
+  it.each(QUERY)('Query.%s is in EXPECTED_QUERY_REF_ARGS with orgRef', (name) => {
+    expect(EXPECTED_QUERY_REF_ARGS[name]).toContain('orgRef');
+  });
+  it('Mutation.setOrgBootPromptSigning is in EXPECTED_REF_ARGS with orgRef', () => {
+    expect(EXPECTED_REF_ARGS.setOrgBootPromptSigning).toContain('orgRef');
+  });
+  it('a bare `org` argument is a stray legacy arg, as is orgId', () => {
+    expect(isStrayLegacyIdArg('Query.orgBootPromptSigning', 'org')).toBe(true);
+    expect(isStrayLegacyIdArg('Query.apps', 'orgId')).toBe(true);
+    expect(isStrayLegacyIdArg('Query.apps', 'orgRef')).toBe(false);
+  });
+});

@@ -1,3 +1,4 @@
+import { refuseSeatFinishWithoutVerdict } from '../../../lib/agentTasks/seatVerdictGate.js';
 import { hasUnstorableJsonText } from '../../../lib/agentTasks/references.js';
 import { appendAppActionEvent } from '../../../lib/agentTasks/events.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';
@@ -199,8 +200,9 @@ export function notAssignee(actor: TaskActor, message: string, ext: Record<strin
     : ' This request acted as a person: it carried no worker session, and a worker\'s task is acted on only with that worker\'s session.';
   return taskError('TASK_NOT_ASSIGNEE', message + note, { ...ext, actor: actor.kind === 'worker' ? 'worker' : 'person' });
 }
-const notFound = (taskId: string): GraphQLError =>
-  taskError('TASK_NOT_FOUND', 'Task not found.', { taskId });
+// #5168: the miss names no task, so `taskId` would only relay the caller's own ref; it is left off.
+const notFound = (_taskRef: string): GraphQLError =>
+  taskError('TASK_NOT_FOUND', 'Task not found.');
 /** The refusal for a task that does not exist or that the caller may not read, for a door outside `mutateTask`. */
 export const taskNotFound = notFound;
 /** #2664: the longest `text` filter, after trimming. */
@@ -342,7 +344,8 @@ export async function loadApp(ctx: Context, appId: string): Promise<TaskApp | nu
   return ctx.db.app.findUnique({ where: { id: appId }, select: APP_SELECT });
 }
 
-const appNotFound = (appRef: string): GraphQLError => taskError('APP_NOT_FOUND', 'App not found.', { appRef });
+// #5168: the refusal never relays the caller's ref (it is their own text, possibly a pasted secret).
+const appNotFound = (_appRef: string): GraphQLError => taskError('APP_NOT_FOUND', 'App not found.');
 
 /**
  * Resolve an App ref the caller participates in. An App that does not exist
@@ -1367,12 +1370,12 @@ export function refuseEnded(task: TaskRow, remedy?: string): void {
 // ── Mutations ─────────────────────────────────────────────────────────────
 
 /** #2646: the overrides of a clone; every field is optional, and a field left out keeps the source's value. */
-type CloneInput = Partial<Pick<CreateInput, 'title' | 'description' | 'source' | 'tags' | 'references' | 'closeSessionWhenDone' | 'priority' | 'properties' | 'requirements' | 'owner' | 'assignee' | 'status' | 'startBy' | 'finishBy' | 'project' | 'isProject' | 'parentTaskId'>>;
+type CloneInput = Partial<Pick<CreateInput, 'title' | 'description' | 'source' | 'tags' | 'references' | 'closeSessionWhenDone' | 'priority' | 'properties' | 'requirements' | 'owner' | 'assignee' | 'status' | 'startBy' | 'finishBy' | 'project' | 'isProject' | 'parentTaskRef'>>;
 
 type CreateInput = {
   match?: boolean | null;
   appRef?: string | null;
-  parentTaskId?: string | null;
+  parentTaskRef?: string | null;
   title: string;
   priority?: number | null;
   blockedBy?: string[] | null;
@@ -1391,7 +1394,7 @@ type CreateInput = {
   tags?: string[] | null;
   closeSessionWhenDone?: boolean | null;
   status?: string | null;
-  /** #2553: make a top-level PROJECT (AT1, AT2, ...) instead of a task under AT0. Not with a parentTaskId. #4997: also sets the project marker. */
+  /** #2553: make a top-level PROJECT (AT1, AT2, ...) instead of a task under AT0. Not with a parentTaskRef. #4997: also sets the project marker. */
   project?: boolean | null;
   /** #4997 (cor:agt:050:01 Project marker): mark any task, nested or under AT0, as a project. `false` with `project: true` is refused. */
   isProject?: boolean | null;
@@ -1537,11 +1540,11 @@ async function insertTask(
 export async function createRootTaskForRun(
   principal: Context,
   run: { id: string; appId: string },
-  input: Omit<CreateInput, 'parentTaskId' | 'status'> & { parentTaskId?: unknown; status?: never },
+  input: Omit<CreateInput, 'parentTaskRef' | 'status'> & { parentTaskRef?: unknown; status?: never },
 ) {
   // #1832: a run's root task is created pending (queued unless an assignee is named); a status is refused, never silently dropped. The type is `never` so a typed caller cannot pass one; an untyped one (the run tool) is caught here.
   if (input.status != null) throw badInput('A run-created task takes no status; it is created pending.');
-  if (input.parentTaskId != null && input.parentTaskId !== '') throw badInput('A run creates root tasks only; it names no parentTaskId.');
+  if (input.parentTaskRef != null && input.parentTaskRef !== '') throw badInput('A run creates root tasks only; it names no parentTaskRef.');
   if (input.appRef) {
     let namedAppId: string | null = null;
     try {
@@ -1688,8 +1691,8 @@ async function prepareTaskCreate(
   opts?: { isProject: boolean },
 ): Promise<PreparedCreate> {
   if (!input) throw badInput('input is required.');
-  const parentRef = input.parentTaskId?.trim() || null;
-  if (input.project && parentRef) throw badInput('A project is a top-level task: it takes no parentTaskId.');
+  const parentRef = input.parentTaskRef?.trim() || null;
+  if (input.project && parentRef) throw badInput('A project is a top-level task: it takes no parentTaskRef.');
   // #4997: judged from the input alone, before any read, so a contradiction writes nothing and reveals nothing.
   const isProject = opts ? opts.isProject : resolveProjectMarker(input.project, input.isProject);
   // A top-level task is a project (ruling A), so a clone that would make an unmarked one is the same contradiction;
@@ -1706,7 +1709,7 @@ async function prepareTaskCreate(
     parentTaskId = readable.task.id;
     // #2553: AT0 is the implicit parent of a task with no project, never a parent a caller names: a plain create takes
     // the ROOT gate and owner rules (this input names no parent), so naming AT0 would reach the child gate instead.
-    if (readable.task.handle === PROJECT_ZERO_HANDLE) throw badInput('AT0 is the reserved "No project" project: omit parentTaskId to make a task with no project.');
+    if (readable.task.handle === PROJECT_ZERO_HANDLE) throw badInput('AT0 is the reserved "No project" project: omit parentTaskRef to make a task with no project.');
     // A parent in another App reads as not-found: no cross-App oracle (#1705).
     if (input.appRef) {
       let namedAppId: string | null = null;
@@ -1731,7 +1734,7 @@ async function prepareTaskCreate(
     }
     ({ app, actor } = inApp);
   } else {
-    if (!input.appRef) throw badInput('Name the App for a root task (or a parentTaskId for a child task).');
+    if (!input.appRef) throw badInput('Name the App for a root task (or a parentTaskRef for a child task).');
     ({ app, actor } = await resolveParticipatedApp(ctx, input.appRef));
   }
   requireWritable(ctx, app);
@@ -1755,7 +1758,7 @@ async function prepareTaskCreate(
   if (status === 'backlog' && input.assignee) {
     throw badInput('A backlog task has no assignee (cor:agt:050:02). Make it ready, then assign it.');
   }
-  const refused = parentRef ? () => notFound(parentRef) : input.appRef ? () => appNotFound(input.appRef as string) : () => notFound(input.parentTaskId!.trim());
+  const refused = parentRef ? () => notFound(parentRef) : input.appRef ? () => appNotFound(input.appRef as string) : () => notFound(input.parentTaskRef!.trim());
   // #4793 (Holger, 2026-11-21): a missing source raises no warning. The code stays on the closed list and in RECORDED_TASK_WARNING_CODES so history already recorded with it still reads (cor:agt:110:01).
   const warn: TaskWarningCode[] = [];
   // #2162: a task created straight onto a worker takes that worker's per-worker lock, before any row.
@@ -2314,14 +2317,14 @@ export const agentTaskMutations = {
     if (src.handle === PROJECT_ZERO_HANDLE) throw badInput('AT0 is the reserved "No project" project and cannot be cloned.');
     const ov: CloneInput = input ?? {};
     const named = <K extends keyof CloneInput>(k: K): boolean => ov[k] !== undefined;
-    // The parent: a parent the call names; else, when the call names none (parentTaskId: null), a root; else the
+    // The parent: a parent the call names; else, when the call names none (parentTaskRef: null), a root; else the
     // source's own. A project stays a project, and a task under AT0 or under an ended parent goes under AT0.
     let parentTaskId: string | null = null;
     let project = false;
-    if (ov.parentTaskId) {
-      parentTaskId = ov.parentTaskId;
+    if (ov.parentTaskRef) {
+      parentTaskId = ov.parentTaskRef;
       project = ov.project === true;
-    } else if (ov.parentTaskId === null) {
+    } else if (ov.parentTaskRef === null) {
       project = ov.project === true;
     } else if (!src.parentTaskId) {
       project = ov.project ?? true;
@@ -2336,7 +2339,7 @@ export const agentTaskMutations = {
     const stored = storedTaskReferences(src.references).map(r => ({ kind: REFERENCE_KIND_TO_GQL[r.kind], target: r.target, label: r.label ?? null }));
     const createInput: CreateInput = {
       appRef: readable.app.id,
-      parentTaskId,
+      parentTaskRef: parentTaskId,
       project,
       title: ov.title ?? src.title,
       description: named('description') ? ov.description : src.description,
@@ -2638,12 +2641,12 @@ export const agentTaskMutations = {
     ctx: Context,
   ) => mutateTask(ctx, args.taskRef, async (tx, task, actor, app, txCtx) => {
     if (!(await mayDirectTask(tx, txCtx, app, actor, task))) {
-      throw taskError('TASK_NOT_OWNER', 'Only whoever may assign this task disposes its findings.', { taskId: args.taskRef });
+      throw taskError('TASK_NOT_OWNER', 'Only whoever may assign this task disposes its findings.', { taskId: task.id });
     }
-    if (task.status !== 'finished') throw taskError('TASK_NOT_FINISHED', 'Only a finished task has findings to dispose.', { taskId: args.taskRef });
+    if (task.status !== 'finished') throw taskError('TASK_NOT_FINISHED', 'Only a finished task has findings to dispose.', { taskId: task.id }); // #5225: the resolved id, not the caller's ref
     if (!['fixed', 'accepted', 'deferred', 'rejected'].includes(args.disposition as string)) throw badInput('A disposition is fixed, accepted, deferred or rejected; it cannot be cleared.');
     const findings = (task.resultFindings ?? []) as TaskFinding[];
-    if (!findings.some(f => f.id === args.findingId)) throw taskError('TASK_FINDING_NOT_FOUND', 'Finding not found.', { taskId: args.taskRef });
+    if (!findings.some(f => f.id === args.findingId)) throw taskError('TASK_FINDING_NOT_FOUND', 'Finding not found.', { taskId: task.id }); // #5225: the resolved id, not the caller's ref
     const reference = args.reference == null ? null : taskReferencesInput([args.reference])[0];
     const dispositions = task.findingDispositions as unknown as { findingId: string; disposition: string; reference: TaskReference | null }[];
     const unchanged = dispositions.some(d => d.findingId === args.findingId && d.disposition === args.disposition && isDeepStrictEqual(d.reference, reference));
@@ -2686,6 +2689,8 @@ export const agentTaskMutations = {
       if (task.status !== 'started') {
         throw taskError('TASK_INVALID_TRANSITION', 'Start the task before finishing it.', { taskId, status: task.status });
       }
+      // #5036: a PR review seat with no verdict at its assigned head is not finished; judged before any write.
+      await refuseSeatFinishWithoutVerdict(tx, task, outcome);
       // #2652 (cor:agt:050:30): the team's closed outcome set, read now, before any write; no set keeps any one word.
       await checkOutcomeInTeamSet(tx, txCtx, app.id, outcome, (w) => TASK_OUTCOME_PATTERN.test(w));
       // #4414 (cor:agt:050:30): the role tasks followed, judged here, before any write, through the node read gate.

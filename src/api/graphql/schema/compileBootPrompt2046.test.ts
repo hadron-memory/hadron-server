@@ -80,6 +80,15 @@ describe('#2046 S9-4 — compileBootPrompt', () => {
     expect(await db.edge.count({ where: { sourceId: one.nodeId, name: 'compiled-from' } })).toBe(1);
   });
 
+  it('#5019: a compile is not judged by NODE_CONTENT_MAX_BYTES', async () => {
+    const f = await fixture();
+    await f.source(f.agentMem.id, 'boot:source', 'x'.repeat(2000));
+    vi.stubEnv('NODE_CONTENT_MAX_BYTES', '1000');
+    try {
+      expect((await compileBootPrompt(ctxOf(f.admin.id), agentTarget(f))).revNo).toBe(1);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   it('setPointer:false leaves the Agent pointer alone', async () => {
     const f = await fixture();
     await f.source(f.agentMem.id, 'boot:source', 'x');
@@ -335,8 +344,8 @@ describe('#2046 S9-4 — compileBootPrompt', () => {
     await f.source(f.agentMem.id, 'boot:source', 'x');
     const r = await compileBootPrompt(ctxOf(f.admin.id), agentTarget(f));
     const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<unknown>>;
-    expect(await codeOf(M.updateNode!(null, { input: { id: r.nodeId, content: 'forged' } }, ctxOf(f.admin.id)))).toBe('BOOT_PROMPT_COMPILED_WRITE');
-    expect(await codeOf(M.createNode!(null, { input: { memoryId: f.agentMem.id, loc: 'boot:other', name: 'x', content: 'y', role: 'boot-prompt', nodeType: 'compiled-boot-prompt' } }, ctxOf(f.admin.id)))).toBe('BOOT_PROMPT_COMPILED_WRITE');
+    expect(await codeOf(M.updateNode!(null, { input: { ref: r.nodeId, content: 'forged' } }, ctxOf(f.admin.id)))).toBe('BOOT_PROMPT_COMPILED_WRITE');
+    expect(await codeOf(M.createNode!(null, { input: { memoryRef: f.agentMem.id, loc: 'boot:other', name: 'x', content: 'y', role: 'boot-prompt', nodeType: 'compiled-boot-prompt' } }, ctxOf(f.admin.id)))).toBe('BOOT_PROMPT_COMPILED_WRITE');
     expect((await db.node.findUniqueOrThrow({ where: { id: r.nodeId } })).content).toBe('x');
   });
 

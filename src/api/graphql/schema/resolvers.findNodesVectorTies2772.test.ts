@@ -46,7 +46,7 @@ afterAll(() => {
 describe('#2772 ties at depth', () => {
   it('a page past the HNSW window, in a field of exact ties, is the node-id order', async () => {
     const ctx = { db, roles: ['ADMIN'], userId: 'admin-2772t' } as unknown as Context;
-    const res = await (resolvers.Query as any).findNodes(null, { query: 'q', mode: 'vector', limit: 20, offset: 1100, filter: { memoryIds: [mem] } }, ctx);
+    const res = await (resolvers.Query as any).findNodes(null, { query: 'q', mode: 'vector', limit: 20, offset: 1100, filter: { memoryRefs: [mem] } }, ctx);
     const want = (await db.node.findMany({ where: { memoryId: mem }, select: { id: true }, orderBy: { id: 'asc' }, skip: 1100, take: 20 })).map((r) => r.id);
     expect(res.hits.map((h: any) => h.node.id)).toEqual(want);
   }, 60_000);

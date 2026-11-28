@@ -84,6 +84,7 @@ import {
   type SnapshotSourceNode,
   type SnapshotEditor,
 } from './nodeRevisionSnapshot.js';
+import { requireNodeHeadroom, sameMemoryOwner } from './ownerLimits/nodes.js';
 
 /** A node OUTSIDE the moving set already occupies a destination slot. */
 export class SubtreeMoveCollisionError extends Error {
@@ -198,6 +199,42 @@ function relativeContentLinks(content: string): Array<{ raw: string; target: str
   return links;
 }
 
+/**
+ * #5230: the live nodes of a memory at any of `locs` (distinct). The list follows a subtree's content links, not its node
+ * count, so it goes in chunks that stay under Postgres's 32,767 bind cap. A loc is unique in a memory, so the chunks'
+ * rows never repeat.
+ */
+export const LOC_LOOKUP_CHUNK = 10_000;
+export async function findLiveNodesByLoc(tx: Prisma.TransactionClient, memoryId: string, locs: string[]) {
+  const found: Array<{ id: string; loc: string }> = [];
+  for (let i = 0; i < locs.length; i += LOC_LOOKUP_CHUNK) {
+    found.push(...await tx.node.findMany({
+      where: { memoryId, loc: { in: locs.slice(i, i + LOC_LOOKUP_CHUNK) }, deletedAt: null },
+      select: { id: true, loc: true },
+    }));
+  }
+  return found;
+}
+
+/**
+ * The edge locs a memory already holds (live OR soft-deleted) at any of `bases`, or under one as `<base>:…`.
+ * #5230: each base binds twice and the bases follow the moved edges, so they go in chunks (10,001 binds each); the set
+ * merges a loc that two chunks both match.
+ */
+export const BASE_LOOKUP_CHUNK = 5_000;
+export async function findHeldEdgeLocs(tx: Prisma.TransactionClient, memoryId: string, bases: string[]): Promise<Set<string>> {
+  const held = new Set<string>();
+  for (let i = 0; i < bases.length; i += BASE_LOOKUP_CHUNK) {
+    const chunk = bases.slice(i, i + BASE_LOOKUP_CHUNK);
+    const rows = await tx.edge.findMany({
+      where: { memoryId, OR: [{ loc: { in: chunk } }, ...chunk.map((b) => ({ loc: { startsWith: `${b}:` } }))] },
+      select: { loc: true },
+    });
+    for (const row of rows) held.add(row.loc);
+  }
+  return held;
+}
+
 /** A miss at a live loc may still resolve through a historical NODE alias. */
 async function aliasTargetId(
   tx: Prisma.TransactionClient,
@@ -272,10 +309,9 @@ export async function lockSourceForMove(
  * descendants that do not exist. The count is already in hand at every refusal
  * site, so the message can say the true shape instead of the worst case.
  */
-export function describeMoved(loc: string, size: number): string {
-  return size === 1
-    ? `node "${loc}"`
-    : `"${loc}" and its ${size - 1} descendant${size === 2 ? '' : 's'}`;
+export function describeMoved(size: number): string {
+  // #5225 (cor:api:140:01): the moved node is the one the caller named, so its loc is not repeated back.
+  return size === 1 ? 'the node' : `the node and its ${size - 1} descendant${size === 2 ? '' : 's'}`;
 }
 
 /**
@@ -322,6 +358,13 @@ export async function moveNodeSubtree(
      * server-authored callers.
      */
     principal?: RoleWriterPrincipal;
+    /**
+     * #5015 (cor:acl:150:04) — the person whose act this move is, for the owner-limit refusal's form (null for an
+     * unattended or impersonated caller). REQUIRED so a new caller states it. A move into a memory of ANOTHER owner adds
+     * the subtree's nodes and its carried live comments to that owner and is refused at its `nodes` limit; a move inside
+     * one owner adds nothing and is never judged.
+     */
+    ownerLimitCaller: { userId: string } | null;
   },
 ): Promise<MoveNodeSubtreeResult> {
   const { source, destLoc, editor, renameSourceLeaf, renameAuthoring } = opts;
@@ -431,10 +474,7 @@ export async function moveNodeSubtree(
     : [];
   const targets = [...new Set(contentLinks.map((link) => link.target))];
   const sourceTargets = targets.length
-    ? await tx.node.findMany({
-        where: { memoryId: srcMemoryId, loc: { in: targets }, deletedAt: null },
-        select: { id: true, loc: true },
-      })
+    ? await findLiveNodesByLoc(tx, srcMemoryId, targets)
     : [];
   const sourceIdByLoc = new Map(sourceTargets.map((n) => [n.loc, n.id]));
   for (const target of targets) {
@@ -493,7 +533,7 @@ export async function moveNodeSubtree(
       for (const c of liveCarried) perTarget.set(c.targetNodeId, (perTarget.get(c.targetNodeId) ?? 0) + 1);
       throw commentError(
         'COMMENT_MOVE_UNCOMMENTABLE',
-        `Cannot move ${describeMoved(source.loc, subtree.length)} into a ${dest.class} memory: it has comment threads. An admin of the memory deletes them first.`,
+        `Cannot move ${describeMoved(subtree.length)} into a ${dest.class} memory: it has comment threads. An admin of the memory deletes them first.`,
         { class: dest.class, nodes: subtree.filter((n) => perTarget.has(n.id)).map((n) => ({ nodeId: n.id, loc: n.loc, comments: perTarget.get(n.id)! })) },
       );
     }
@@ -517,7 +557,7 @@ export async function moveNodeSubtree(
     // source-key-bound ciphertext the dest key can't read). #781 follow-up.
     if (srcMem?.isEncrypted || destMem?.isEncrypted) {
       throw new CrossMemoryMoveUnsupportedError(
-        `Cannot move ${describeMoved(source.loc, subtree.length)} across memories: ` +
+        `Cannot move ${describeMoved(subtree.length)} across memories: ` +
           (srcMem?.isEncrypted && destMem?.isEncrypted
             ? 'both memories are encrypted'
             : srcMem?.isEncrypted
@@ -570,7 +610,7 @@ export async function moveNodeSubtree(
       // to tell which of its nodes triggered this, and the whole subtree is
       // refused for one of them.
       throw new CrossMemoryMoveUnsupportedError(
-        `Cannot move ${describeMoved(source.loc, subtree.length)} across memories: it ` +
+        `Cannot move ${describeMoved(subtree.length)} across memories: it ` +
           `${chatRoot.loc === source.loc ? 'is a chat' : `contains the chat "${chatRoot.loc}"`}, ` +
           'and a chat is bound to the memory that hosts it. Move it within its memory.',
       );
@@ -593,7 +633,7 @@ export async function moveNodeSubtree(
         } catch (e) {
           if (e instanceof NodeSchemaViolation) {
             throw new SubtreeMoveSchemaViolationError(
-              `Node "${n.loc}" does not satisfy the destination memory's schema: ${e.message}`,
+              `A node being moved does not satisfy the destination memory's schema: ${e.message}`,
             );
           }
           throw e;
@@ -638,10 +678,7 @@ export async function moveNodeSubtree(
   /** Compare content links against either the committed or virtual destination. */
   async function linkWarningsAfterMove(virtual: boolean): Promise<MoveLinkWarning[]> {
     const destinationTargets = targets.length
-      ? await tx.node.findMany({
-          where: { memoryId: destMemoryId, loc: { in: targets }, deletedAt: null },
-          select: { id: true, loc: true },
-        })
+      ? await findLiveNodesByLoc(tx, destMemoryId, targets)
       : [];
     const destinationIdByLoc = new Map<string, string>(destinationTargets.map((n) => [n.loc, n.id]));
     if (virtual) {
@@ -733,6 +770,13 @@ export async function moveNodeSubtree(
         role: renamed.role, runnable: renamed.isRunnable, mintHuman: true, authoredChange: true,
       }, renameAuthoring ?? attestedAuthoring(null))
     : null;
+  // #5015 — a move across owners adds the subtree and its carried live comments to the destination's owner. Every row
+  // and both memory rows are locked by now (the memories FOR NO KEY UPDATE, so neither owner can change), and the
+  // owner-limit key is the move's last lock (gate ruling 5); a refusal rolls back the history written above.
+  if (crossMemory && !opts.planOnly && !(await sameMemoryOwner(tx, srcMemoryId, destMemoryId))) {
+    const amount = BigInt(subtree.length + carriedComments.filter((c) => c.node.deletedAt == null).length);
+    await requireNodeHeadroom(tx, { memoryId: destMemoryId, amount, caller: opts.ownerLimitCaller });
+  }
   for (const n of subtree) {
     await tx.node.update({ where: { id: n.id }, data: { loc: `__moving-${n.id}` } });
   }
@@ -858,6 +902,25 @@ export interface EdgeUrnChange {
 }
 
 /**
+ * #5128: the live, ungoverned edges with an endpoint among `ids`. The ids bind twice (source side and target side), and
+ * Postgres allows 32,767 bind variables in one statement, so a subtree of more than about 16,383 nodes failed here, after
+ * the move had spent its time. The ids go in chunks of 10,000 (20,000 binds) and the rows are merged by id, so the result
+ * is the same set at any size.
+ */
+export const EDGE_LOOKUP_CHUNK = 10_000;
+export async function findLiveEdgesTouching(tx: Prisma.TransactionClient, ids: string[]) {
+  const byId = new Map<string, Awaited<ReturnType<typeof tx.edge.findMany>>[number]>();
+  for (let i = 0; i < ids.length; i += EDGE_LOOKUP_CHUNK) {
+    const chunk = ids.slice(i, i + EDGE_LOOKUP_CHUNK);
+    const rows = await tx.edge.findMany({
+      where: { deletedAt: null, governedKind: null, OR: [{ sourceId: { in: chunk } }, { targetId: { in: chunk } }] },
+    });
+    for (const row of rows) byId.set(row.id, row);
+  }
+  return [...byId.values()];
+}
+
+/**
  * #2947 (rulings 0153, 0154, 0161, 0162; cor:api:190:01, :02) — what a move does to the EDGES that touch the moved subtree,
  * for a same-memory AND a cross-memory move.
  *
@@ -888,10 +951,7 @@ async function rebaseMovedEdges(
     createdBy: string | null;
   },
 ): Promise<EdgeUrnChange[]> {
-  const moved = [...a.movedIds];
-  const edges = await tx.edge.findMany({
-    where: { deletedAt: null, governedKind: null, OR: [{ sourceId: { in: moved } }, { targetId: { in: moved } }] },
-  });
+  const edges = await findLiveEdgesTouching(tx, [...a.movedIds]);
   if (edges.length === 0) return [];
 
   // Current locs of the endpoints that did NOT move (the moved ones are in newLocById).
@@ -938,11 +998,7 @@ async function rebaseMovedEdges(
   const taken = new Map<string, Set<string>>();
   for (const memoryId of new Set(plans.map((p) => p.memoryId))) {
     const bases = [...new Set(plans.filter((p) => p.memoryId === memoryId).map((p) => p.base))];
-    const rows = await tx.edge.findMany({
-      where: { memoryId, OR: [{ loc: { in: bases } }, ...bases.map((b) => ({ loc: { startsWith: `${b}:` } }))] },
-      select: { loc: true },
-    });
-    taken.set(memoryId, new Set(rows.map((r) => r.loc)));
+    taken.set(memoryId, await findHeldEdgeLocs(tx, memoryId, bases));
   }
 
   const changes: EdgeUrnChange[] = [];

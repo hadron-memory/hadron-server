@@ -148,8 +148,21 @@ describe('#2252 D1 matching under a minTier (S4–S7)', () => {
     expect(await assigneeOf(t.id)).toBe(liam.id);
   });
 
+  it('#5175: a mapped non-claude model passes a floor its placement meets', async () => {
+    await bind(kit, 'glm', 'glm-5.3');
+    const low = await queued({ role: 'reviewer', minTier: 'mid' });
+    expect(await run()).toEqual([{ taskId: low.id, workerId: kit.id, family: 'glm' }]);
+  });
+
+  it('#5175: a mid-placed non-claude model does not pass a high floor', async () => {
+    await bind(kit, 'glm', 'glm-5.3');
+    const high = await queued({ role: 'reviewer', minTier: 'high' });
+    expect(await run()).toEqual([]);
+    expect(await assigneeOf(high.id)).toBeNull();
+  });
+
   it('S5: an unknown model is never eligible under a minTier', async () => {
-    await bind(kit, 'glm', 'glm-4.6');
+    await bind(kit, 'glm', 'glm-experimental');
     const t = await queued({ role: 'reviewer', minTier: 'low' });
     expect(await run()).toEqual([]);
     expect(await assigneeOf(t.id)).toBeNull();
@@ -195,7 +208,7 @@ describe('#2252 D1 matching under a minTier (S4–S7)', () => {
   it('S7: with no minimum the cheapest KNOWN tier goes first and an unknown one last', async () => {
     await bind(baloo, 'claude', HAIKU);
     await bind(liam, 'claude', OPUS);
-    await bind(kit, 'glm', 'glm-4.6');
+    await bind(kit, 'glm', 'glm-experimental');
     await lastAssigned(baloo, '10:59');
     const first = await queued({ role: 'reviewer' });
     const second = await queued({ role: 'reviewer' }, { createdAt: at('10:01') });

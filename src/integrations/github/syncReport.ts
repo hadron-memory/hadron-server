@@ -2,17 +2,17 @@
 import type { IncludeRefusalCode } from '../../lib/includes/writeIncludes.js';
 
 import type { AttestationRefusalCode } from '../../lib/authoringAttestation.js';
-export type SyncReportKind = 'protected' | 'object_type_rejected' | 'undeclared_role' | 'attestation_refused' | 'invalid_include' | 'deferred' | 'held_move';
+export type SyncReportKind = 'protected' | 'object_type_rejected' | 'undeclared_role' | 'attestation_refused' | 'invalid_include' | 'deferred' | 'held_move' | 'oversize';
 // cor:int:010:01 / #3612: this reviewed set is fixed independently of producer types.
 type SyncReportAttestationCode =
   | 'AUTHORING_ATTESTATION_MISSING' | 'AUTHORING_ATTESTATION_WRONG_TASK'
   | 'AUTHORING_ATTESTATION_STALE' | 'AUTHOR_TASK_BROKEN';
-export type SyncReportVersion = 1 | 2;
+export type SyncReportVersion = 1 | 2 | 3;
 export type SyncReportCode =
   | 'PROTECTED_LOC' | 'PROTECTED_COMMENT' | 'PROTECTED_BOOT_PROMPT' | 'PROTECTED_QUESTION'
   | 'OBJECT_TYPE_REJECTED' | 'ROLE_NOT_DECLARED' | SyncReportAttestationCode
   | 'INVALID_INCLUDE' | 'INCLUDE_CYCLE' | 'INCLUDE_TARGET_UNAVAILABLE'
-  | 'ROW_CHANGED' | 'MOVE_HELD' | 'DESTINATION_PROTECTED';
+  | 'ROW_CHANGED' | 'MOVE_HELD' | 'DESTINATION_PROTECTED' | 'NODE_CONTENT_TOO_LARGE';
 // #2369: an include refusal code outside this vocabulary would make the whole v1 report unusable (cor:int:010:01).
 // Widening the admitted set without widening SyncReportCode fails `tsc` here, as the `true` becomes `never`.
 const includeRefusalCodesAreReportable: [IncludeRefusalCode] extends [SyncReportCode] ? true : never = true;
@@ -25,7 +25,7 @@ void attestationRefusalCodesAreReportable;
 // reviewed wire version fails typecheck. Preserve v1 for every report it can express.
 const kindVersion: Record<SyncReportKind, SyncReportVersion> = {
   protected: 1, object_type_rejected: 1, undeclared_role: 1,
-  invalid_include: 1, deferred: 1, held_move: 1, attestation_refused: 2,
+  invalid_include: 1, deferred: 1, held_move: 1, attestation_refused: 2, oversize: 3,
 };
 const codeVersion: Record<SyncReportCode, SyncReportVersion> = {
   PROTECTED_LOC: 1, PROTECTED_COMMENT: 1, PROTECTED_BOOT_PROMPT: 1, PROTECTED_QUESTION: 1,
@@ -34,6 +34,7 @@ const codeVersion: Record<SyncReportCode, SyncReportVersion> = {
   ROW_CHANGED: 1, MOVE_HELD: 1, DESTINATION_PROTECTED: 1,
   AUTHORING_ATTESTATION_MISSING: 2, AUTHORING_ATTESTATION_WRONG_TASK: 2,
   AUTHORING_ATTESTATION_STALE: 2, AUTHOR_TASK_BROKEN: 2,
+  NODE_CONTENT_TOO_LARGE: 3, // #5019
 };
 export interface SyncReportEntry {
   kind: SyncReportKind;
@@ -49,7 +50,7 @@ export interface SyncReport {
   outcome: 'partial' | 'failed' | 'unknown';
   recordedAt: string;
   entries: SyncReportEntry[];
-  code?: 'SYNC_FAILED' | 'BAD_USER_INPUT';
+  code?: 'SYNC_FAILED' | 'BAD_USER_INPUT' | 'OWNER_LIMIT_REACHED';
   invalidSources?: { count: number; items: Array<{ ordinal: number; code: 'INVALID_LOC' }>; omitted: number };
 }
 
@@ -63,7 +64,7 @@ export function committedSyncReport(entries: readonly SyncReportEntry[], now = n
   const publicEntries = entries.map(e => ({ kind: e.kind, loc: e.loc, ...(e.fromLoc === undefined ? {} : { fromLoc: e.fromLoc }), code: e.code }));
   const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
   publicEntries.sort((a, b) => compare(a.loc, b.loc) || compare(a.kind, b.kind) || compare(a.fromLoc ?? '', b.fromLoc ?? '') || compare(a.code, b.code));
-  const version: SyncReportVersion = publicEntries.some(e => kindVersion[e.kind] === 2 || codeVersion[e.code] === 2) ? 2 : 1;
+  const version = Math.max(1, ...publicEntries.map(e => Math.max(kindVersion[e.kind], codeVersion[e.code]))) as SyncReportVersion;
   // Ordinals are positions in byte-sorted skipped paths. All items have the same fixed code,
   // so only the count is needed to construct their projection; paths and IDs never enter it.
   const shown = Math.min(invalidSourceCount, MAX_INVALID_SOURCE_ITEMS);
@@ -74,6 +75,8 @@ export function committedSyncReport(entries: readonly SyncReportEntry[], now = n
   return JSON.stringify({ version, outcome: invalidSourceCount > 0 ? 'unknown' : 'partial', recordedAt: now.toISOString(), entries: publicEntries, ...invalidSources } satisfies SyncReport);
 }
 
-export function failedSyncReport(code: 'SYNC_FAILED' | 'BAD_USER_INPUT', now = new Date()): string {
-  return JSON.stringify({ version: 1, outcome: 'failed', recordedAt: now.toISOString(), entries: [], code } satisfies SyncReport);
+export function failedSyncReport(code: 'SYNC_FAILED' | 'BAD_USER_INPUT' | 'OWNER_LIMIT_REACHED', now = new Date()): string {
+  // #5019 — version 1's failed codes are closed (cor:int:010:01); OWNER_LIMIT_REACHED (#5015) is version 3's.
+  const version: SyncReportVersion = code === 'OWNER_LIMIT_REACHED' ? 3 : 1;
+  return JSON.stringify({ version, outcome: 'failed', recordedAt: now.toISOString(), entries: [], code } satisfies SyncReport);
 }

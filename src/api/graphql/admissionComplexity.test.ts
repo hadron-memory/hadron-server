@@ -43,7 +43,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.agentSchedules",
   "Query.agentSubscriptionsPage", // #2213 S2: pageArgs, default 20, cap 200.
   "Query.agentTaskExternalIdChanges", // #4084: clampListTake with a floor of 1, default 20, cap 200; the common omitted bound 100 is conservative.
-  "Query.agentTaskList", // #2421: limit applies only when symptom is present; default 3, cap 3.
+  "Query.agentTaskList", // #2421, #5284: limit applies only when phrase is present; default 3, cap 10.
   "Query.agentTasks",
   "Query.agentTasksPage", // #2212 A3: pageArgs, default 20, cap 200 (PAGE_ARGS_FIELDS).
   "Query.agentTeamEvents",
@@ -60,6 +60,7 @@ const REVIEWED_PAGED_FIELDS = [
   "Query.appRuns",
   "Query.apps",
   "Query.assets",
+  "Query.attachableMemories", // #5393: clampListTake, default 20, cap 200; the common omitted bound 100 is conservative.
   "Query.automationApprovals",
   "Query.automationTeamSnapshotGrants", // #3350: pageTake default20/cap200; common omitted100 is conservative.
   "Query.calendarEvents",
@@ -343,14 +344,14 @@ describe('cost (graphql-query-complexity), enforce', () => {
     expect(DEFAULT_OMITTED_PAGE_SIZE).toBe(100);
   });
 
-  it('#2421 keeps legacy task-list costing without symptom and uses limit only for ranked calls', () => {
+  it('#2421 keeps legacy task-list costing without phrase and uses limit only for ranked calls', () => {
     expect(cost('{ agentTaskList(ref: "a") { node { id } } }')).toBe(21);
     expect(cost('{ agentTaskList(ref: "a", limit: 1) { node { id } } }')).toBe(21);
-    expect(cost('{ agentTaskList(ref: "a", symptom: null, limit: 1) { node { id } } }')).toBe(21);
-    expect(cost('{ agentTaskList(ref: "a", symptom: "failure", limit: 1) { node { id } } }')).toBe(3);
+    expect(cost('{ agentTaskList(ref: "a", phrase: null, limit: 1) { node { id } } }')).toBe(21);
+    expect(cost('{ agentTaskList(ref: "a", phrase: "failure", limit: 1) { node { id } } }')).toBe(3);
     // Admission intentionally ignores resolver caps: conservative overestimates.
-    expect(cost('{ agentTaskList(ref: "a", symptom: "failure") { node { id } } }')).toBe(201);
-    expect(cost('{ agentTaskList(ref: "a", symptom: "failure", limit: 99) { node { id } } }')).toBe(199);
+    expect(cost('{ agentTaskList(ref: "a", phrase: "failure") { node { id } } }')).toBe(201);
+    expect(cost('{ agentTaskList(ref: "a", phrase: "failure", limit: 99) { node { id } } }')).toBe(199);
   });
 
   it('inventory: the schema\'s paged fields are exactly the reviewed set (a new one must be checked against its resolver default and listed here)', async () => {

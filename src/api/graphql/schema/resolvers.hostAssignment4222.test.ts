@@ -19,6 +19,8 @@ import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { loadLaunchableFamilies } from '../../../lib/agentTasks/hosts.js';
 import { fenceHostDecision } from '../../../lib/hostOperations/launch.js';
 import { resolvers, type Context } from './resolvers.js';
+import { taskMatcherTick } from '../../../jobs/taskMatcher.js';
+import { ensureAgentTeamHost, joinHostForKey } from '../../../test/agentTeamHost.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -117,7 +119,9 @@ beforeEach(async () => {
   orca1 = await mkKey(app.id, 'orca1');
   orca2 = await mkKey(app.id, 'orca2');
   plainKey = await mkKey(app.id, 'plain');
+  await joinHostForKey(db, orca1.id, 'orca1');
   await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager.id));
+  await joinHostForKey(db, orca2.id, 'orca2');
   await M.grantAppKeyScope({}, { id: orca2.id, scope: 'host:operate', hostId: 'orca2' }, ctx(manager.id));
 });
 
@@ -202,6 +206,26 @@ describe('assignHostWorker: whoever manages the App states what a host runs', ()
     const again = await assign({ workdir: 'hadron-cli/kit', family: 'codex', model: 'gpt-x', replace: true });
     expect(again).toMatchObject({ id: first.id, workdir: 'hadron-cli/kit', family: 'codex', model: 'gpt-x' });
     expect(await db.hostWorkerAssignment.count()).toBe(1);
+  });
+
+  it('#5249: any model-family token is stored, normalised like a session family', async () => {
+    expect(await assign({ family: 'deepseek' })).toMatchObject({ family: 'deepseek' });
+    // #5259: each host is joined to the App first.
+    for (const h of ['orca3', 'orca4', 'orca5']) await ensureAgentTeamHost(db, app.id, h);
+    expect(await assign({ hostId: 'orca2', workdir: 'kit-home', family: 'Gemini-2.5' })).toMatchObject({ family: 'gemini-2.5' });
+    expect(await assign({ hostId: 'orca3', workdir: 'kit-home', family: 'anthropic' })).toMatchObject({ family: 'claude' });
+    expect(await assign({ hostId: 'orca4', workdir: 'kit-home', family: 'openai' })).toMatchObject({ family: 'codex' });
+    expect((await db.hostWorkerAssignment.findMany({ orderBy: { hostId: 'asc' } })).map((r) => r.family)).toEqual(['deepseek', 'gemini-2.5', 'claude', 'codex']);
+    // the longest token the database takes, 64 characters
+    const long = 'x'.repeat(64);
+    expect(await assign({ hostId: 'orca5', workdir: 'kit-home', family: long })).toMatchObject({ family: long });
+  });
+
+  it('#5249 guard: a family that is not a token is BAD_LAUNCHER_PROFILE and nothing is stored', async () => {
+    for (const family of ['deep seek', 'a/b', '-x', 'x'.repeat(65), 'a;b', '$(id)', '..']) {
+      expect(await code(assign({ family })), family).toBe('BAD_LAUNCHER_PROFILE');
+    }
+    expect(await db.hostWorkerAssignment.count()).toBe(0);
   });
 
   it('refuses a path, an option or a bad host id as BAD_HOST_ASSIGNMENT_ARGS, and a bad family or model as BAD_LAUNCHER_PROFILE', async () => {
@@ -367,6 +391,36 @@ describe('a start uses the assignment (cor:agt:070:08 unchanged: with none, noth
     // #4230 (S1b): a start now carries the assignment's model too (S1a's "a record only" ended there).
     expect(op!.args).toMatchObject({ model: 'fable-5.2' });
     expect((await loadLaunchableFamilies(db, { appId: app.id }, new Date())).get(kit.id)).toEqual(['codex']);
+  });
+
+  it('#5249 SERVER: a start for a family with no built-in launcher carries it', async () => {
+    await assign({ workdir: 'hadron-cli/kit', family: 'deepseek' });
+    await setSource('SERVER');
+    await hostLists(['hadron-server/kit', 'hadron-cli/kit']);
+    const op = await task();
+    expect(op).toMatchObject({ hostId: 'orca1', issuedBy: 'platform' });
+    expect(op!.args).toMatchObject({ worktree: 'hadron-cli/kit', family: 'deepseek' });
+  });
+
+  it('#5249: a start the host reports failed is not issued again, by a matcher pass or a fresh registration', async () => {
+    await assign({ workdir: 'hadron-cli/kit', family: 'deepseek' });
+    await setSource('SERVER');
+    await hostLists(['hadron-server/kit', 'hadron-cli/kit']);
+    const op = await task();
+    expect(op!.args).toMatchObject({ family: 'deepseek' });
+    await M.collectHostOperations({}, { appRef: app.id }, keyCtx(orca1));
+    await M.reportHostOperation({}, { input: { appRef: app.id, id: op!.id, outcome: 'FAILED', failureReason: 'no launcher for family deepseek' } }, keyCtx(orca1));
+    expect((await db.hostOperation.findUniqueOrThrow({ where: { id: op!.id } })).status).toBe('failed');
+    await taskMatcherTick(db, new Date());
+    await hostLists(['hadron-server/kit', 'hadron-cli/kit']);
+    await taskMatcherTick(db, new Date());
+    expect(await db.hostOperation.count({ where: { workerId: kit.id, type: 'worker.start' } })).toBe(1);
+    // Positive control: the worker is still startable for this deepseek assignment, so the count of one above is not
+    // the matcher passing the worker over. A new assignment (after the first task ends) does issue a second start.
+    for (const t of await db.agentTask.findMany({ where: { assigneeWorkerId: kit.id } })) await M.cancelAgentTask({}, { taskRef: t.id }, ctx(manager.id));
+    await M.createAgentTask({}, { input: { appRef: app.id, title: 'Again', assignee: { worker: kit.id }, closeSessionWhenDone: false } }, ctx(manager.id));
+    const starts = await db.hostOperation.findMany({ where: { workerId: kit.id, type: 'worker.start' }, orderBy: { issuedAt: 'asc' } });
+    expect(starts.map((o) => [o.status, (o.args as { family?: string }).family])).toEqual([['failed', 'deepseek'], ['issued', 'deepseek']]);
   });
 
   it('SERVER: no assignment issues nothing and the task waits', async () => {

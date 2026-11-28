@@ -60,6 +60,7 @@ import { mountPasskeyCeremonyRoutes } from './api/passkeyCeremonyRoutes.js';
 import { mountSigningCeremonyRoutes } from './api/signingCeremonyRoutes.js';
 import { mountSecretChangeCeremonyRoutes } from './api/secretChangeCeremonyRoutes.js';
 import { mountGrantSigningCeremonyRoutes } from './api/grantSigningCeremonyRoutes.js';
+import { mountGrantSelectionSigningCeremonyRoutes } from './api/grantSelectionSigningCeremonyRoutes.js';
 import { mountSecretRevealRoutes } from './api/secretRevealRoutes.js';
 import { mountPasskeySignInRoutes } from './api/passkeySignInRoutes.js';
 import { signingSurfacePolicy } from './lib/signing/surface.js';
@@ -79,11 +80,14 @@ import { assertProductionSigningSecret } from './auth/signingSecret.js';
 import { isServerLocalPath } from './auth/server-local-path.js';
 import { mountOAuthRoutes } from './auth/oauth.js';
 import { impersonationReadOnlyPlugin } from './api/graphql/impersonationReadOnlyPlugin.js';
+import { signedOutRefDoorsPlugin } from './api/graphql/signedOutRefDoorsPlugin.js';
 import { taskWarningsPlugin } from './api/graphql/taskWarningsPlugin.js';
 import { requireOrgRole } from './api/graphql/schema/resolvers.helpers.js';
 import type { Context } from './api/graphql/schema/resolvers.js';
 import { querySourceCap, readGraphqlAdmissionConfig } from './api/graphql/admission.js';
 import { loadOwnerDefaultLimits } from './lib/ownerLimits/defaults.js';
+import { loadOwnerDefaultMonthlyGrant } from './lib/metering/periodGrant.js';
+import { nodeContentMaxBytes } from './lib/nodeContentLimit.js';
 import { complexityAdmissionPlugin } from './api/graphql/admissionComplexity.js';
 import { deploymentSchema } from './api/graphql/schema/deploymentSchema.js';
 import {
@@ -102,6 +106,7 @@ import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories
 import { startSecretChangeSweepLoop } from './jobs/sweepSecretChanges.js';
 import { startPasskeyCeremonySweepLoop } from './jobs/sweepPasskeyCeremonies.js';
 import { startMergeConsentSweepLoop } from './jobs/sweepMergeConsents.js';
+import { creditExpirySweepDisabledReason, startCreditExpirySweepLoop } from './jobs/expireCreditGrants.js';
 import { startChatToolTeardownSweepLoop } from './jobs/sweepChatToolTeardown.js';
 import { secretSweepDisabledReason, startSecretSweepLoop } from './jobs/secretSweep.js';
 import { startGitMirrorObligationSweepLoop } from './jobs/sweepGitMirrorObligations.js';
@@ -225,8 +230,10 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // configured keyring refuses boot without echoing secret values.
   readTeamRecordKeys();
   const app = express();
-  const authRate = buildAuthRateAdmission(db, { protocol: 'rest', credential: 'none' });
-  const userAuthRate = buildAuthRateAdmission(db, { protocol: 'rest', credential: 'bearer' });
+  // #4675: the sign-in and verification navigations may answer a refusal with the page; the API routes never do.
+  const authRate = buildAuthRateAdmission(db, { protocol: 'rest', credential: 'none', form: 'page' });
+  const sessionAuthRate = buildAuthRateAdmission(db, { protocol: 'rest', credential: 'none', form: 'json' });
+  const userAuthRate = buildAuthRateAdmission(db, { protocol: 'rest', credential: 'bearer', form: 'json' });
 
   // Trust-proxy for spec 025-oauth-for-mcp (FR-006). Express must know
   // which upstream proxies it can trust so `req.protocol` resolves to
@@ -1125,6 +1132,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   mountSigningCeremonyRoutes(app);
   // #3649 slice C: the grant signing ceremony, on the same switch.
   mountGrantSigningCeremonyRoutes(app);
+  mountGrantSelectionSigningCeremonyRoutes(app);
   mountSecretChangeCeremonyRoutes(app);
   mountSecretRevealRoutes(app);
   mountPasskeySignInRoutes(app);
@@ -1136,7 +1144,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // cookie on the portal origin. The JWT never rides in a browser-visible URL.
   // `clientState` (GitHub flow) is the raw browser nonce the portal read from
   // its HttpOnly cookie; the code's stored hash must match (session fixation).
-  app.post('/auth/session', authRate, async (req, res) => {
+  app.post('/auth/session', sessionAuthRate, async (req, res) => {
     const body = (req.body ?? {}) as { code?: unknown; clientState?: unknown };
     const code = typeof body.code === 'string' ? body.code : '';
     const clientState = typeof body.clientState === 'string' ? body.clientState : undefined;
@@ -1224,6 +1232,12 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   const admission = readGraphqlAdmissionConfig();
   // #5009: the deployment's default owner limits; a malformed value refuses boot.
   loadOwnerDefaultLimits();
+  nodeContentMaxBytes(); // #5019: a malformed ceiling refuses boot
+  // #5022: the default monthly grant; a malformed value refuses boot. The effective amounts on one line (micro-cents).
+  const monthlyGrant = loadOwnerDefaultMonthlyGrant();
+  console.log(JSON.stringify({
+    event: 'period_grant.config', user: monthlyGrant.user.toString(), organization: '0',
+  }));
   // The effective L4 configuration, on one line, so ops can confirm the mode a deploy actually booted with.
   console.log(JSON.stringify({
     event: 'graphql.admission.config', mode: admission.complexityMode, maxDepth: admission.maxDepth,
@@ -1242,7 +1256,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
     status400ForVariableCoercionErrors: false,
     typeDefs,
     resolvers: deploymentResolvers,
-    plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin, taskWarningsPlugin, deliveryPendingPlugin, complexityAdmissionPlugin(admission), memoryPressurePlugin()],
+    plugins: [sentryApolloPlugin, impersonationReadOnlyPlugin, signedOutRefDoorsPlugin, taskWarningsPlugin, deliveryPendingPlugin, complexityAdmissionPlugin(admission), memoryPressurePlugin()],
     // #918 — typed client errors carry their stable `extensions.code`.
     // The mapping list lives beside the Sentry predicate that reads it.
     formatError: formatGraphQLError,
@@ -1780,7 +1794,8 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
           // Skip if the memory tracks a specific branch that doesn't match
           if (memory.readBranch && ref !== `refs/heads/${memory.readBranch}`) continue;
           console.log(`[webhook] Push to ${fullName}/${defaultBranch} → syncing memory "${memory.name}"`);
-          syncGraphFromGithub(memory).catch((err) => {
+          // #5015 — an unattended sync: nobody to tell, so the owner-limit refusal takes the no-number form.
+          syncGraphFromGithub(memory, { ownerLimitCaller: null }).catch((err) => {
             console.error(`[webhook] Sync failed for memory "${memory.name}":`, err);
           });
         }
@@ -1953,6 +1968,14 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
 
   if (process.env.NODE_ENV !== 'test' && process.env.DISABLE_MERGE_CONSENT_SWEEP !== 'true') {
     startMergeConsentSweepLoop(db);
+  }
+
+  // #5011 (Billing A4, cor:dmo:170:10): settle expired credit grants hourly for owners no read has reached. Reads
+  // settle the owner at hand whatever this switch says.
+  {
+    const off = creditExpirySweepDisabledReason();
+    if (off === null) startCreditExpirySweepLoop(db);
+    else if (off !== 'NODE_ENV=test') console.warn(`credit_expiry_sweep.disabled reason=${off}`);
   }
 
   // Background job (#4847, cor:int:030:03): reconcile, cap and retry the chat tool teardown intents (Telegram, Slack) every 5 minutes.

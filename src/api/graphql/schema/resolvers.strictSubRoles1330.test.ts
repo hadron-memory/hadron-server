@@ -41,9 +41,9 @@ async function rules(...rs: Array<{ role: string; strictSubRoles?: boolean; enab
 }
 
 const create = (loc: string, extra: Record<string, unknown> = {}, opts: Partial<Parameters<typeof writeNodeCore>[3]> = {}) =>
-  writeNodeCore({ memoryId, loc, name: loc, content: 'x', ...extra } as never, ctx(), 'create', { authoring: attestedAuthoring(null), ...opts });
+  writeNodeCore({ memoryId, loc, name: loc, content: 'x', ...extra } as never, ctx(), 'create', { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: attestedAuthoring(null), ...opts });
 const update = (loc: string, extra: Record<string, unknown>) =>
-  writeNodeCore({ memoryId, loc, ...extra } as never, ctx(), 'update', { authoring: attestedAuthoring(null) });
+  writeNodeCore({ memoryId, loc, ...extra } as never, ctx(), 'update', { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: attestedAuthoring(null) });
 
 async function refusal(p: Promise<unknown>) {
   const e = await p.then(() => null, (err: unknown) => err);

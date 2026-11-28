@@ -12,9 +12,9 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGi
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 const other = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL });
 afterAll(() => other.$disconnect());
-let userId: string, agentId: string, systemId: string, ids: Record<string, string>;
+let userId: string, appId: string, agentId: string, systemId: string, ids: Record<string, string>;
 const ctx = (client = db): Context => ({ db: client, roles: ['READER'], userId });
-const start = (conversationName = 'recent') => resolvers.Mutation.startChat({}, { agentRef: agentId, conversationName }, ctx());
+const start = (conversationName = 'recent') => resolvers.Mutation.startChat({}, { agentRef: agentId, conversationName, appRef: appId }, ctx());
 const respond = (chatId: string, fields: Record<string, unknown> = {}, client = db) => resolvers.Mutation.processChatResponse({}, { chatId, toolResponse: { message: 'reply', onTrack: true, ...fields } }, ctx(client));
 async function state(chatId: string) {
   const root = await chatNodeByLocOrThrow(db, chatId);
@@ -31,6 +31,8 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'ADMIN' } });
   const agent = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Detour fixture', visibility: 'ORGANIZATION' }, { ...ctx(), roles: ['ADMIN'] });
   agentId = agent.id; systemId = agent.systemMemoryId!; ids = {};
+  // #5394: a start names its App; this one installs the Agent and the user takes part in it.
+  appId = (await db.app.create({ data: { name: 'detour-app', urn: `${org.urn}:detour-app`, organizationId: org.id, appAgents: { create: { agentId } }, members: { create: { userId, role: 'member' } } } })).id;
   for (const [loc, data] of [
     ['config', {}], ['conversations', {}],
     ['conversations:recent', { stageOrder: ['s1', 's2'] }], ['conversations:recent:s1', {}], ['conversations:recent:s2', {}],

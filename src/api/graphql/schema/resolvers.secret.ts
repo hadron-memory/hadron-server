@@ -23,6 +23,8 @@ import { requireProtectedSecretHolder } from '../../../lib/secrets/protection.js
 import { autoDeleteLimitRefusal, deleteLockedAppSecret } from '../../../lib/secrets/autoDelete.js';
 export { autoDeleteLimitRefusal } from '../../../lib/secrets/autoDelete.js';
 import { GraphQLError } from 'graphql';
+import type { Prisma, Secret } from '../../../generated/prisma/index.js';
+import { isDeepStrictEqual } from 'node:util';
 import { assertOneRevealPerOperation, type RevealOperationInfo } from '../../../lib/secrets/revealOperationGuard.js';
 import { AUTHORIZATION_DENIED_CODE } from '../../../lib/auth/authorizationDenied.js';
 import { pageArgs, pageEnvelope, type Context } from './resolvers.helpers.js';
@@ -61,7 +63,7 @@ import {
   recordSecretEvent,
   secretActorOf,
 } from '../../../lib/secrets/appSecrets.js';
-import { stageSecretChange, changeSnapshot, needsPasskey, deliverStaged } from '../../../lib/secrets/changeRequests.js';
+import { stageSecretChange, requireStagingPerson, changeSnapshot, changeSnapshotFor, needsPasskey, deliverStaged } from '../../../lib/secrets/changeRequests.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { createPendingGrant, GrantCreateRefusal } from '../../../lib/grants/create.js';
 import { requireSecretReadClientIssuer } from '../../../lib/secrets/readClientIssuer.js';
@@ -225,6 +227,8 @@ export interface CreateSecretArgs {
 
 export interface UpdateSecretArgs {
   protected?: boolean;
+  /** #5335 (cor:sec:060:03): the consent that arms a read client's auto-delete mark on a protected secret. App secrets only. */
+  deleteAfterUse?: boolean | null;
   ref: string;
   metadata?: Record<string, unknown> | null;
   value?: unknown;
@@ -312,6 +316,7 @@ export const secretMutations = {
     // An explicit null on a field that is not nullable in storage is "not supplied" (cor:api:210:01), as on the App door.
     const requestedProtected = args.protected ?? undefined;
     if (requestedProtected !== undefined) throw badInput('Protection is available only for App secrets.');
+    if ((args.deleteAfterUse ?? undefined) !== undefined) throw badInput('deleteAfterUse is available only for App secrets.');
 
     if (args.metadata === undefined && args.value === undefined) {
       throw badInput('Pass metadata and/or value.');
@@ -380,7 +385,7 @@ async function createAppSecret(ctx: Context, appId: string, name: string, args: 
             throw secretNameTaken(name);
           }
           return stageSecretChange(tx, ctx, { appId, secretId: null, name, kind: args.kind,
-            metadata: metadata as never, operation: 'STORE', snapshot: 'absent', valueJson, sizeBytes });
+            metadata: metadata as never, operation: 'STORE', snapshot: 'absent', valueJson, sizeBytes, requireAppRoom: true });
         }
         await assertAppSecretRoom(tx, appId);
         const secret = await tx.secret.create({
@@ -416,9 +421,10 @@ async function updateAppSecret(ctx: Context, found: SecretRow, args: UpdateSecre
   await admitOperationRate(ctx, ctx.db, 'WRITES', appRateIdentity(ctx));
   const app = await loadLiveApp(ctx, found.ownerId);
   if (!app) throw notFound();
-  // A GraphQL null asks for no protection change, like an omitted argument.
+  // A GraphQL null asks for no protection change, like an omitted argument; so for deleteAfterUse.
   const requestedProtected = args.protected ?? undefined;
-  if (args.metadata === undefined && args.value === undefined && requestedProtected === undefined) {
+  const requestedDeleteAfterUse = args.deleteAfterUse ?? undefined;
+  if (args.metadata === undefined && args.value === undefined && requestedProtected === undefined && requestedDeleteAfterUse === undefined) {
     throw badInput('Pass metadata and/or value.');
   }
   const actor = secretActorOf(ctx);
@@ -434,6 +440,11 @@ async function updateAppSecret(ctx: Context, found: SecretRow, args: UpdateSecre
       if (!(await lockSecretRow(tx, found.id))) throw notFound();
       const secret = await tx.secret.findUnique({ where: { id: found.id } });
       if (!secret) throw notFound();
+      if (requestedDeleteAfterUse !== undefined) {
+        const option = await updateDeleteAfterUse(tx, ctx, secret, requestedDeleteAfterUse, args, requestedProtected, actor);
+        if (option !== 'APPLY_WITH_UPDATE') return option;
+        if (args.metadata === undefined && args.value === undefined) return tx.secret.findUniqueOrThrow({ where: { id: secret.id } });
+      }
       const effectiveMetadata = args.metadata !== undefined ? args.metadata : secret.metadata;
       const payload = args.value === undefined ? null : validateSecretPayload(secret.kind, effectiveMetadata, args.value, { enforceValueSize: true });
       const metadata = payload?.metadata ?? validateUnchangedSecretMetadata(secret.kind, effectiveMetadata, secret.metadata);
@@ -441,6 +452,18 @@ async function updateAppSecret(ctx: Context, found: SecretRow, args: UpdateSecre
       // manager reaches it; left as `false` it staged a request (a spent slot and a ceremony) for nothing.
       const protectedChange = !secret.protected && requestedProtected === false ? undefined : requestedProtected;
       if (!secret.protected && protectedChange === undefined && args.metadata === undefined && args.value === undefined) return secret; // the silent no-op: nothing to record
+      // #5299: the other direction. `protected: true` on a secret that is already protected, with no value and no metadata, asks for no change; staging it
+      // spent a slot and a ceremony for a completion that does nothing. Unlike #4749 no gate runs before this transaction, so the silent answer is
+      // given only to a caller who passes the very checks staging would make (`requireStagingPerson`); every other caller keeps the refusal it had.
+      // #5331 item 6 (spec FIT 7209702827, cor:sec:070:01's Proposed edge): metadata identical to the live row's asks for no change either, so
+      // it is the same no-op under the same conditions. Judged on the normalized metadata against the row locked above (the proof's
+      // flag-only test uses the same equality); any difference, or a value, stages as before. The JSON round trip drops the null prototype
+      // graphql-js gives an inline object literal (isDeepStrictEqual compares prototypes; Rook P3-1 on #5372); key order stays irrelevant.
+      const metadataUnchanged = args.metadata === undefined || isDeepStrictEqual(JSON.parse(JSON.stringify(metadata)), secret.metadata);
+      if (secret.protected && requestedProtected === true && metadataUnchanged && args.value === undefined) {
+        await requireStagingPerson(tx, ctx);
+        return secret;
+      }
       if (secret.protected || protectedChange !== undefined) {
         const latest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
         return stageSecretChange(tx, ctx, { appId: secret.ownerId, secretId: secret.id, name: secret.name, kind: secret.kind,
@@ -462,6 +485,37 @@ async function updateAppSecret(ctx: Context, found: SecretRow, args: UpdateSecre
   );
   if (result instanceof GraphQLError) throw result;
   return result;
+}
+
+/**
+ * #5335 (cor:sec:060:03 arming rule; cor:sec:070:02): set or clear `deleteAfterUse`, under the secret row lock. On an UNPROTECTED
+ * secret it is a plain field under the update authority (any member): applied here, one event, and the caller's value or metadata
+ * change (if any) proceeds ('APPLY_WITH_UPDATE'). On a PROTECTED secret, or one this same call protects, it is its own staged
+ * change (SET_/CLEAR_DELETE_AFTER_USE), so it must come alone; a non-person is refused SECRET_PROTECTED_NEEDS_PASSKEY with nothing
+ * staged (the person check runs first). Setting it there consents to deletion, so it needs the deletion authority (the creator,
+ * still a member, or whoever manages the App), judged again at completion. Asking for the value the secret already has changes
+ * nothing and records nothing (on a protected secret, only to a caller who passes the staging checks, as #5299).
+ */
+async function updateDeleteAfterUse(tx: Prisma.TransactionClient, ctx: Context, secret: Secret, on: boolean,
+  args: UpdateSecretArgs, requestedProtected: boolean | undefined, actor: ReturnType<typeof secretActorOf>,
+): Promise<Secret | GraphQLError | 'APPLY_WITH_UPDATE'> {
+  if (secret.protected || requestedProtected === true) {
+    if (args.metadata !== undefined || args.value !== undefined || requestedProtected !== undefined) {
+      throw badInput('On a protected secret, change deleteAfterUse on its own.');
+    }
+    const userId = await requireStagingPerson(tx, ctx);
+    if (secret.deleteAfterUse === on) return secret;
+    if (on && secret.createdBy !== userId && !(await appManager({ ...ctx, db: tx } as Context, secret.ownerId))) throw forbiddenError();
+    const latest = await tx.secretVersion.findFirst({ where: { secretId: secret.id }, orderBy: { versionNo: 'desc' }, select: { versionNo: true } });
+    const operation = on ? 'SET_DELETE_AFTER_USE' : 'CLEAR_DELETE_AFTER_USE';
+    return stageSecretChange(tx, ctx, { appId: secret.ownerId, secretId: secret.id, name: secret.name, kind: secret.kind,
+      metadata: secret.metadata, operation, snapshot: changeSnapshotFor(operation, secret, latest?.versionNo ?? 0) });
+  }
+  if (secret.deleteAfterUse !== on) {
+    await tx.secret.update({ where: { id: secret.id }, data: { deleteAfterUse: on, updatedBy: ctx.userId ?? null } });
+    await recordSecretEvent(tx, { ownerId: secret.ownerId, secretId: secret.id, secretName: secret.name, kind: on ? 'DELETE_AFTER_USE_ON' : 'DELETE_AFTER_USE_OFF', actor });
+  }
+  return 'APPLY_WITH_UPDATE';
 }
 
 /**

@@ -34,7 +34,7 @@ const errorOf = async (p: Promise<unknown>): Promise<GraphQLError> => {
 const node = (memoryId: string, id: string, loc: string, extra: Record<string, unknown> = {}) =>
   db.node.create({ data: { id, memoryId, loc, name: `Title ${loc}`, content: `Body ${loc}`, ...extra } });
 // Page and batch size 1: every node commits in its own transaction.
-const merge = () => mergeMemoryGraph(db, {
+const merge = () => mergeMemoryGraph(db, { ownerLimitCaller: null,
   sourceMemoryId: src.id, targetMemoryId: dst.id, fields: new Set(),
   deleteSourceMem: false, editor: { userId: admin.id, info: null, workerId: null, agentId: null } as never,
   batchSize: 1, classifyPageSize: 1,

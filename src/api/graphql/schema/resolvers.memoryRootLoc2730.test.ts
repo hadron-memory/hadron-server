@@ -5,7 +5,6 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAppWithKey, createDbAppAgent, createDbAppMember } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
-import * as rootLocks from '../../../lib/nodeSubtreeLock.js';
 import { resolvers, type Context } from './resolvers.js';
 
 // #2796: this file's projections go to its OWN graph root. The run's root
@@ -64,27 +63,36 @@ beforeEach(async () => {
   await createDbAppMember(db, app.id, admin.id, 'owner');
 });
 
-const unprojectable: [string, string][] = [
-  ['a trailing colon', 'abc:'],
-  ['a 300-character atom', 'x'.repeat(300)],
-  ['a 256-byte atom', 'x'.repeat(256)],
-  ['a multibyte atom over 255 bytes', 'é'.repeat(128)],
-  ['a long atom after a legal one', `ok:${'y'.repeat(256)}`],
+// #5149: the name is no longer a root loc, so only a name that cannot be stored or yields no slug refuses. The names
+// #2730 refused and creation now admits are pinned in resolvers.memoryName5149.test.ts.
+// #5203 S3 (cor:urn:010:01): a name that yields no slug (':', '..') is no longer refused; it creates under the fallback
+// base, pinned below and in resolvers.memoryName5149.test.ts. An empty or blank name is the refusal that replaced it.
+const refusedNames: [string, string][] = [
+  ['a whitespace-only name', '   '],
   ['a NUL', 'a\0b'],
-  ['a slash', 'a/b'],
+];
+const noSlug: [string, string][] = [
+  ['a name with no slug', ':'],
+  ['a parent directory', '..'],
 ];
 const admitted: [string, string][] = [
   ['spaces', 'Has Space'],
   ['unicode', 'ünï notes'],
   ['an internal empty atom', 'a::b'],
+  ['a trailing colon', 'abc:'],
+  ['a slash', 'a/b'],
+  ['a 300-character atom', 'x'.repeat(300)],
+  ['a 256-byte atom', 'x'.repeat(256)],
+  ['a multibyte atom over 255 bytes', 'a' + 'é'.repeat(128)],
+  ['a long atom after a legal one', `ok:${'y'.repeat(256)}`],
   ['a 255-byte atom', 'z'.repeat(255)],
   ['a multibyte 253-byte atom', 'a' + 'é'.repeat(126)],
 ];
 
 for (const door of ['createMemory', 'createAppMemory', 'createMemoryInApp']) {
-  describe(`#2730 ${door} root loc`, () => {
+  describe(`#2730 ${door} name`, () => {
     const d = () => doors().find(x => x.label === door)!;
-    for (const [label, name] of unprojectable) {
+    for (const [label, name] of refusedNames) {
       it(`refuses ${label} as BAD_USER_INPUT and leaves no residue`, async () => {
         await refusedWithoutResidue(() => d().create(name));
       });
@@ -94,54 +102,55 @@ for (const door of ['createMemory', 'createAppMemory', 'createMemoryInApp']) {
       await d().create(`Private root ${door}`);
       expect(graphEntries()).toBe(entries);
     });
+    for (const [label, name] of noSlug) {
+      it(`creates ${label} under the fallback slug, with no graph residue and no root node (#5203 S3)`, async () => {
+        const entries = graphEntries();
+        const memory = await d().create(name);
+        const row = await db.memory.findUniqueOrThrow({ where: { id: memory.id } });
+        expect(row).toMatchObject({ organizationId: org.id, name });
+        expect(row.urn.split(':').pop()).toBe('untitled');
+        expect(await db.node.findMany({ where: { memoryId: memory.id } })).toEqual([]);
+        expect(graphEntries()).toBe(entries);
+      });
+    }
     for (const [label, name] of admitted) {
-      it(`still creates a memory and root for ${label}`, async () => {
+      it(`still creates a memory, and no root node (#3952), for ${label}`, async () => {
         const memory = await d().create(name);
         expect(await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).toMatchObject({ organizationId: org.id });
-        expect(await db.node.findMany({ where: { memoryId: memory.id } })).toMatchObject([{ loc: name }]);
+        expect(await db.node.findMany({ where: { memoryId: memory.id } })).toEqual([]);
       });
     }
     it('#2796 an entry another worker adds to the shared run root between the snapshots is not residue', async () => {
       // The run's graph root is shared by every worker (#1951); simulate a concurrent file writing a node.
       const other = join(process.env.GRAPHS_PATH!, `other-worker-2796-${generateId()}`);
       try {
-        await refusedWithoutResidue(() => d().create('abc:'), () => mkdirSync(other));
+        await refusedWithoutResidue(() => d().create('   '), () => mkdirSync(other));
       } finally {
         rmSync(other, { recursive: true, force: true });
       }
     });
     it('keeps the authorization refusal ahead of the name refusal', async () => {
-      const code = await d().create('abc:', outsider.id).catch(e => e.extensions?.code);
+      const code = await d().create(':', outsider.id).catch(e => e.extensions?.code);
       expect(code).not.toBe('BAD_USER_INPUT');
       expect(code).toBeDefined();
       expect(await db.memory.count()).toBe(0);
-    });
-    it('still reports a non-input filesystem fault as a server fault', async () => {
-      const rootLock = vi.spyOn(rootLocks, 'lockLocForWrite').mockImplementationOnce(async (tx, memoryId, loc) => {
-        expect(loc).toBe('Fine name');
-        expect(await tx.memory.findUnique({ where: { id: memoryId } })).toMatchObject({ name: 'Fine name' });
-        throw new Error('injected root failure');
-      });
-      const err = await d().create('Fine name').catch(e => e);
-      expect(rootLock).toHaveBeenCalledTimes(1);
-      expect(err.message).toContain('injected root failure');
-      expect(err.extensions?.code).not.toBe('BAD_USER_INPUT');
     });
   });
 }
 
 describe('#2730 MCP delegates', () => {
   const auth = () => ({ userId: admin.id, roles: [] as any[], clientId: `user:${admin.id}` });
-  it('hadron_create_memory refuses an unprojectable name with the input message', async () => {
-    const text = await createTestableMcpServer(auth()).callToolText('hadron_create_memory', { name: 'abc:', org: org.id });
-    expect(text).toMatch(/^Error: .*loc|segment|empty/i);
+  // #5203 S3: a name with no slug now creates (fallback base); a blank name is the input refusal, typed (#5197 F5).
+  it('hadron_create_memory refuses a blank name with the input message', async () => {
+    const text = await createTestableMcpServer(auth()).callToolText('hadron_create_memory', { name: '   ', org: org.id });
+    expect(text).toMatch(/^\[bad_user_input\] Memory name must not be empty/);
     expect(text).not.toMatch(/internal/i);
     expect(await db.memory.count()).toBe(0);
   });
-  it('hadron_create_app_memory refuses an unprojectable name with the input message', async () => {
-    const text = await createTestableMcpServer(auth()).callToolText('hadron_create_app_memory', { app: app.id, name: 'x'.repeat(300) });
+  it('hadron_create_app_memory refuses a blank name with the input message', async () => {
+    const text = await createTestableMcpServer(auth()).callToolText('hadron_create_app_memory', { app: app.id, name: '   ' });
     expect(text).not.toMatch(/internal/i);
-    expect(text).toMatch(/^Error: /);
+    expect(text).toMatch(/^\[bad_user_input\] /);
     expect(await db.memory.count()).toBe(0);
   });
 });

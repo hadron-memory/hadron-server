@@ -76,7 +76,7 @@ export async function schedulerTick(db: PrismaClient, now = new Date()): Promise
 
     try {
       await mintAppRun(db, {
-        organizationId: s.organizationId,
+        owner: { organizationId: s.organizationId }, // #5077: a schedule is an organization's until F3b
         appId: s.appId,
         agentId: s.agentId,
         userId: s.userId,

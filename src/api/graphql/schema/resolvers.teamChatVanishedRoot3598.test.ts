@@ -84,7 +84,7 @@ describe('#3598 the team-chat append path, root vanished before the locked read'
     hook.vanish = { rootId, memoryId };
     const error = await say('after the root is gone').then(() => null, (e: unknown) => e);
     expect(hook.vanish).toBeNull(); // the hook fired: the root was admitted, then removed
-    expect(error).toMatchObject({ message: 'Chat "chats:team" not found', extensions: { code: 'CHAT_NOT_FOUND' } });
+    expect(error).toMatchObject({ message: 'Chat not found', extensions: { code: 'CHAT_NOT_FOUND' } });
     expect((error as { extensions: Record<string, unknown> }).extensions).toEqual({ code: 'CHAT_NOT_FOUND' });
     expect(inserts.count).toBe(1); // only the control post's
     expect(await messages()).toBe(before);

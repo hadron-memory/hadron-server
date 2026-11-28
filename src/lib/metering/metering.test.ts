@@ -9,7 +9,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import { db } from '../../integrations/db/client.js';
-import { cleanDb } from '../../test/helpers.js';
+import { cleanDb, createPriceRowForTest } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import {
   applyMarkup,
@@ -39,7 +39,7 @@ async function mkPrice(
   outRate = OUT_RATE,
   extra: { tier?: number; markupBasisPoints?: number | null } = {},
 ) {
-  return db.aiModelPrice.create({
+  return createPriceRowForTest(db, {
     data: {
       id: generateId(),
       provider,
@@ -165,7 +165,7 @@ describe('recordLlmUsage', () => {
     await mkPrice('anthropic', 'claude-m', new Date('2026-01-01'));
     const event = await recordLlmUsage(db, {
       ...base,
-      organizationId: orgId,
+      billableAccount: { organizationId: orgId },
       keyOwnerType: 'HADRON_SERVER',
     });
     expect(event).not.toBeNull();
@@ -178,14 +178,14 @@ describe('recordLlmUsage', () => {
   it('openai-compatible is recorded UNPRICED even when a price row exists, so it is never debited at another host\'s rate (#1389 review)', async () => {
     vi.stubEnv('BILLING_DEBIT_ENABLED', 'true');
     await mkPrice('openai-compatible', 'claude-m', new Date('2026-01-01'));
-    const event = await recordLlmUsage(db, { ...base, provider: 'openai-compatible', organizationId: orgId, keyOwnerType: 'HADRON_SERVER' });
+    const event = await recordLlmUsage(db, { ...base, provider: 'openai-compatible', billableAccount: { organizationId: orgId }, keyOwnerType: 'HADRON_SERVER' });
     expect(event!.costMicroCents).toBeNull();
     expect(await db.creditLedgerEntry.count()).toBe(0);
     vi.unstubAllEnvs();
   });
 
   it('stores a null cost for an unpriced pair (and never blocks)', async () => {
-    const event = await recordLlmUsage(db, { ...base, organizationId: orgId });
+    const event = await recordLlmUsage(db, { ...base, billableAccount: { organizationId: orgId } });
     expect(event).not.toBeNull();
     expect(event!.costMicroCents).toBeNull();
     expect(event!.tokensIn).toBe(1000);
@@ -193,7 +193,7 @@ describe('recordLlmUsage', () => {
 
   it('does NOT debit when BILLING_DEBIT_ENABLED is unset (default off)', async () => {
     await mkPrice('anthropic', 'claude-m', new Date('2026-01-01'));
-    await recordLlmUsage(db, { ...base, organizationId: orgId, keyOwnerType: 'HADRON_SERVER' });
+    await recordLlmUsage(db, { ...base, billableAccount: { organizationId: orgId }, keyOwnerType: 'HADRON_SERVER' });
     expect(await db.creditLedgerEntry.count()).toBe(0);
   });
 
@@ -201,14 +201,14 @@ describe('recordLlmUsage', () => {
     vi.stubEnv('BILLING_DEBIT_ENABLED', 'true');
     vi.stubEnv('CREDIT_MARKUP_PERCENT', '25');
     await mkPrice('anthropic', 'claude-m', new Date('2026-01-01'));
-    await recordLlmUsage(db, { ...base, organizationId: orgId, keyOwnerType: 'HADRON_SERVER' });
+    await recordLlmUsage(db, { ...base, billableAccount: { organizationId: orgId }, keyOwnerType: 'HADRON_SERVER' });
     const entries = await db.creditLedgerEntry.findMany({ where: { organizationId: orgId } });
     expect(entries).toHaveLength(1);
     expect(entries[0].kind).toBe('debit');
     // 105_000 × 1.25 = 131_250, stored negated.
     expect(entries[0].amountMicroCents).toBe(-131_250n);
     expect(entries[0].sourceType).toBe('usage-event');
-    expect(await creditBalance(db, orgId)).toBe(-131_250n);
+    expect(await creditBalance(db, { organizationId: orgId })).toBe(-131_250n);
   });
 
   it('row markupBasisPoints overrides the env markup (per-tier pricing)', async () => {
@@ -217,7 +217,7 @@ describe('recordLlmUsage', () => {
     await mkPrice('anthropic', 'claude-m', new Date('2026-01-01'), IN_RATE, OUT_RATE, {
       markupBasisPoints: 5000, // 50%
     });
-    await recordLlmUsage(db, { ...base, organizationId: orgId, keyOwnerType: 'HADRON_SERVER' });
+    await recordLlmUsage(db, { ...base, billableAccount: { organizationId: orgId }, keyOwnerType: 'HADRON_SERVER' });
     const [entry] = await db.creditLedgerEntry.findMany({ where: { organizationId: orgId } });
     // 105_000 × 1.5 = 157_500, stored negated — NOT the env's 131_250.
     expect(entry.amountMicroCents).toBe(-157_500n);
@@ -226,7 +226,7 @@ describe('recordLlmUsage', () => {
   it('never debits BYOK spend (FR-004), even when enabled', async () => {
     vi.stubEnv('BILLING_DEBIT_ENABLED', 'true');
     await mkPrice('anthropic', 'claude-m', new Date('2026-01-01'));
-    await recordLlmUsage(db, { ...base, organizationId: orgId, keyOwnerType: 'ORGANIZATION' });
+    await recordLlmUsage(db, { ...base, billableAccount: { organizationId: orgId }, keyOwnerType: 'ORGANIZATION' });
     expect(await db.creditLedgerEntry.count()).toBe(0);
   });
 
@@ -234,13 +234,13 @@ describe('recordLlmUsage', () => {
     vi.stubEnv('BILLING_DEBIT_ENABLED', 'true');
     await mkPrice('anthropic', 'claude-m', new Date('2026-01-01'));
     // No organizationId: event recorded, no debit.
-    const noOrg = await recordLlmUsage(db, { ...base, keyOwnerType: 'HADRON_SERVER' });
+    const noOrg = await recordLlmUsage(db, { ...base, billableAccount: null, keyOwnerType: 'HADRON_SERVER' });
     expect(noOrg).not.toBeNull();
     expect(await db.creditLedgerEntry.count()).toBe(0);
     // Nonexistent org: FK violation is swallowed (throw-safe), returns null.
     const bad = await recordLlmUsage(db, {
       ...base,
-      organizationId: 'no-such-org',
+      billableAccount: { organizationId: 'no-such-org' },
       keyOwnerType: 'HADRON_SERVER',
     });
     expect(bad).toBeNull();
@@ -250,13 +250,13 @@ describe('recordLlmUsage', () => {
 describe('credit ledger primitives', () => {
   it('grants are positive, debits negated, balance is the running sum', async () => {
     await grantCredits(db, {
-      organizationId: orgId,
+      owner: { organizationId: orgId },
       amountMicroCents: 500_000n,
       sourceType: 'stripe-checkout',
       sourceId: 'cs_sum',
     });
-    await debitCredits(db, { organizationId: orgId, amountMicroCents: 125_000n });
-    expect(await creditBalance(db, orgId)).toBe(375_000n);
+    await debitCredits(db, { owner: { organizationId: orgId }, amountMicroCents: 125_000n });
+    expect(await creditBalance(db, { organizationId: orgId })).toBe(375_000n);
     const kinds = (await db.creditLedgerEntry.findMany({ orderBy: { createdAt: 'asc' } })).map(
       (e) => [e.kind, e.amountMicroCents],
     );
@@ -268,28 +268,28 @@ describe('credit ledger primitives', () => {
 
   it('is idempotent on (sourceType, sourceId) — webhook redelivery never double-credits', async () => {
     const first = await grantCredits(db, {
-      organizationId: orgId,
+      owner: { organizationId: orgId },
       amountMicroCents: 2_000_000_000n, // a $20 pack
       sourceType: 'stripe-checkout',
       sourceId: 'cs_test_123',
     });
     const replay = await grantCredits(db, {
-      organizationId: orgId,
+      owner: { organizationId: orgId },
       amountMicroCents: 2_000_000_000n,
       sourceType: 'stripe-checkout',
       sourceId: 'cs_test_123',
     });
     expect(replay.id).toBe(first.id);
     expect(await db.creditLedgerEntry.count()).toBe(1);
-    expect(await creditBalance(db, orgId)).toBe(2_000_000_000n);
+    expect(await creditBalance(db, { organizationId: orgId })).toBe(2_000_000_000n);
     // A different session id is a NEW grant.
     await grantCredits(db, {
-      organizationId: orgId,
+      owner: { organizationId: orgId },
       amountMicroCents: 2_000_000_000n,
       sourceType: 'stripe-checkout',
       sourceId: 'cs_test_456',
     });
-    expect(await creditBalance(db, orgId)).toBe(4_000_000_000n);
+    expect(await creditBalance(db, { organizationId: orgId })).toBe(4_000_000_000n);
   });
 
   // #5007 (hrn:node:hadronmemory.com:specs:cor:dmo:170:03, every entry names
@@ -297,16 +297,16 @@ describe('credit ledger primitives', () => {
   // deduped, is now refused; grants with distinct sources are never deduped.
   it('a grant without a source is refused; distinct sources are never deduped', async () => {
     await expect(
-      grantCredits(db, { organizationId: orgId, amountMicroCents: 100n } as GrantCreditsParams),
+      grantCredits(db, { owner: { organizationId: orgId }, amountMicroCents: 100n } as GrantCreditsParams),
     ).rejects.toBeInstanceOf(InvalidLedgerAmountError);
-    await grantCredits(db, { organizationId: orgId, amountMicroCents: 100n, sourceType: 'manual', sourceId: 'a' });
-    await grantCredits(db, { organizationId: orgId, amountMicroCents: 100n, sourceType: 'manual', sourceId: 'b' });
+    await grantCredits(db, { owner: { organizationId: orgId }, amountMicroCents: 100n, sourceType: 'manual', sourceId: 'a' });
+    await grantCredits(db, { owner: { organizationId: orgId }, amountMicroCents: 100n, sourceType: 'manual', sourceId: 'b' });
     expect(await db.creditLedgerEntry.count()).toBe(2);
   });
 
   it('throws IdempotencyConflictError on a mismatched replay (never silently absorbs)', async () => {
     await grantCredits(db, {
-      organizationId: orgId,
+      owner: { organizationId: orgId },
       amountMicroCents: 2_000_000_000n,
       sourceType: 'stripe-checkout',
       sourceId: 'cs_conflict',
@@ -314,7 +314,7 @@ describe('credit ledger primitives', () => {
     // Different amount, same source pair — a bug or tampering, not redelivery.
     await expect(
       grantCredits(db, {
-        organizationId: orgId,
+        owner: { organizationId: orgId },
         amountMicroCents: 1_000_000_000n,
         sourceType: 'stripe-checkout',
         sourceId: 'cs_conflict',
@@ -326,7 +326,7 @@ describe('credit ledger primitives', () => {
     });
     await expect(
       grantCredits(db, {
-        organizationId: otherOrg.id,
+        owner: { organizationId: otherOrg.id },
         amountMicroCents: 2_000_000_000n,
         sourceType: 'stripe-checkout',
         sourceId: 'cs_conflict',
@@ -339,14 +339,14 @@ describe('credit ledger primitives', () => {
   it('rejects an orphan sourceType or sourceId at the service layer', async () => {
     await expect(
       grantCredits(db, {
-        organizationId: orgId,
+        owner: { organizationId: orgId },
         amountMicroCents: 100n,
         sourceType: 'stripe-checkout',
       } as GrantCreditsParams),
     ).rejects.toBeInstanceOf(InvalidLedgerAmountError);
     await expect(
       grantCredits(db, {
-        organizationId: orgId,
+        owner: { organizationId: orgId },
         amountMicroCents: 100n,
         sourceId: 'cs_orphan',
       } as GrantCreditsParams),
@@ -356,18 +356,18 @@ describe('credit ledger primitives', () => {
   it('rejects non-positive amounts', async () => {
     await expect(
       grantCredits(db, {
-        organizationId: orgId,
+        owner: { organizationId: orgId },
         amountMicroCents: 0n,
         sourceType: 'stripe-checkout',
         sourceId: 'cs_zero',
       }),
     ).rejects.toBeInstanceOf(InvalidLedgerAmountError);
     await expect(
-      debitCredits(db, { organizationId: orgId, amountMicroCents: -5n }),
+      debitCredits(db, { owner: { organizationId: orgId }, amountMicroCents: -5n }),
     ).rejects.toBeInstanceOf(InvalidLedgerAmountError);
   });
 
   it('balance is 0n for an empty ledger', async () => {
-    expect(await creditBalance(db, orgId)).toBe(0n);
+    expect(await creditBalance(db, { organizationId: orgId })).toBe(0n);
   });
 });

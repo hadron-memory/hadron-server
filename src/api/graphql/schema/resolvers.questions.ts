@@ -26,6 +26,8 @@
  * Lock order (§7): authority anchors → the log row (ask, purge, deciders) →
  * the question row. Never a log lock taken while a question row is held.
  */
+import { isUserHolding, userHoldingCreatorMayRead } from '../../../lib/auth/userHolding.js';
+import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { createHash } from 'crypto';
 import { canWriteToMemory } from '../../../mcp/access-control.js';
 import { GraphQLError } from 'graphql';
@@ -39,6 +41,7 @@ import {
   isPlatformAdmin,
   requireMemoryManageAccess,
   requireMemoryWriteAccess,
+  requireCallerIdentity,
 } from './resolvers.helpers.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveNodeUrnField } from './resolvers.types.js';
@@ -324,9 +327,11 @@ function holdAppOwnerRow(ctx: Context, memoryId: string) {
 async function requireLogManage(ctx: Context, memoryId: string, concealRef?: string): Promise<void> {
   const memory = await ctx.db.memory.findUniqueOrThrow({
     where: { id: memoryId },
-    select: { class: true, userId: true, organizationId: true, ownerUserId: true, appId: true },
+    select: { class: true, userId: true, organizationId: true, ownerUserId: true, appId: true, userMemoryOfAgentId: true, createdBy: true },
   });
   const gate = async () => {
+    // hadron-internal#88: a chat holding's log is its creator's alone; no App-owner arm reaches it first.
+    if (isUserHolding(memory) && !userHoldingCreatorMayRead(ctx, memory)) throw authorizationDenied();
     if (await isOwnerRoleAppMember(ctx, memory)) return;
     await requireMemoryManageAccess(ctx, memory);
   };
@@ -341,8 +346,9 @@ async function requireLogManage(ctx: Context, memoryId: string, concealRef?: str
   }
 }
 
-const questionMissing = (ref: string) => questionError('QUESTION_NOT_FOUND', `Question not found: "${ref}"`, { ref });
-const logMissing = (ref: string) => questionError('QUESTION_LOG_NOT_FOUND', `Question log not found: "${ref}"`, { ref });
+// #5168: neither miss quotes or relays the caller's ref (their own text, possibly a pasted secret).
+const questionMissing = (_ref: string) => questionError('QUESTION_NOT_FOUND', 'Question not found');
+const logMissing = (_ref: string) => questionError('QUESTION_LOG_NOT_FOUND', 'Question log not found');
 
 /** Resolve a ref to a live, readable node of `role`, or the typed miss (no existence oracle). */
 async function resolveGovernedNode(
@@ -704,6 +710,7 @@ export const questionMutations = {
     args: { memoryRef: string; loc: string; name?: string | null; prefix?: string | null; defaultDeciders: string[]; eligibleDeciders?: string[] | null },
     ctx: Context,
   ): Promise<QuestionLogView> => {
+    requireCallerIdentity(ctx);
     refuseImpersonation(ctx);
     const { id: memoryId } = await resolveMemoryRef(ctx.db, args.memoryRef);
     validateLocOrThrow(args.loc, 'loc');
@@ -768,7 +775,7 @@ export const questionMutations = {
         },
         txCtx,
         'create',
-        { authoring: { kind: 'platform', record: 'question' }, ownsKind: 'question', governedContext: 'node-write', transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) } },
+        { ownerLimit: 'count-only', sizeCeiling: 'skip', authoring: { kind: 'platform', record: 'question' }, ownsKind: 'question', governedContext: 'node-write', transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) } },
       );
       const row = await tx.node.findUniqueOrThrow({ where: { id: (node as { id: string }).id }, select: LOG_ROW_SELECT });
       return { row, data };
@@ -786,6 +793,7 @@ export const questionMutations = {
     args: { logRef: string; defaultDeciders: string[]; eligibleDeciders?: string[] | null; expectedRevision: number; reason: string },
     ctx: Context,
   ): Promise<QuestionLogView> => {
+    requireCallerIdentity(ctx);
     refuseImpersonation(ctx);
     const reason = validateReason(args.reason);
     const defaults = uniqueIds(args.defaultDeciders, '/defaultDeciders');
@@ -812,7 +820,7 @@ export const questionMutations = {
         { memoryId: log.memoryId, loc: row.loc, ...logContentOf(row.name, data), reason },
         txCtx,
         'update',
-        { authoring: { kind: 'platform', record: 'question' },
+        { ownerLimit: 'count-only', sizeCeiling: 'skip', authoring: { kind: 'platform', record: 'question' },
           targetNodeId: row.id, guardRevSeq: row.revSeq, ownsKind: 'question', governedContext: 'node-write',
           transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
         },
@@ -829,6 +837,7 @@ export const questionMutations = {
    * included. `authorizes: true` forces the signed tier (§6.2).
    */
   askQuestion: async (_: unknown, args: AskArgs, ctx: Context): Promise<QuestionView> => {
+    requireCallerIdentity(ctx);
     refuseImpersonation(ctx);
     // #4431: `taskRef` is an input of the door, not of the stored payload (which holds the resolved `taskId`).
     const { taskRef, ...rawInput } = (args.input ?? {}) as Record<string, unknown>;
@@ -892,7 +901,7 @@ export const questionMutations = {
         },
         txCtx,
         'create',
-        { authoring: { kind: 'platform', record: 'question' }, ownsKind: 'question', governedContext: 'node-write', transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) } },
+        { ownerLimit: 'count-only', sizeCeiling: 'skip', authoring: { kind: 'platform', record: 'question' }, ownsKind: 'question', governedContext: 'node-write', transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) } },
       );
       // The counter, as chat roots keep theirs: a sanctioned direct write that
       // asks for a fingerprint refresh, so it is not reconciled as drift. The
@@ -926,6 +935,7 @@ export const questionMutations = {
     args: { ref: string; input: Record<string, unknown>; expectedRevision: number; reason: string },
     ctx: Context,
   ): Promise<QuestionView> => {
+    requireCallerIdentity(ctx);
     refuseImpersonation(ctx);
     const reason = validateReason(args.reason);
     const patch = parseOrRefuse(amendInputSchema, lowerEnums(args.input));
@@ -998,7 +1008,7 @@ export const questionMutations = {
         { memoryId: target.memoryId, loc: row.loc, ...renderedFields(final), reason },
         txCtx,
         'update',
-        { authoring: { kind: 'platform', record: 'question' },
+        { ownerLimit: 'count-only', sizeCeiling: 'skip', authoring: { kind: 'platform', record: 'question' },
           targetNodeId: row.id, guardRevSeq: row.revSeq, ownsKind: 'question', governedContext: 'node-write',
           transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
         },
@@ -1018,6 +1028,7 @@ export const questionMutations = {
     args: { ref: string; reason: string; expectedRevision: number },
     ctx: Context,
   ): Promise<QuestionView> => {
+    requireCallerIdentity(ctx);
     refuseImpersonation(ctx);
     const reason = validateReason(args.reason);
     const target = await resolveGovernedNode(ctx, args.ref, QUESTION_ROLE, questionMissing);
@@ -1044,7 +1055,7 @@ export const questionMutations = {
         { memoryId: target.memoryId, loc: row.loc, ...renderedFields(next), reason },
         txCtx,
         'update',
-        { authoring: { kind: 'platform', record: 'question' },
+        { ownerLimit: 'count-only', sizeCeiling: 'skip', authoring: { kind: 'platform', record: 'question' },
           targetNodeId: row.id, guardRevSeq: row.revSeq, ownsKind: 'question', governedContext: 'node-write',
           transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
         },
@@ -1066,6 +1077,7 @@ export const questionMutations = {
     args: { ref: string; input: { optionKey?: string | null; text?: string | null; reason?: string | null; via?: string | null }; expectedRevision: number },
     ctx: Context,
   ): Promise<QuestionView> => {
+    requireCallerIdentity(ctx);
     refuseImpersonation(ctx);
     const given = parseAnswerInput(args.input);
     return answerAct(ctx, args.ref, args.expectedRevision, (current, by) => {
@@ -1089,6 +1101,7 @@ export const questionMutations = {
     args: { ref: string; expectedRevision: number; reason?: string | null; via?: string | null },
     ctx: Context,
   ): Promise<QuestionView> => {
+    requireCallerIdentity(ctx);
     refuseImpersonation(ctx);
     const reason = shortOrNull(args.reason, '/reason');
     const via = answerVia(args.via);
@@ -1107,6 +1120,7 @@ export const questionMutations = {
    * revision). The code stays consumed.
    */
   purgeUnansweredQuestion: async (_: unknown, args: { ref: string; reason: string }, ctx: Context): Promise<boolean> => {
+    requireCallerIdentity(ctx);
     refuseImpersonation(ctx);
     const reason = validateReason(args.reason);
     const target = await resolveGovernedNode(ctx, args.ref, QUESTION_ROLE, questionMissing);
@@ -1153,7 +1167,7 @@ export const questionMutations = {
         { memoryId: target.memoryId, loc: lockedLog.loc, ...logContentOf(lockedLog.name, data), reason: `purge ${purgedCode}: ${reason}`.slice(0, REASON_MAX) },
         txCtx,
         'update',
-        { authoring: { kind: 'platform', record: 'question' },
+        { ownerLimit: 'count-only', sizeCeiling: 'skip', authoring: { kind: 'platform', record: 'question' },
           targetNodeId: lockedLog.id, ownsKind: 'question', governedContext: 'node-write',
           transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
         },
@@ -1567,7 +1581,7 @@ async function answerAct(
       { memoryId: target.memoryId, loc: row.loc, ...renderedFields(final), reason: act.label },
       txCtx,
       'update',
-      { authoring: { kind: 'platform', record: 'question' },
+      { ownerLimit: 'count-only', sizeCeiling: 'skip', authoring: { kind: 'platform', record: 'question' },
         targetNodeId: row.id, guardRevSeq: row.revSeq, ownsKind: 'question', governedContext: 'node-write',
         transaction: { tx, pooledDb: ctx.db, afterCommit: (e) => effects.push(e) },
       },

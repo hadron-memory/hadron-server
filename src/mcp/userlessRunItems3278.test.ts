@@ -77,7 +77,7 @@ describe('#3278 userless run item admission', () => {
     if (door === 'mcp-list') expect((await getMemoryAccess(db, f.principal)).has(id)).toBe(false);
     else if (door === 'graphql-ids') expect(await getAccessibleMemoryIds({ ...f.principal })).not.toContain(id);
     else {
-      const args = { filter: { memoryIds: [id] }, limit: 10, ...(door === 'keyword' ? { query: 'needle3278', mode: 'keyword' } : {}) };
+      const args = { filter: { memoryRefs: [id] }, limit: 10, ...(door === 'keyword' ? { query: 'needle3278', mode: 'keyword' } : {}) };
       const withItem = await Q.findNodes({}, args, { ...f.principal });
       await db.agentMemoryItem.delete({ where: { agentId_memoryId: { agentId: f.agent.id, memoryId: id } } });
       const without = await Q.findNodes({}, args, { ...f.principal });
@@ -86,7 +86,7 @@ describe('#3278 userless run item admission', () => {
     }
   });
   it('RED: refuses item-only flow loads', async () => {
-    expect(await rejection(loadFlowNode(db, urn(f.write), f.org.id, f.principal))).toMatchObject({ message: expect.stringContaining('not readable') });
+    expect(await rejection(loadFlowNode(db, urn(f.write), { organizationId: f.org.id }, f.principal))).toMatchObject({ message: expect.stringContaining('not readable') });
   });
   it('refuses item-only writes exactly as without an item and publishes no node', async () => {
     const withItem = await rejection(hadronCreateNode.execute(f.tool, { urn: urn(f.write, 'docs:new'), name: 'new' }));

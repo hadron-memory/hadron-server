@@ -174,7 +174,8 @@ describe('R3p: a worker may ask, never sign; an App key reads no grant and canno
   it('no GraphQL field takes an assertion or completes a grant signing request', async () => {
     const { typeDefs } = deploymentSchema();
     const fields = [...typeDefs.matchAll(/^\s+(\w*[Gg]rant\w*Sign\w*|\w*[Ss]ign\w*Grant\w*)\s*\(/gm)].map((m) => m[1]).sort();
-    expect(fields).toEqual(['grantSigningRequest', 'requestGrantSignature', 'withdrawGrantSigningRequest']);
+    // #5001 added the selection's own request, read and withdraw; none takes an assertion either.
+    expect(fields).toEqual(['grantSigningRequest', 'grantSigningSelection', 'requestGrantSelectionSignature', 'requestGrantSignature', 'withdrawGrantSigningRequest', 'withdrawGrantSigningSelection']);
     expect(typeDefs).not.toMatch(/complete\w*GrantSign|GrantSign\w*complete|declineGrant|activateGrant/i);
   });
 
@@ -220,6 +221,26 @@ describe('R4p: withdraw is the requester account\'s alone, once', () => {
     expect(JSON.stringify(unknown).replaceAll(id, 'X'))
       .toBe(JSON.stringify(await post(personKey, null, WITHDRAW, { id: 'AAAAAAAAAAAAAAAAAAAAAA' })).replaceAll('AAAAAAAAAAAAAAAAAAAAAA', 'X'));
     expect((await asWorker(READ, { id })).data.grantSigningRequest.state).toBe('OPEN');
+  });
+
+  // #5192 item 2, resolver site (Riana's SECURITY P3-2): the withdraw resolver's own selection link (`!row.selectionId` in its
+  // reach check, before the lib call). The caller IS the requester over a grant it can read, so without both links the call
+  // would walk into the withdraw; the pin answers exactly like an unknown id and ends nothing. The lib pin
+  // (grantSelection5001.test.ts) kills the lib link alone through the direct transaction call; this one pins the composite
+  // answer and goes red only when BOTH sites' links are dropped — the resolver's link dropped alone still leaves the lib
+  // refusal (grantRequests.ts lockRequest), which the resolver maps to the same NOT_FOUND.
+  it('withdrawing a selection ITEM by id answers exactly like an unknown id, and nothing ends', async () => {
+    const g = await held({ action_values: { entryNode: 'n1' } });
+    const opened = await asWorker('mutation($g:[ID!]!){requestGrantSelectionSignature(grantRefs:$g){id items{id}}}', { g: [g] });
+    expect(opened.errors).toBeUndefined();
+    const selId = opened.data.requestGrantSelectionSignature.id as string;
+    const itemId = opened.data.requestGrantSelectionSignature.items[0].id as string;
+    const r = await asWorker(WITHDRAW, { id: itemId });
+    expect(code(r)).toBe('SIGNING_REQUEST_NOT_FOUND');
+    expect(JSON.stringify(r).replaceAll(itemId, 'X'))
+      .toBe(JSON.stringify(await asWorker(WITHDRAW, { id: 'AAAAAAAAAAAAAAAAAAAAAA' })).replaceAll('AAAAAAAAAAAAAAAAAAAAAA', 'X'));
+    expect((await db.grantSigningRequest.findUniqueOrThrow({ where: { id: itemId } })).state).toBe('open');
+    expect((await db.grantSigningSelection.findUniqueOrThrow({ where: { id: selId } })).state).toBe('open');
   });
 });
 
