@@ -10,7 +10,7 @@ import { liveTxContext, liveReadSnapshotContext } from '../api/graphql/schema/au
 import { withReconciledNodeRead } from '../lib/includes/reconciledNodeRead.js';
 import { mcpBranchPrefixesFor, mcpNodeBranchScopes } from './branchRead.js';
 import { branchAdmitsLoc } from '../lib/grants/readGrant.js';
-import { branchNodeWhereArms } from '../lib/grants/branchRead.js';
+import { NO_BRANCHES, branchNodeWhereArms, type BranchScopes } from '../lib/grants/branchRead.js';
 import { stampEmbeddingObligation } from '../services/embedding/obligation.js';
 import { assertBootPromptWriteAllowed, assertNoBootPromptRows, isBootPromptRole } from '../lib/bootPrompt.js';
 import { assertBootPromptWriteAllowedOrGranted, spendEditGrantFor, suppliedNonTextFields } from '../lib/grants/bootPromptGrant.js';
@@ -1472,13 +1472,15 @@ async function resolveParentForRead(
   memoryUrn: string | undefined,
   accessibleMemoryIds: string[] | null,
   auth: AuthContext,
+  /** #5412: memories the caller reads only under a branch (the listing restricts to it); never consulted for a bare loc. */
+  branches: BranchScopes = NO_BRANCHES,
 ): Promise<
   | { ok: true; loc: string; memoryId?: string }
   | { ok: false; kind: 'invalid' | 'notFound'; message: string }
 > {
   const missing = () => ({ ok: false as const, kind: 'notFound' as const, message: 'Node not found.' });
   const readable = async (id: string) =>
-    await canReadMemory(db, auth, id, EXPLICIT_REF);
+    branches.has(id) || await canReadMemory(db, auth, id, EXPLICIT_REF);
   try {
     const qualified = parseUrnInput(parentRel).type === 'node';
     if (hasSchemePrefix(parentRel) && !qualified) {
@@ -4864,6 +4866,10 @@ export function createMcpServerInstance(
 
       const trimmedParentRel = parentRel?.trim();
       const accessibleMemoryIds = await getAccessibleMemoryIds(db, auth);
+      // #5412 section 5: memories read only under a branch pass the pre-gates below; findNodes restricts them to the branch in
+      // its statement (it judges the same grants, from the same key, through the context built below).
+      const branches = await mcpNodeBranchScopes(db, auth);
+      const readableOrBranch = async (id: string) => branches.has(id) || await canReadMemory(db, auth, id, EXPLICIT_REF);
 
       // The canonical point gate confines session-bound keys and admits the sole
       // 0114 B exception (named PUBLIC knowledge). Do not intersect a second,
@@ -4908,7 +4914,7 @@ export function createMcpServerInstance(
         const mem = await resolveMemoryByUrn(memoryUrn);
         if (
           !mem ||
-          !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))
+          !(await readableOrBranch(mem.id))
         ) {
           return textResult(
             `Memory not found or invalid. Use hadron_list_memories to see what is available.`,
@@ -4934,7 +4940,7 @@ export function createMcpServerInstance(
             const mem = await resolveMemoryByUrn(urn);
             if (
               !mem ||
-              !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))
+              !(await readableOrBranch(mem.id))
             ) {
               return {
                 error: `Memory not found or invalid. Use hadron_list_memories to see what is available.`,
@@ -4962,12 +4968,14 @@ export function createMcpServerInstance(
           (
             await db.memory.findMany({ where: { deletedAt: null }, select: { id: true } })
           ).map((m) => m.id);
+        // #5412: and every branch-only memory (restricted to its branch by findNodes), as a broad GraphQL search has them.
+        filterMemoryRefs = [...new Set([...filterMemoryRefs, ...branches.keys()])];
       }
 
       // #2526: the explicit-parent gate is shared with list_nodes; discovery
       // cannot hide a directly readable owner memory before authorization.
       if (trimmedParentRel) {
-        const parent = await resolveParentForRead(trimmedParentRel, memoryUrn, accessibleMemoryIds, auth);
+        const parent = await resolveParentForRead(trimmedParentRel, memoryUrn, accessibleMemoryIds, auth, branches);
         if (!parent.ok) {
           return parent.kind === 'notFound'
             ? textResult(`No nodes found matching "${safeQuery}".`)
@@ -4989,6 +4997,8 @@ export function createMcpServerInstance(
         limiterIdentity: auth.limiterIdentity,
         apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
+        // #5412: the key, so findNodes judges the App's read grants (whole and branch) from the same key the pre-gates did.
+        appKeyId: auth.appKeyId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
         organizationId: auth.organizationId ?? undefined,
@@ -5099,7 +5109,7 @@ export function createMcpServerInstance(
           const scoreStr = p.score != null ? `  (score ${p.score.toFixed(3)})` : '';
           const header = `- **${urn}** [chunk ${p.chunkIndex} @ chars ${p.charStart}-${p.charEnd}] — ${name}${scoreStr}`;
           const bodyLines = p.text.split(/\r?\n/).map((l) => `  ${l}`);
-          const asComment = passageComments.get(p.parentNodeId);
+          const asComment = parent && branches.has(parent.memoryId) ? undefined : passageComments.get(p.parentNodeId); // #5412
           const label = asComment
             ? [commentHitLabel(asComment, (await nodeUrnResult(asComment.targetLoc, asComment.targetMemoryId, memoryUrnOf)).urn)]
             : [];
@@ -5219,7 +5229,9 @@ export function createMcpServerInstance(
             ? `- **${urn}** (id: ${n.id}) — ${n.name}  (score ${score.toFixed(3)}${relStr})`
             : `- **${urn}** (id: ${n.id}) — ${n.name}`,
         ];
-        const asComment = commentInfo.get(n.id);
+        // #5412: a hit in a branch-only memory carries nothing from outside it (no comment target, no edges).
+        const hitByBranch = branches.has(n.memoryId);
+        const asComment = hitByBranch ? undefined : commentInfo.get(n.id);
         if (asComment) {
           const target = await nodeUrnResult(asComment.targetLoc, asComment.targetMemoryId, memoryUrnOf);
           parts.push(commentHitLabel(asComment, target.urn));
@@ -5256,7 +5268,7 @@ export function createMcpServerInstance(
         if (n.tags?.length) parts.push(`  Tags: ${n.tags.join(', ')}`);
         // Brief edge rendering — hide edges whose target is soft-deleted
         // (#180 Bug 2); findNodes includes them, so filter here.
-        if (brief) {
+        if (brief && !hitByBranch) {
           // #1893 — an inherited hit's edges come through its child, never raw.
           const edges = hitInheritedFrom
             ? (hitInheritedFrom.via
@@ -6400,12 +6412,14 @@ export function createMcpServerInstance(
 
       const memoryIds = await getAccessibleMemoryIds(db, auth);
       const maxDepth = depth ?? 1;
+      // #5412 section 5: a memory named here that the caller reads only under a branch lists that branch alone.
+      const branches = await mcpNodeBranchScopes(db, auth);
 
       // Resolve the parent prefix
       let prefix: string;
       let memoryId: string | undefined;
       if (trimmedParentRel) {
-        const parent = await resolveParentForRead(trimmedParentRel, memoryUrn, memoryIds, auth);
+        const parent = await resolveParentForRead(trimmedParentRel, memoryUrn, memoryIds, auth, branches);
         if (!parent.ok) return refusalResult(parent.message);
         prefix = parent.loc;
         memoryId = parent.memoryId;
@@ -6429,7 +6443,7 @@ export function createMcpServerInstance(
           }
           // #188 (Gemini): canReadMemory gate — same shape as the
           // hadron_find_nodes memoryUrn branch.
-          if (!(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))) {
+          if (!branches.has(mem.id) && !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))) {
             return textResult(
               `Memory not found or invalid. Use hadron_list_memories to see what is available.`,
             );
@@ -6437,6 +6451,7 @@ export function createMcpServerInstance(
           memoryId = mem.id;
         }
       }
+      const branchPrefixes = memoryId ? branches.get(memoryId) : undefined;
 
       // #180 Bug 2: tombstoned nodes are not part of the live tree, so
       // they shouldn't show up in browse output. (Their absence also
@@ -6471,7 +6486,8 @@ export function createMcpServerInstance(
       // memory: an Agent's system memory gains its bases' inherited nodes,
       // without their overridden nodes or boot prompts. They are listed in the
       // child's tree, under their own URNs, marked (realMemoryId below).
-      const inheritance = memoryId ? await effectiveScope(db, [memoryId]) : null;
+      if (branchPrefixes) where.AND = branchNodeWhereArms(new Map([[memoryId!, branchPrefixes]]));
+      const inheritance = memoryId && !branchPrefixes ? await effectiveScope(db, [memoryId]) : null;
       if (inheritance && inheritance.memoryIds.length > 1) {
         where.memoryId = { in: inheritance.memoryIds };
         if (inheritance.excludeNodeIds.length > 0) where.id = { notIn: inheritance.excludeNodeIds };
@@ -6584,6 +6600,8 @@ export function createMcpServerInstance(
           const pd = depthRelative(cur);
           if (pd <= 0) break;
           if (!isWithinScope(cur)) break;
+          // #5412: never above a branch root (the caller cannot see whether such an ancestor exists).
+          if (branchPrefixes && !branchAdmitsLoc(branchPrefixes, cur)) break;
           if (pd > maxDepth) continue; // ancestor out of window; keep walking up
           const pk = dedupKey(n.memoryId, cur);
           if (visibleByKey.has(pk)) break;
