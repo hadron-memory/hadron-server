@@ -20,6 +20,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../id.js';
 import { putObject, deleteObject } from '../../../integrations/objectstore/index.js';
 import { runContext } from '../../../jobs/appRunDeps.js';
+import { activeMemoryWriteGrant } from '../../../test/appGrants5404.js';
 import { reloadOwnerDefaultLimitsForTests } from '../../ownerLimits/defaults.js';
 import { OWNER_LIMIT_NO_NUMBER_MESSAGE } from '../../ownerLimits/errors.js';
 import { admitAndExecuteTool } from '../toolAdmission.js';
@@ -28,7 +29,7 @@ import { hadronCreateNode, hadronUpdateNode } from './nodeTools.js';
 import type { AppRun } from '../../../generated/prisma/index.js';
 import type { RunToolContext } from './types.js';
 import { testRunAgentId } from '../../../test/runAgent.js';
-import { resolvers, type Context } from '../../../api/graphql/schema/resolvers.js';
+import '../../../api/graphql/schema/resolvers.js'; // registers the write-grant giver check (resolvers.helpers)
 
 const ORG_URN = 'ol5015-run-org';
 const MEM_URN = `${ORG_URN}:runmem`;
@@ -91,9 +92,9 @@ describe('#5015 run tools at the owner\'s nodes limit', () => {
   });
 
   it('hadron_create_node in a run with no on-behalf-of user returns the form with no owner and no number', async () => {
-    // A run with no user writes through an App memory write grant (the #3278 path); an agent's item alone does not admit it.
-    await resolvers.Mutation.setAppMemoryWriteGrant({}, { appRef: appId, memoryRef: memoryId, prefix: 'docs', registerNodeUrn: 'hrn:node:example.com:register:authority' },
-      { db, userId: ownerId, roles: ['READER'] } as Context);
+    // A run with no user writes through a signed `memory.write` grant its App holds (#5404; the #3278 path); an agent's item alone
+    // does not admit it. Signed by the org OWNER, who manages the memory.
+    await activeMemoryWriteGrant(appId, memoryId, { issuerUserId: ownerId, prefix: 'docs' });
     reloadOwnerDefaultLimitsForTests({ OWNER_DEFAULT_LIMITS: JSON.stringify({ organization: { nodes: 1 } }) });
     const out = await call(hadronCreateNode, await mintRun(null), { urn: `hrn:node:${ORG_URN}:runmem:docs:fresh`, name: 'fresh' });
     expect(out.error).toEqual({

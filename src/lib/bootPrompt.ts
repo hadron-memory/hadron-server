@@ -6,14 +6,19 @@ import { currentActor } from './requestActor.js';
  * #2043 (S6, cor:agt:040:05, :11, :18), re-keyed by #5453 — the boot-prompt role
  * family and the compiled-node write guard.
  *
- * `boot-prompt` is a PLAIN role family (not a GOVERNED_KINDS entry). Every node in
- * it is type `system`, and the LEAF of the role says which kind it is (#5453,
- * Holger 2026-11-27; the dotted sub-kind convention of cor:acl:130:01):
+ * `prompt.boot` is a PLAIN role family (not a GOVERNED_KINDS entry): the role `prompt.boot` or any role that starts
+ * `prompt.boot.` (Holger's rulings of 2026-11-28, decision record sections 16 and 17). Every node in it is type
+ * `system`, and the LEAF of the role says which kind it is (the dotted sub-kind convention of cor:acl:130:01):
  *
- *   boot-prompt.compiled   the compiled prompt (written only by a compile)
- *   boot-prompt.source     the source a compile reads
- *   boot-prompt.rule       a rule a source includes
- *   boot-prompt            the bare legacy role: a source (a mirrored file may still write it)
+ *   prompt.boot.compiled   the compiled prompt (written only by a compile)
+ *   prompt.boot.source     the source a compile reads
+ *   prompt.boot.rule       a rule a source includes
+ *   boot-prompt, boot-prompt.*   LEGACY values (before the rename): recognised as part of the family so a mirrored
+ *                                file that still carries one is guarded and compiles as a source; the migration and
+ *                                the restores map them forward
+ *
+ * A role in `prompt.*` but outside `prompt.boot.*` (the bare `prompt`, `prompt.other`) is an ORDINARY instruction
+ * node: none of the rules below apply to it.
  *
  * Until #5453 the compiled node was told apart by a node type of its own and
  * source and compiled both carried the bare role. That type is retired: the
@@ -32,13 +37,16 @@ import { currentActor } from './requestActor.js';
  * (src/lib/bootPromptApproval.ts) and guard A, which asks nothing about who is calling.
  */
 
-export const BOOT_PROMPT_ROLE = 'boot-prompt';
+/** The boot-prompt family: this role, and every role that starts `prompt.boot.`. */
+export const BOOT_PROMPT_ROLE = 'prompt.boot';
 /** The compiled prompt. Matched EXACTLY: it is the mark guard A, the pointers and the serve rest on. */
-export const BOOT_PROMPT_COMPILED_ROLE = 'boot-prompt.compiled';
+export const BOOT_PROMPT_COMPILED_ROLE = 'prompt.boot.compiled';
 /** The source a compile reads at the source address. */
-export const BOOT_PROMPT_SOURCE_ROLE = 'boot-prompt.source';
+export const BOOT_PROMPT_SOURCE_ROLE = 'prompt.boot.source';
 /** A rule a source includes. In the family (#5453 ruling 4a); never a source and never a pointer target. */
-export const BOOT_PROMPT_RULE_ROLE = 'boot-prompt.rule';
+export const BOOT_PROMPT_RULE_ROLE = 'prompt.boot.rule';
+/** The bare role before the rename: a source. The migration maps it forward; a mirrored file may still write it. */
+export const LEGACY_BOOT_PROMPT_ROLE = 'boot-prompt';
 /** The rule role before #5453: a plain role outside the family. The migration renames every row that carries it. */
 export const LEGACY_BOOT_PROMPT_RULE_ROLE = 'boot-prompt-rule';
 /** The node type of every boot-prompt node the platform writes, as of every other node that defines an Agent (#5453). */
@@ -51,9 +59,14 @@ export const BOOT_PROMPT_NODE_TYPE = 'system';
  */
 export const RETIRED_COMPILED_BOOT_PROMPT_NODE_TYPE = 'compiled-boot-prompt';
 
-/** Whether `role` is in the boot-prompt family: `boot-prompt` or `boot-prompt.*`. A rule is in it. */
+/**
+ * Whether `role` is in the boot-prompt family: `prompt.boot` or `prompt.boot.*`, or a LEGACY `boot-prompt` /
+ * `boot-prompt.*` value. A rule is in it. A role elsewhere in `prompt.*` is not.
+ */
 export function isBootPromptRole(role: string | null | undefined): boolean {
-  return role === BOOT_PROMPT_ROLE || (typeof role === 'string' && role.startsWith(`${BOOT_PROMPT_ROLE}.`));
+  return typeof role === 'string' && (
+    role === BOOT_PROMPT_ROLE || role.startsWith(`${BOOT_PROMPT_ROLE}.`)
+    || role === LEGACY_BOOT_PROMPT_ROLE || role.startsWith(`${LEGACY_BOOT_PROMPT_ROLE}.`));
 }
 
 /** Whether `role` marks a compiled boot prompt. Exact: no sub-kind of it is one. */
@@ -81,25 +94,27 @@ export function isBootPromptItselfRole(role: string | null | undefined): boolean
 }
 
 /**
- * Whether `role` is valid at a source address (cor:agt:040:12): in the family, not compiled and not a rule.
- * The bare `boot-prompt` passes, so a mirrored source that still carries it compiles (#5453 Ask 3).
+ * Whether `role` is valid at a source address (cor:agt:040:12): a boot-prompt kind, not compiled and not a rule.
+ * The legacy bare `boot-prompt` passes, so a mirrored source that still carries it compiles (#5453 Ask 3).
  */
 export function isBootPromptSourceRole(role: string | null | undefined): boolean {
   return isBootPromptItselfRole(role) && !isCompiledBootPromptRole(role);
 }
 
 /**
- * What a row captured BEFORE #5453 is written back as (a node revision, an Agent snapshot): the retired compiled
- * type becomes `system` / `boot-prompt.compiled`, the bare role a source, the old rule role the rule leaf. A row
- * already in today's form, and every other row, comes back as it is. A capture that holds no node type (a
+ * What a row captured BEFORE the rename is written back as (a node revision, an Agent snapshot): the retired compiled
+ * type becomes `system` / `prompt.boot.compiled`; the bare `boot-prompt` role and `boot-prompt.source` a source
+ * (`prompt.boot.source`); `boot-prompt-rule` and `boot-prompt.rule` a rule; `boot-prompt.compiled` a compiled prompt.
+ * A row already in today's form, and every other row, comes back as it is. A capture that holds no node type (a
  * pre-#620 revision) restores no type either: only its role is brought forward.
  */
 export function modernBootPromptKind<T extends { nodeType?: string | null; role?: string | null }>(captured: T): T {
   if (captured.nodeType === RETIRED_COMPILED_BOOT_PROMPT_NODE_TYPE) {
     return { ...captured, nodeType: BOOT_PROMPT_NODE_TYPE, role: BOOT_PROMPT_COMPILED_ROLE };
   }
-  const role = captured.role === BOOT_PROMPT_ROLE ? BOOT_PROMPT_SOURCE_ROLE
-    : captured.role === LEGACY_BOOT_PROMPT_RULE_ROLE ? BOOT_PROMPT_RULE_ROLE : null;
+  const role = captured.role === LEGACY_BOOT_PROMPT_ROLE || captured.role === `${LEGACY_BOOT_PROMPT_ROLE}.source` ? BOOT_PROMPT_SOURCE_ROLE
+    : captured.role === LEGACY_BOOT_PROMPT_RULE_ROLE || captured.role === `${LEGACY_BOOT_PROMPT_ROLE}.rule` ? BOOT_PROMPT_RULE_ROLE
+    : captured.role === `${LEGACY_BOOT_PROMPT_ROLE}.compiled` ? BOOT_PROMPT_COMPILED_ROLE : null;
   if (role === null) return captured;
   return { ...captured, role, ...(captured.nodeType == null ? {} : { nodeType: BOOT_PROMPT_NODE_TYPE }) };
 }
@@ -174,9 +189,12 @@ export function assertBootPromptWriteAllowed(
   assertNotCompiledBootPromptWrite(prior?.role, next.role, op, next.nodeType);
 }
 
-/** Prisma `where` for the boot-prompt role family (a rule included). */
+/** Prisma `where` for the boot-prompt role family (a rule included; legacy values too). */
 export const BOOT_PROMPT_ROLE_WHERE: { OR: Array<{ role: string | { startsWith: string } }> } = {
-  OR: [{ role: BOOT_PROMPT_ROLE }, { role: { startsWith: `${BOOT_PROMPT_ROLE}.` } }],
+  OR: [
+    { role: BOOT_PROMPT_ROLE }, { role: { startsWith: `${BOOT_PROMPT_ROLE}.` } },
+    { role: LEGACY_BOOT_PROMPT_ROLE }, { role: { startsWith: `${LEGACY_BOOT_PROMPT_ROLE}.` } },
+  ],
 };
 
 /** Prisma `where` for a compiled boot prompt. */

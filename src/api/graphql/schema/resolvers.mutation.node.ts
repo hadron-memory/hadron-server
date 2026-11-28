@@ -71,7 +71,7 @@ import {
   getMemoryEncryptionInfo,
 } from '../../../lib/nodeCrypto.js';
 import { parseUrnInput, splitNodeUrn } from '../../../lib/urn.js';
-import type { WriteDestination } from '../../../lib/appWriteGrant.js';
+import type { WriteDestination } from '../../../lib/grants/writeGrant.js';
 import { splitWholeNodeUrn } from '../../../lib/splitNodeUrnTolerant.js';
 import { validateLocOrThrow } from '../../../lib/validateLocOrThrow.js';
 import { escapePrismaLikePattern } from '../../../lib/literalLocPrefix.js';

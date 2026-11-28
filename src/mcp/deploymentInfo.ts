@@ -375,21 +375,33 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // impersonation to those gates, as GraphQL always did: an impersonated MCP session is bounded on an organization's run too (its
 // one organization, no own-run arm), where MCP used to judge it as the target user. (0.55.0 is #5411 and 0.56.0 is #5391,
 // both merged first.)
-// 0.59.0 — BREAKING (stored values and behaviour, no SDL change) (#5453 PR A, Holger 2026-11-27; the Proposed lines of cor:dmo:020:04,
+// 0.58.0 — BREAKING (behaviour; SDL deprecations, no removal) (#5404, cor:acl:140:02, cor:agt:010:01): the two UNSIGNED App grants end.
+// (1) Ruling 0083's App write grant (#2484) and #2883's per-automation read grant authorize nothing, and the migration deletes their rows and
+// event rows at deploy (no carry, no re-sign): a userless run that wrote or read through one is refused until the memory's owner signs the
+// replacement. (2) New grant action `memory.write` (ADDITIVE, through `createGrant` and the signing ceremony): an App's userless runs create
+// and edit nodes in the memories it names (`memory`: an id or a list, no wildcard, no organization) under `prefix` (`*`, the whole of
+// every named memory, or one loc when `memory` names exactly one); signed by whoever manages every named memory, its targets judged by
+// 0083's rule at grant and at every write. (3) The six doors (`setAppMemoryWriteGrant`, `revokeAppMemoryWriteGrant`,
+// `appMemoryWriteGrants`, `setAutomationReadGrant`, `revokeAutomationReadGrant`, `automationReadGrants`) and the three MCP
+// `hadron_*_automation_read_grant` tools refuse every call with `DOOR_RETIRED` (`extensions.replacement` names `memory.read` or
+// `memory.write`); they are deprecated in the SDL and removed once a CLI release carrying hadron-cli#3319 ships.
+// `AutomationApproval.readGrants` is always empty (deprecated). (4) A run carrying a user id no longer reads through #2883's grant: a
+// user-backed run reads only what its user reads. (0.56.0 is #5391 and 0.57.0 is #5441, both merged first.)
+// 0.60.0 — BREAKING (stored values and behaviour, no SDL change) (#5453 PR A, Holger 2026-11-27 and the renames of 2026-11-28, decision record sections 16 and 17; the Proposed lines of cor:dmo:020:04,
 // cor:agt:040:05, :06, :12, :18): every node that defines an Agent is node type `system`, and its ROLE names the kind. A compiled boot
-// prompt is `system` / `boot-prompt.compiled` (the node type `compiled-boot-prompt` is retired: no row holds it and the database refuses
-// it), a source `boot-prompt.source`, an included rule `boot-prompt.rule` (was `boot-prompt-rule`), and a chatbot's conversation, stage
+// prompt is `system` / `prompt.boot.compiled` (the node type `compiled-boot-prompt` is retired: no row holds it and the database refuses
+// it), a source `prompt.boot.source`, an included rule `prompt.boot.rule` (was `boot-prompt-rule`), and a chatbot's conversation, stage
 // and prompt-template nodes carry `chatbot.conversation`, `chatbot.stage`, `chatbot.prompt`. One migration retypes the existing rows. A
 // client that found a compiled prompt by `nodeType: "compiled-boot-prompt"`, or a rule by the role `boot-prompt-rule`, now finds nothing:
-// filter by role (`boot-prompt.compiled`, or the family `boot-prompt`). The retyped nodes are `system`, so an unqualified listing hides
-// them; ask for them with #5452's `includeSystemNodes` (0.58.0). A rule is in the boot-prompt family: only whoever manages its Agent or
+// filter by role (`prompt.boot.compiled`, or the family `prompt.boot`). The retyped nodes are `system`, so an unqualified listing hides
+// them; ask for them with #5452's `includeSystemNodes` (0.59.0). A rule is in the boot-prompt family: only whoever manages its Agent or
 // App approves it, link lint applies to it, and a direct read shows its platform variables as written. Who may WRITE is unchanged: a
 // worker session still writes a rule and is still refused a source (worker sessions writing sources and compiling is PR B). The MCP
-// `nodeType` descriptions no longer list `task` or `compiled-boot-prompt`. (0.57.0 is #5077 F3a-2, merged first; 0.58.0 is left for #5452, the opt-in read, built in parallel.)
-// 0.60.0 — WIDENING (behaviour; the SDL changes in descriptions only) (#5453 PR B, Ask 5; Holger 2026-11-27, decision record
+// `nodeType` descriptions no longer list `task` or `compiled-boot-prompt`. (0.58.0 is #5404, merged first; 0.59.0 is left for #5452, the opt-in read, built in parallel.)
+// 0.61.0 — WIDENING (behaviour; the SDL changes in descriptions only) (#5453 PR B, Ask 5; Holger 2026-11-27, decision record
 // hrn:node:hadronmemory.com:hadron-dev-team-shared:decisions:2026-11-27-holger-rulings-to-bo-system-nodes-and-roles, section 4b; this
 // reverses cor:agt:040:11 and cor:agt:040:12 in part): a request bound to a WORKER SESSION now writes a boot prompt source
-// (`boot-prompt.source`, the bare `boot-prompt`) and a rule (`boot-prompt.rule`) wherever its holder may write the memory, on every door
+// (`prompt.boot.source`, the bare `boot-prompt`) and a rule (`prompt.boot.rule`) wherever its holder may write the memory, on every door
 // (create, update, delete, move, merge, restore, import, clone, replace, Git sync), with no grant. `BOOT_PROMPT_WORKER_SESSION_REFUSED`
 // is no longer returned by a WRITE; a session whose holder may not write the memory gets that memory's own refusal, as any caller does.
 // The edit grant (`bootprompt.source.edit`) is neither required nor spent; the action stays registered. A worker session also COMPILES
@@ -400,8 +412,8 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // a worker session approves a source, a rule or a compiled node only under a batch grant (`bootprompt.compile.approve`, where
 // `BOOT_PROMPT_WORKER_SESSION_REFUSED` is still the answer); what is served is the last approved revision. A client that treated the
 // write refusal as "ask a person to edit" can now let the session edit and compile, and ask the person to approve.
-// (0.59.0 is #5453 PR A, which this is stacked on.)
-export const HADRON_SERVER_VERSION = '0.60.0';
+// (0.60.0 is #5453 PR A, which this is stacked on.)
+export const HADRON_SERVER_VERSION = '0.61.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

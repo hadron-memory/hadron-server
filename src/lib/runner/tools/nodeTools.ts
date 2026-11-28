@@ -38,7 +38,7 @@ const WRITE_ARG_PROPERTIES = {
   content: { type: 'string', description: 'Markdown content.' },
   nodeType: {
     type: 'string',
-    description: 'Node classification (info, record, prompt, reference, …). Default: record.',
+    description: 'Node classification (info, record, system, reference, …). Default: record.',
   },
   data: { type: 'object', description: 'Structured key-value data.' },
   seq: {

@@ -129,22 +129,28 @@ describe('#5453 every row class ends as the table says', () => {
     };
     const legacyCompiled = { nodeType: 'compiled-boot-prompt', role: 'boot-prompt' };
     // The boot-prompt family, wherever it lives.
-    await add('compiled (Agent)', agentMem, 'boot:compiled', legacyCompiled, ['system', 'boot-prompt.compiled']);
-    await add('compiled (worker, install memory)', installMem, `boot:workers:${workerId}:compiled`, legacyCompiled, ['system', 'boot-prompt.compiled']);
-    await add('compiled with a dotted family role keeps being compiled', agentMem, 'boot:compiled-dotted', { nodeType: 'compiled-boot-prompt', role: 'boot-prompt.worker' }, ['system', 'boot-prompt.compiled']);
-    await add('compiled, soft-deleted', agentMem, 'boot:compiled-gone', { ...legacyCompiled, deletedAt: new Date() }, ['system', 'boot-prompt.compiled']);
-    await add('source (Agent)', agentMem, 'boot:source', { role: 'boot-prompt' }, ['system', 'boot-prompt.source']);
-    await add('source (worker, install memory)', installMem, `boot:workers:${workerId}:source`, { role: 'boot-prompt' }, ['system', 'boot-prompt.source']);
-    await add('source, soft-deleted', agentMem, 'boot:source-gone', { role: 'boot-prompt', deletedAt: new Date() }, ['system', 'boot-prompt.source']);
-    await add('source in an ordinary memory', knowledgeMem, 'drafts:prompt', { role: 'boot-prompt' }, ['system', 'boot-prompt.source']);
-    await add('source somebody typed keeps the type', agentMem, 'boot:typed-source', { role: 'boot-prompt', nodeType: 'prompt' }, ['prompt', 'boot-prompt.source']);
-    await add('rule', agentMem, 'boot:rules:core-channel', { role: 'boot-prompt-rule' }, ['system', 'boot-prompt.rule']);
-    await add('rule, soft-deleted', agentMem, 'boot:rules:gone', { role: 'boot-prompt-rule', deletedAt: new Date() }, ['system', 'boot-prompt.rule']);
-    await add('rule in an ordinary memory', knowledgeMem, 'rules:shared', { role: 'boot-prompt-rule' }, ['system', 'boot-prompt.rule']);
+    await add('compiled (Agent)', agentMem, 'boot:compiled', legacyCompiled, ['system', 'prompt.boot.compiled']);
+    await add('compiled (worker, install memory)', installMem, `boot:workers:${workerId}:compiled`, legacyCompiled, ['system', 'prompt.boot.compiled']);
+    await add('compiled with a dotted family role keeps being compiled', agentMem, 'boot:compiled-dotted', { nodeType: 'compiled-boot-prompt', role: 'boot-prompt.worker' }, ['system', 'prompt.boot.compiled']);
+    await add('compiled, soft-deleted', agentMem, 'boot:compiled-gone', { ...legacyCompiled, deletedAt: new Date() }, ['system', 'prompt.boot.compiled']);
+    await add('source (Agent)', agentMem, 'boot:source', { role: 'boot-prompt' }, ['system', 'prompt.boot.source']);
+    await add('source (worker, install memory)', installMem, `boot:workers:${workerId}:source`, { role: 'boot-prompt' }, ['system', 'prompt.boot.source']);
+    await add('source, soft-deleted', agentMem, 'boot:source-gone', { role: 'boot-prompt', deletedAt: new Date() }, ['system', 'prompt.boot.source']);
+    await add('source in an ordinary memory', knowledgeMem, 'drafts:prompt', { role: 'boot-prompt' }, ['system', 'prompt.boot.source']);
+    await add('source somebody typed keeps the type', agentMem, 'boot:typed-source', { role: 'boot-prompt', nodeType: 'prompt' }, ['system', 'prompt.boot.source']);
+    await add('the legacy dotted source leaf is a source', agentMem, 'boot:legacy-dotted-source', { role: 'boot-prompt.source' }, ['system', 'prompt.boot.source']);
+    await add('the legacy dotted rule leaf is a rule', agentMem, 'boot:rules:legacy-dotted', { role: 'boot-prompt.rule' }, ['system', 'prompt.boot.rule']);
+    await add('node type prompt with no role gets the bare role prompt and type system', agentMem, 'notes:typed-prompt', { nodeType: 'prompt' }, ['system', 'prompt']);
+    await add('node type prompt keeps the role it has', agentMem, 'notes:typed-prompt-role', { nodeType: 'prompt', role: 'spec.rule' }, ['system', 'spec.rule']);
+    await add('a bare prompt role already in place is left alone', agentMem, 'notes:bare-prompt', { nodeType: 'system', role: 'prompt' }, ['system', 'prompt']);
+    await add('a prompt.other role is left alone', agentMem, 'notes:prompt-other', { nodeType: 'info', role: 'prompt.other' }, ['info', 'prompt.other']);
+    await add('rule', agentMem, 'boot:rules:core-channel', { role: 'boot-prompt-rule' }, ['system', 'prompt.boot.rule']);
+    await add('rule, soft-deleted', agentMem, 'boot:rules:gone', { role: 'boot-prompt-rule', deletedAt: new Date() }, ['system', 'prompt.boot.rule']);
+    await add('rule in an ordinary memory', knowledgeMem, 'rules:shared', { role: 'boot-prompt-rule' }, ['system', 'prompt.boot.rule']);
     await add('a family sub-kind of its own keeps it', agentMem, 'boot:coordinator', { role: 'boot-prompt.coordinator' }, ['info', 'boot-prompt.coordinator']);
-    // The compiled ROLE on a node no compile wrote: a source before the change, and a source after it.
-    await add('forged compiled role on an info node', agentMem, 'boot:forged-info', { role: 'boot-prompt.compiled' }, ['system', 'boot-prompt.source']);
-    await add('forged compiled role on a system node', agentMem, 'boot:forged-system', { nodeType: 'system', role: 'boot-prompt.compiled' }, ['system', 'boot-prompt.source']);
+    // The compiled ROLE on a node no compile wrote: a source, never a compiled prompt.
+    await add('forged compiled role on an info node', agentMem, 'boot:forged-info', { role: 'prompt.boot.compiled' }, ['system', 'prompt.boot.source']);
+    await add('forged compiled role on a system node', agentMem, 'boot:forged-system', { nodeType: 'system', role: 'prompt.boot.compiled' }, ['system', 'prompt.boot.source']);
     // The chatbot script, by loc, in an Agent system memory and in an install memory.
     await add('conversation', agentMem, 'conversations:welcome', { nodeType: 'system' }, ['system', 'chatbot.conversation']);
     await add('conversation written info', agentMem, 'conversations:intake', {}, ['system', 'chatbot.conversation']);
@@ -174,7 +180,7 @@ describe('#5453 every row class ends as the table says', () => {
     // An encrypted Agent system memory: type, role and loc are plaintext columns, so its rows migrate like any other.
     const encMem = (await db.memory.create({ data: { id: generateId(), name: 'enc', urn: 'm5453-org:enc', organizationId: orgId, class: 'system', isEncrypted: true } as never })).id;
     await db.agent.create({ data: { id: generateId(), name: 'Enc', urn: 'm5453-org:enc-agent', organizationId: orgId, systemMemoryId: encMem } });
-    await add('source in an encrypted memory', encMem, 'boot:source', { role: 'boot-prompt', content: 'ciphertext-as-stored' }, ['system', 'boot-prompt.source']);
+    await add('source in an encrypted memory', encMem, 'boot:source', { role: 'boot-prompt', content: 'ciphertext-as-stored' }, ['system', 'prompt.boot.source']);
     await add('conversation in an encrypted memory', encMem, 'conversations:welcome', { content: 'ciphertext-as-stored' }, ['system', 'chatbot.conversation']);
 
     const contentBefore = new Map((await db.node.findMany({ select: { id: true, content: true, loc: true, memoryId: true, deletedAt: true, revSeq: true } })).map((n) => [n.id, n]));
@@ -216,7 +222,7 @@ describe('#5453 every row class ends as the table says', () => {
     const rev = await db.nodeRevision.create({ data: { nodeId: rule.id, memoryId: agentMem, loc: rule.loc, name: rule.name, content: 'older text', revNo: 0, tags: [], approvedAt: new Date(), approvedByInfo: 'w', approvalHash: 'c'.repeat(64) } as never });
     const before = await db.node.findUniqueOrThrow({ where: { id: rule.id }, select: { approvedRevNo: true, approvedAt: true, approvedBy: true, approvedByInfo: true, approvalHash: true } });
     await migrate();
-    expect(await kind(rule.id)).toEqual(['system', 'boot-prompt.rule']);
+    expect(await kind(rule.id)).toEqual(['system', 'prompt.boot.rule']);
     expect(await db.node.findUniqueOrThrow({ where: { id: rule.id }, select: { approvedRevNo: true, approvedAt: true, approvedBy: true, approvedByInfo: true, approvalHash: true } })).toEqual(before);
     expect((await db.nodeRevision.findUniqueOrThrow({ where: { id: rev.id } })).approvalHash).toBe('c'.repeat(64));
   });
@@ -231,7 +237,7 @@ describe('#5453 every row class ends as the table says', () => {
     expect(await db.nodeRevision.findUniqueOrThrow({ where: { id: rev.id } })).toEqual(rev);
     await resolvers.Mutation.restoreNodeRevision(null, { nodeRevRef: rev.id }, ctx as never);
     expect(await db.node.findUniqueOrThrow({ where: { id: source.id }, select: { nodeType: true, role: true, content: true } }))
-      .toEqual({ nodeType: 'system', role: 'boot-prompt.source', content: 'text of boot:source' });
+      .toEqual({ nodeType: 'system', role: 'prompt.boot.source', content: 'text of boot:source' });
   });
 });
 
@@ -264,12 +270,17 @@ describe('#5453 the chat engine reads by loc: roles and types on the script chan
 
 describe('#5453 what an old capture restores as (modernBootPromptKind)', () => {
   it.each([
-    [{ nodeType: 'compiled-boot-prompt', role: 'boot-prompt' }, { nodeType: 'system', role: 'boot-prompt.compiled' }],
-    [{ nodeType: 'compiled-boot-prompt', role: 'boot-prompt.worker' }, { nodeType: 'system', role: 'boot-prompt.compiled' }],
-    [{ nodeType: 'info', role: 'boot-prompt' }, { nodeType: 'system', role: 'boot-prompt.source' }],
-    [{ nodeType: 'info', role: 'boot-prompt-rule' }, { nodeType: 'system', role: 'boot-prompt.rule' }],
-    [{ nodeType: null, role: 'boot-prompt' }, { nodeType: null, role: 'boot-prompt.source' }],
-    [{ nodeType: 'system', role: 'boot-prompt.source' }, { nodeType: 'system', role: 'boot-prompt.source' }],
+    [{ nodeType: 'compiled-boot-prompt', role: 'boot-prompt' }, { nodeType: 'system', role: 'prompt.boot.compiled' }],
+    [{ nodeType: 'compiled-boot-prompt', role: 'boot-prompt.worker' }, { nodeType: 'system', role: 'prompt.boot.compiled' }],
+    [{ nodeType: 'info', role: 'boot-prompt' }, { nodeType: 'system', role: 'prompt.boot.source' }],
+    [{ nodeType: 'info', role: 'boot-prompt-rule' }, { nodeType: 'system', role: 'prompt.boot.rule' }],
+    [{ nodeType: null, role: 'boot-prompt' }, { nodeType: null, role: 'prompt.boot.source' }],
+    [{ nodeType: 'info', role: 'boot-prompt.rule' }, { nodeType: 'system', role: 'prompt.boot.rule' }],
+    [{ nodeType: 'info', role: 'boot-prompt.source' }, { nodeType: 'system', role: 'prompt.boot.source' }],
+    [{ nodeType: 'system', role: 'prompt' }, { nodeType: 'system', role: 'prompt' }],
+    [{ nodeType: 'system', role: 'prompt.other' }, { nodeType: 'system', role: 'prompt.other' }],
+    [{ nodeType: 'system', role: 'boot-prompt.compiled' }, { nodeType: 'system', role: 'prompt.boot.compiled' }],
+    [{ nodeType: 'system', role: 'prompt.boot.source' }, { nodeType: 'system', role: 'prompt.boot.source' }],
     [{ nodeType: 'info', role: 'notes' }, { nodeType: 'info', role: 'notes' }],
     [{ nodeType: 'info', role: null }, { nodeType: 'info', role: null }],
   ])('%j -> %j', (captured, want) => {
@@ -278,9 +289,9 @@ describe('#5453 what an old capture restores as (modernBootPromptKind)', () => {
 
   it('restorableNodeFields never hands back the retired type or the bare role', () => {
     const base = { name: 'n', alias: null, description: null, abstract: null, abstractOriginHash: null, content: 'c', tags: [], objectType: null, isLink: false, properties: null, data: null, seq: null, isRunnable: false, llmModel: null, aiAgent: null, authorshipKind: null, authoredByTask: null, authoredByRevision: null, authoredByHuman: null, authoredAt: null };
-    expect(restorableNodeFields({ ...base, nodeType: 'compiled-boot-prompt', role: 'boot-prompt' })).toMatchObject({ nodeType: 'system', role: 'boot-prompt.compiled' });
-    expect(restorableNodeFields({ ...base, nodeType: 'info', role: 'boot-prompt' })).toMatchObject({ nodeType: 'system', role: 'boot-prompt.source' });
-    expect(restorableNodeFields({ ...base, nodeType: 'info', role: 'boot-prompt-rule' })).toMatchObject({ nodeType: 'system', role: 'boot-prompt.rule' });
+    expect(restorableNodeFields({ ...base, nodeType: 'compiled-boot-prompt', role: 'boot-prompt' })).toMatchObject({ nodeType: 'system', role: 'prompt.boot.compiled' });
+    expect(restorableNodeFields({ ...base, nodeType: 'info', role: 'boot-prompt' })).toMatchObject({ nodeType: 'system', role: 'prompt.boot.source' });
+    expect(restorableNodeFields({ ...base, nodeType: 'info', role: 'boot-prompt-rule' })).toMatchObject({ nodeType: 'system', role: 'prompt.boot.rule' });
   });
 });
 
@@ -342,8 +353,8 @@ describe('#5453: a compiled prompt approved and signed before the migration is s
     await migrate();
     clearSignatureVerifyCache();
 
-    expect(await kind(node.id)).toEqual(['system', 'boot-prompt.compiled']);
-    expect(await kind(source.id)).toEqual(['system', 'boot-prompt.source']);
+    expect(await kind(node.id)).toEqual(['system', 'prompt.boot.compiled']);
+    expect(await kind(source.id)).toEqual(['system', 'prompt.boot.source']);
     // No re-approval, no re-signing, no new revision: every stored fact the serve reads is byte-for-byte what it was.
     expect(await evidence(node.id)).toEqual(before);
     expect({ bind: await serve('bind'), chat: await serve('chat'), run: await serve('run') }).toEqual(servedBefore);

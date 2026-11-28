@@ -281,8 +281,8 @@ const READ_DOORS: Door[] = [
   g('compiledPromptProvenance', 'query($r: ID!) { compiledPromptProvenance(nodeRef: $r, revNo: 1) { total } }', (t) => ({ r: node(t) }),
     { reach: (out) => out.trim() === '{"data":{"compiledPromptProvenance":null}}' }),
   g('assetDownloadUrl', 'query($r: ID!) { assetDownloadUrl(assetId: $r) { url filename } }', (t) => ({ r: t.assetId })),
-  g('automationReadGrants', 'query($a: String, $r: String) { automationReadGrants(appRef: $a, memoryRef: $r) { id } }', (t, w) => ({ a: w.appId, r: t.id }),
-    { reach: (out) => out.includes('"automationReadGrants":[') }),
+  // #5404: `automationReadGrants` left this table: the door is retired and refuses DOOR_RETIRED for the owner too, so it has no
+  // owner reach to compare against (the key's refusal is pinned with the other retired doors in WIDEN_DOORS).
   g('questionLogs', 'query($r: ID) { questionLogs(memoryRef: $r) { id name } }', (t) => ({ r: t.id })),
   // lists
   g('memories', '{ memories(limit: 200) { total items { id name } } }', () => ({}), false),
@@ -410,11 +410,13 @@ const WIDEN_DOORS: Array<[string, Refusal, (c: Caller, t: Target, w: World) => P
   ['GraphQL transferMemoryOwnership', 'MEMORY_NOT_FOUND', (c, t, w) => gql(c, 'mutation($m: ID!, $u: ID!) { transferMemoryOwnership(memoryRef: $m, userRef: $u) { __typename } }', { m: t.id, u: w.leo })],
   ['GraphQL cloneMemory', 'MEMORY_NOT_FOUND', (c, t, w) => gql(c, 'mutation($m: ID!, $u: String!) { cloneMemory(ref: $m, targetUrn: $u) { id } }', { m: t.id, u: `hrn:mem:${w.root}:stolen` })],
   ['GraphQL cloneNode', { outside: 'NODE_NOT_FOUND', inside: 'FORBIDDEN' }, (c, t, w) => gql(c, 'mutation($m: ID!, $u: String) { cloneNode(sourceRef: $m, targetUrn: $u) { id } }', { m: t.nodeId, u: `hrn:node:${w.space.urn}:stolen` })],
-  ['GraphQL setAppMemoryWriteGrant', 'FORBIDDEN', (c, t, w) => gql(c, 'mutation($m: String!, $p: String!) { setAppMemoryWriteGrant(appRef: $p, memoryRef: $m, prefix: "diary") { id } }', { m: t.id, p: w.appId })],
-  ['GraphQL setAutomationReadGrant', 'FORBIDDEN', (c, t, w) => gql(c, 'mutation($m: String!, $p: String!) { setAutomationReadGrant(appRef: $p, triggerKind: "SCHEDULE", triggerId: "x", memoryRef: $m) { id } }', { m: t.id, p: w.appId })],
+  // #5404: the three grant doors below are retired; they refuse DOOR_RETIRED (FORBIDDEN before) and still write nothing.
+  ['GraphQL setAppMemoryWriteGrant', 'DOOR_RETIRED', (c, t, w) => gql(c, 'mutation($m: String!, $p: String!) { setAppMemoryWriteGrant(appRef: $p, memoryRef: $m, prefix: "diary") { id } }', { m: t.id, p: w.appId })],
+  ['GraphQL setAutomationReadGrant', 'DOOR_RETIRED', (c, t, w) => gql(c, 'mutation($m: String!, $p: String!) { setAutomationReadGrant(appRef: $p, triggerKind: "SCHEDULE", triggerId: "x", memoryRef: $m) { id } }', { m: t.id, p: w.appId })],
+  ['GraphQL automationReadGrants', 'DOOR_RETIRED', (c, t, w) => gql(c, 'query($a: String, $r: String) { automationReadGrants(appRef: $a, memoryRef: $r) { id } }', { a: w.appId, r: t.id })],
   ['GraphQL setAssetPublicLink', 'UNAUTHENTICATED', (c, t) => gql(c, 'mutation($a: ID!) { setAssetPublicLink(assetRef: $a, enabled: true) { id } }', { a: t.assetId })],
   ['MCP hadron_set_asset_public_link', 'UNAUTHENTICATED', (c, t) => mcp(c, 'hadron_set_asset_public_link', { asset: t.assetId, enabled: true })],
-  ['MCP hadron_set_automation_read_grant', 'FORBIDDEN', (c, t, w) => mcp(c, 'hadron_set_automation_read_grant', { app: w.appId, triggerKind: 'SCHEDULE', triggerId: 'x', memory: t.id })],
+  ['MCP hadron_set_automation_read_grant', 'DOOR_RETIRED', (c, t, w) => mcp(c, 'hadron_set_automation_read_grant', { app: w.appId, triggerKind: 'SCHEDULE', triggerId: 'x', memory: t.id })],
 ];
 
 /** Everything that decides who reaches the memories. */
@@ -531,6 +533,7 @@ it('#5224: every GraphQL share and memory-member mutation is in the matrix', () 
  */
 const NOT_READ_DOORS: Record<string, string> = {
   installMemory: 'an install memory is system-class, never a person\'s personal or private memory',
+  automationReadGrants: '#5404: retired, refuses DOOR_RETIRED for every caller (pinned in WIDEN_DOORS); it reads nothing',
 };
 it('#5237: every GraphQL read door that names or returns a memory, node, asset, comment or revision is in the matrix', () => {
   const NAMES = /^(memoryRef|memoryRefs|memoryUrn|memoryId|memoryIds|memory|nodeRef|nodeRefs|nodeId|nodeRevRef|parentRef|targetRef|assetId|assetRef|commentRef)$/;

@@ -45,7 +45,7 @@ const codeOf = async (p: Promise<unknown>) => {
   }
 };
 const compiled = () => withCompileWrite(() => db.node.create({
-  data: { id: generateId(), memoryId: memory.id, loc: 'boot:compiled', name: 'Compiled', content: 'You are Basil.', nodeType: 'system', role: 'boot-prompt.compiled' },
+  data: { id: generateId(), memoryId: memory.id, loc: 'boot:compiled', name: 'Compiled', content: 'You are Basil.', nodeType: 'system', role: 'prompt.boot.compiled' },
 }));
 
 beforeEach(async () => {
@@ -71,7 +71,7 @@ describe('#5453: with the preflight off, the check on the locked row still refus
   it('updateNode: a plain node cannot be given the compiled role past the preflight either', async () => {
     const plain = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'n:plain', name: 'Plain', content: 'p', nodeType: 'system' } });
     pierce.skipAllowed = 1;
-    expect(await codeOf(resolvers.Mutation.updateNode(null, { input: { ref: plain.id, role: 'boot-prompt.compiled' } }, ctx()))).toBe('BOOT_PROMPT_COMPILED_WRITE');
+    expect(await codeOf(resolvers.Mutation.updateNode(null, { input: { ref: plain.id, role: 'prompt.boot.compiled' } }, ctx()))).toBe('BOOT_PROMPT_COMPILED_WRITE');
     expect(pierce.skipAllowed).toBe(0);
     expect(pierce.judged).toBeGreaterThan(0);
     expect((await db.node.findUniqueOrThrow({ where: { id: plain.id } })).role).toBeNull();

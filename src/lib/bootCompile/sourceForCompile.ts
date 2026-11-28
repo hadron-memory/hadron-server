@@ -45,7 +45,7 @@ export async function sourceForCompile(
     });
     // R83: tombstoned App sources count as absent even if their old role is invalid.
     if (!row || row.deletedAt) return null;
-    // #5453 Ask 3: a source by role. In the family, and neither compiled nor a rule; the bare `boot-prompt` a mirrored
+    // #5453 Ask 3: a source by role. A boot-prompt kind, neither compiled nor a rule; the bare `boot-prompt` a mirrored
     // source may still carry passes. The node type decides nothing.
     if (!isBootPromptSourceRole(row.role)) {
       throw new GraphQLError('The boot prompt source is invalid.', {

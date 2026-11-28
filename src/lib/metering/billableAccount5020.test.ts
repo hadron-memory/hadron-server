@@ -9,7 +9,7 @@
 import { Client } from 'pg';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
-import { cleanDb } from '../../test/helpers.js';
+import { cleanDb, createPriceRowForTest } from '../../test/helpers.js';
 import { mergeUsers } from '../../test/mergeConsent.js';
 import { generateId } from '../id.js';
 import { creditBalance, clearPriceCache, recordLlmUsage } from './index.js';
@@ -25,7 +25,7 @@ const mkApp = (slug: string, owner: { organizationId?: string; ownerUserId?: str
 const mkAgent = (slug: string, owner: { organizationId?: string; ownerUserId?: string }) =>
   db.agent.create({ data: { id: generateId(), name: slug, urn: `hrn:agent:b5020.test:${slug}`, ...owner } });
 const mkPrice = () =>
-  db.aiModelPrice.create({
+  createPriceRowForTest(db, {
     data: { id: generateId(), provider: 'anthropic', model: 'claude-b5020', tier: 1, inputMicroCentsPerMTok: 30_000_000n, outputMicroCentsPerMTok: 150_000_000n, effectiveAt: new Date('2026-01-01') },
   });
 

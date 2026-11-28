@@ -33,7 +33,7 @@ export type GrantReach = 'WORKER' | 'WORKER_OR_ROLE_AGENT' | 'NO_WORKER';
  * definition that names a key the registry does not provide is a compile error, and re-checked at validation because the
  * registry is code and definitions may arrive from anywhere a list can.
  */
-export const ISSUER_RULE_KEYS = ['APP_SCHEDULE_ADMIN', 'APP_WEBHOOK_ADMIN', 'APP_MANAGER', 'SECRET_READ_CLIENT', 'MEMORY_READ_APPROVER'] as const;
+export const ISSUER_RULE_KEYS = ['APP_SCHEDULE_ADMIN', 'APP_WEBHOOK_ADMIN', 'APP_MANAGER', 'SECRET_READ_CLIENT', 'MEMORY_READ_APPROVER', 'MEMORY_WRITE_APPROVER'] as const;
 export type IssuerRuleKey = (typeof ISSUER_RULE_KEYS)[number];
 
 export interface ActionDefinition {
@@ -147,11 +147,23 @@ export const PLATFORM_ACTIONS: readonly ActionDefinition[] = [
   //  (b) one or more memory ids (a single id or a list, never the wildcard): signed by whoever manages every named memory, so a grant
   //      naming memories of different managers cannot be signed by one person (one grant per manager).
   // Judged at every read, the giver's own read included (src/lib/grants/readGrant.ts). There is no `knowledge.read` (Holger: "is to
-  // unspecific"). The optional branch and one-automation parameters and `memory.write` come in S2 (#5404).
+  // unspecific"). The optional branch and one-automation parameters are #5412; `memory.write` is below (#5404).
   {
     name: 'memory.read', source: 'PLATFORM', tool: null, enforcement: 'SERVER', issuerRule: 'MEMORY_READ_APPROVER',
     parameters: [{ name: 'memory', type: 'memory-ref', refusesWildcard: true }],
     summaryTemplate: 'Let {app}, acting with no person behind it, read {memory}, read only',
+    reach: 'NO_WORKER', listParameters: ['memory'],
+  },
+  // #5404 (hrn:node:hadronmemory.com:specs:cor:acl:140:02, Holger 2026-11-27: "the grant should be called `memory.read` or `memory.write`";
+  // its approver, "Owner of each named memory"): let the App's userless runs create and edit nodes in the memories it names, under
+  // `prefix`. It replaces ruling 0083's unsigned App write grant, whose rows are deleted at deploy. `memory` is one memory id or a list,
+  // never the wildcard, and never the organization (there is no org-wide write form); `prefix` is the wildcard (the whole of every named
+  // memory) or one loc, allowed only when `memory` names exactly one. Signed by whoever manages every named memory (for a personal or
+  // private memory, its owner). Judged at every write (src/lib/grants/writeGrant.ts); held by the grant's own App only.
+  {
+    name: 'memory.write', source: 'PLATFORM', tool: null, enforcement: 'SERVER', issuerRule: 'MEMORY_WRITE_APPROVER',
+    parameters: [{ name: 'memory', type: 'memory-ref', refusesWildcard: true }, { name: 'prefix', type: 'loc-prefix', refusesWildcard: false }],
+    summaryTemplate: 'Let {app}, acting with no person behind it, create and edit nodes in {memory} under {prefix}',
     reach: 'NO_WORKER', listParameters: ['memory'],
   },
 ];

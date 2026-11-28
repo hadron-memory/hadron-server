@@ -91,7 +91,7 @@ const mk = (loc: string, extra: Record<string, unknown> = {}) =>
 /** The Agent has a boot-prompt source and its compiled prompt, as after a first compile. */
 async function compile(content = 'compiled v1') {
   await mk(SOURCE, { role: 'boot-prompt', content: 'source' });
-  return mk(COMPILED, { nodeType: 'system', role: 'boot-prompt.compiled', content });
+  return mk(COMPILED, { nodeType: 'system', role: 'prompt.boot.compiled', content });
 }
 const save = () => M.createRevision({}, { agentRef: agent.id }, adminCtx()) as Promise<{ revisionLoc: string }>;
 const restore = (revisionLoc: string) => M.restoreRevision({}, { agentRef: agent.id, revisionLoc }, adminCtx());
@@ -114,7 +114,7 @@ async function commitCompiledFixture() {
   const base = { memoryId: systemMemory.id, tags: [] };
   await db.$transaction([
     ...(hasSource ? [] : [db.node.create({ data: { ...base, id: generateId(), loc: SOURCE, name: 'coordinator', nodeType: 'info', role: 'boot-prompt', content: 'source' } as any })]),
-    db.node.create({ data: { ...base, id, loc: COMPILED, name: 'compiled', nodeType: 'system', role: 'boot-prompt.compiled', content: 'compiled while restoring' } as any }),
+    db.node.create({ data: { ...base, id, loc: COMPILED, name: 'compiled', nodeType: 'system', role: 'prompt.boot.compiled', content: 'compiled while restoring' } as any }),
     db.edge.create({ data: { id: generateId(), memoryId: systemMemory.id, loc: `${COMPILED}->prompts`, sourceId: id, targetId: target.id } as any }),
   ]);
   return { id };
@@ -123,7 +123,7 @@ async function commitCompiledFixture() {
 /** `where` names the statement by its own predicate (not by its position); `nth` counts the calls that match it. */
 type HookPoint = { model: 'node' | 'edge'; op: 'findMany' | 'updateMany'; nth: number; where?: (where: any) => boolean };
 /** The restore's read of the compiled rows: `role` is the compiled role itself (#5453; the node type before), not a `not` filter. */
-const readsCompiledRows = (where: any) => where?.role === 'boot-prompt.compiled';
+const readsCompiledRows = (where: any) => where?.role === 'prompt.boot.compiled';
 /**
  * A context whose database hands the restore's own transaction a client that runs `during` once, right after the
  * `at.nth` matching call of `at.model.at.op` in that transaction has run and before its result is returned.
@@ -188,7 +188,7 @@ describe('#4313: a compile that commits while a restore runs is left as it is', 
     await M.restoreRevision({}, { agentRef: agent.id, revisionLoc: rev.revisionLoc }, ctx);
     expect(state.fired, 'the compile must have committed inside the restore').toBe(true);
     const after = await node(COMPILED);
-    expect(after).toMatchObject({ id: made!.id, deletedAt: null, nodeType: 'system', role: 'boot-prompt.compiled', content: 'compiled while restoring' });
+    expect(after).toMatchObject({ id: made!.id, deletedAt: null, nodeType: 'system', role: 'prompt.boot.compiled', content: 'compiled while restoring' });
     expect(await db.edge.findMany({ where: { sourceId: made!.id }, select: { deletedAt: true } })).toEqual([{ deletedAt: null }]);
     expect((await node('prompts:hello:greet')).deletedAt).toBeNull(); // the restore itself still ran
   });
@@ -222,8 +222,8 @@ describe('#4313: a compile that commits while a restore runs is left as it is', 
     expect((state.seen as Array<{ loc: string }>).map((r) => r.loc)).not.toContain(COMPILED); // the hooked read did not hold it
     // …and the write loop then read the compile's row back under its lock and judged THAT row: the locked lookup
     // returned the compiled prompt at this address, which is the check that skipped the write.
-    expect(state.locked).toContainEqual({ id: made!.id, loc: COMPILED, nodeType: 'system', role: 'boot-prompt.compiled' });
-    expect(await node(COMPILED)).toMatchObject({ id: made!.id, deletedAt: null, nodeType: 'system', role: 'boot-prompt.compiled', content: 'compiled while restoring' });
+    expect(state.locked).toContainEqual({ id: made!.id, loc: COMPILED, nodeType: 'system', role: 'prompt.boot.compiled' });
+    expect(await node(COMPILED)).toMatchObject({ id: made!.id, deletedAt: null, nodeType: 'system', role: 'prompt.boot.compiled', content: 'compiled while restoring' });
     // The snapshot's edge from the ordinary node is not replayed onto the compiled prompt: it keeps its own edge only.
     const edges = await db.edge.findMany({ where: { sourceId: made!.id }, select: { loc: true, deletedAt: true } });
     expect(edges).toEqual([{ loc: `${COMPILED}->prompts`, deletedAt: null }]);

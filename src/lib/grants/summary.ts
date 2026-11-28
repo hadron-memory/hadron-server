@@ -139,6 +139,12 @@ export function renderGrantSummary(input: SummaryInput, fmt: SummaryFormatters =
     const entries: unknown[] = Array.isArray(value) ? value : [value];
     if (entries.length === 0) throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no value`);
     if (param.type === 'memory-ref') { resolved.set(name, memoryRefWords(name, value, entries, refs, fmt)); continue; }
+    // #5404 (`memory.write`'s prefix): the wildcard is the whole of every named memory, written as words; a loc is written as itself.
+    if (param.type === 'loc-prefix') {
+      if (Array.isArray(value) || typeof value !== 'string') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a list value`);
+      resolved.set(name, value === '*' ? 'any loc' : `the loc ${value} and below it`);
+      continue;
+    }
     const written: string[] = [];
     for (const entry of entries) {
       if (entry === undefined || entry === null || entry === '') throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no value`);

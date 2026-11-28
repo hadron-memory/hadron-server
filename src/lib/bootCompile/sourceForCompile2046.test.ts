@@ -44,7 +44,7 @@ describe('#2046 exact-address source selection (internal, no compile entry)', ()
     expect(await select({ kind: 'APP_AGENT', agentMemoryId: ownMemory, installMemoryId: state === 'no-install' ? null : installMemory })).toMatchObject({ id: agent.id });
   });
 
-  it.each([{ role: 'notes' }, { role: null }, { nodeType: 'system', role: 'boot-prompt.compiled' }, { role: 'boot-prompt.rule' }])('live invalid App occupant refuses without fallback (%j)', async (extra) => {
+  it.each([{ role: 'notes' }, { role: null }, { nodeType: 'system', role: 'prompt.boot.compiled' }, { role: 'prompt.boot.rule' }])('live invalid App occupant refuses without fallback (%j)', async (extra) => {
     await put(ownMemory, 'boot:source');
     await put(installMemory, 'boot:source', extra);
     await expect(select({ kind: 'APP_AGENT', agentMemoryId: ownMemory, installMemoryId: installMemory })).rejects.toMatchObject({ extensions: { code: 'BOOT_PROMPT_SOURCE_INVALID' } });
@@ -73,10 +73,10 @@ describe('#2046 exact-address source selection (internal, no compile entry)', ()
 
   it.each(['AGENT', 'WORKER'] as const)('a live compiled source is invalid for %s too', async (kind) => {
     if (kind === 'AGENT') {
-      await put(ownMemory, 'boot:source', { nodeType: 'system', role: 'boot-prompt.compiled' });
+      await put(ownMemory, 'boot:source', { nodeType: 'system', role: 'prompt.boot.compiled' });
       await expect(select({ kind, agentMemoryId: ownMemory })).rejects.toMatchObject({ extensions: { code: 'BOOT_PROMPT_SOURCE_INVALID' } });
     } else {
-      await put(installMemory, `boot:workers:${workerId}:source`, { nodeType: 'system', role: 'boot-prompt.compiled' });
+      await put(installMemory, `boot:workers:${workerId}:source`, { nodeType: 'system', role: 'prompt.boot.compiled' });
       await expect(select({ kind, workerId, installMemoryId: installMemory })).rejects.toMatchObject({ extensions: { code: 'BOOT_PROMPT_SOURCE_INVALID' } });
     }
   });

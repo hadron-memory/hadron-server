@@ -14,7 +14,7 @@
  *     code, the same text, the same extensions, nothing about boot prompts, and for a holder who cannot read
  *     the memory the same answer whether or not the node exists;
  *  3. the compile-only guard is untouched: a worker session is refused every generic write that produces,
- *     edits, re-roles or removes a `boot-prompt.compiled` node.
+ *     edits, re-roles or removes a `prompt.boot.compiled` node.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -30,9 +30,9 @@ import { DB_NOW, insertGrantUnguarded, raw, type World } from '../../../lib/gran
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
-const COMPILED = 'boot-prompt.compiled';
-const SOURCE = 'boot-prompt.source';
-const RULE = 'boot-prompt.rule';
+const COMPILED = 'prompt.boot.compiled';
+const SOURCE = 'prompt.boot.source';
+const RULE = 'prompt.boot.rule';
 const M = resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<any>>;
 
 let orgId: string;
@@ -95,7 +95,7 @@ const MEMORIES: Array<[string, () => { id: string; urn: string }]> = [
   ['the App\'s install memory', () => install],
 ];
 
-describe.each([['boot-prompt.source', SOURCE], ['boot-prompt.rule', RULE]])('#5453 Ask 5: a worker session writes a %s node with no grant', (_name, role) => {
+describe.each([['prompt.boot.source', SOURCE], ['prompt.boot.rule', RULE]])('#5453 Ask 5: a worker session writes a %s node with no grant', (_name, role) => {
   it.each(MEMORIES)('in %s it creates, edits, moves and deletes one; each revision records the worker; no grant exists', async (_where, memoryOf) => {
     const memory = memoryOf();
     const me = ctxOf(manager.id);
@@ -227,7 +227,7 @@ describe('#5453 Ask 5: a worker session whose holder may NOT write the memory is
     ['delete', (c) => M.deleteNode(null, { nodeRef: nodeUrn(memory, loc) }, c)],
   ];
 
-  it.each([['boot-prompt.source', SOURCE], ['boot-prompt.rule', RULE]])(
+  it.each([['prompt.boot.source', SOURCE], ['prompt.boot.rule', RULE]])(
     'a %s node, by a holder who reads the memory but may not write it, and by one who cannot read it: the person\'s own answer, door by door',
     async (_name, role) => {
       for (const memory of [plain, agentSys, install]) {

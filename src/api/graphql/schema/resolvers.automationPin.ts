@@ -17,7 +17,6 @@ import { canReadMemory } from '../../../mcp/access-control.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { requireOwnerOrOrgRole, type Context } from './resolvers.helpers.js';
 
-import { projectAutomationReadGrant } from './automationReadGrantProjection.js';
 import { isOwnedBy, requireOwnerRefOf, sameOwnerRef } from '../../../lib/owner.js';
 
 export type AutomationTriggerKind = 'SCHEDULE' | 'WEBHOOK' | 'MANUAL';
@@ -246,7 +245,7 @@ export const automationPinQueries = {
       // #2503: a legacy row (no stamped id, nothing to resolve by) whose stored URN is dead is UNADOPTED, with that
       // URN, which the row already stores, as the detail. Missing and unreadable are one answer (cor:api:140:03).
       // Only the ENTRY decides it: an error from deeper in the graph is not "the entry is gone" and rethrows.
-      if ((e instanceof NodeNotFoundError || e instanceof AutomationPinError) && !row.entryNodeId && !byStoredId && await entryUnavailable(ctx, row.entryNodeUrn)) return staleEntryApproval(row.entryNodeUrn, await liveReadGrants(ctx, input.triggerKind, row));
+      if ((e instanceof NodeNotFoundError || e instanceof AutomationPinError) && !row.entryNodeId && !byStoredId && await entryUnavailable(ctx, row.entryNodeUrn)) return staleEntryApproval(row.entryNodeUrn, await liveReadGrants());
       throw e;
     }
     let state: AdoptionState = stored.state;
@@ -261,28 +260,18 @@ export const automationPinQueries = {
         catch (e) { if (e instanceof NodeNotFoundError || e instanceof AutomationPinError) state = 'CHANGED'; else throw e; }
       }
     }
-    return { state, hash: pin.hash, summary: summarizeAutomation(pin, factsOf(input.triggerKind, row as never).facts), depth: approvalDepth(pin), readGrants: await liveReadGrants(ctx, input.triggerKind, row) };
+    return { state, hash: pin.hash, summary: summarizeAutomation(pin, factsOf(input.triggerKind, row as never).facts), depth: approvalDepth(pin), readGrants: await liveReadGrants() };
   },
 };
 
 /**
- * #2883 (ruling 0081 A): the live read grants this trigger holds, shown to the adopter, who is approving what the
- * automation may read. Revoked rows are not shown (they read nothing). The target's URN is named only when the adopter
- * can read that memory; otherwise it is null, as on every other grant projection. A MANUAL run holds none.
+ * #5404 (hrn:node:hadronmemory.com:specs:cor:acl:140:02; Holger 2026-11-27, "Drop them", "Retire all"): the per-automation read grant
+ * of #2883 is retired and its rows are deleted at deploy, so a trigger holds none. An App's runs read outside it through a signed
+ * `memory.read` grant, which is held by the App, not by one automation. The `readGrants` field stays, deprecated, until the doors'
+ * deprecation window ends, and is always empty.
  */
-async function liveReadGrants(ctx: Context, kind: AutomationTriggerRef['triggerKind'], row: { id: string; appId: string }) {
-  if (kind !== 'SCHEDULE' && kind !== 'WEBHOOK') return [];
-  const rows = await ctx.db.appAutomationReadGrant.findMany({
-    where: { appId: row.appId, triggerKind: kind, triggerId: row.id, revokedAt: null },
-    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-  });
-  const out = [];
-  for (const g of rows) {
-    const memory = await canReadMemory(ctx.db, ctx as never, g.memoryId)
-      ? await ctx.db.memory.findFirst({ where: { id: g.memoryId, deletedAt: null }, select: { urn: true } }) : null;
-    out.push(projectAutomationReadGrant(g, memory));
-  }
-  return out;
+async function liveReadGrants(): Promise<never[]> {
+  return [];
 }
 
 type Row = Awaited<ReturnType<typeof load>>;

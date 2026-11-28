@@ -1,8 +1,9 @@
 /** #3381: person-only single-row metadata read; conceal all unauthorized ids, including revoked grants. */
 import { ApolloServer } from '@apollo/server';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport } from '@modelcontextprotocol/client';
+import { McpServer } from '@modelcontextprotocol/server';
+import { withPositionalTool } from '../../../mcp/hadronMcpServer.js';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import { buildSchema } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
@@ -55,7 +56,7 @@ async function graphql(id: string, c: Context) {
   return JSON.parse(JSON.stringify(result.body.singleResult));
 }
 async function mcp(id: string, c: Context) {
-  const s = new McpServer({ name: '3381', version: '1' });
+  const s = withPositionalTool(new McpServer({ name: '3381', version: '1' }));
   registerAutomationTeamSnapshotGrantTools(s, { db: c.db, auth: c as never });
   const client = new Client({ name: '3381', version: '1' });
   const [a, b] = InMemoryTransport.createLinkedPair(); await s.connect(b); await client.connect(a);

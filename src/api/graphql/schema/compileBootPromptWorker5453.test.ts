@@ -33,9 +33,9 @@ import { resolvers } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
-const COMPILED = 'boot-prompt.compiled';
-const SOURCE = 'boot-prompt.source';
-const RULE = 'boot-prompt.rule';
+const COMPILED = 'prompt.boot.compiled';
+const SOURCE = 'prompt.boot.source';
+const RULE = 'prompt.boot.rule';
 const NOT_PERMITTED = 'BOOT_PROMPT_COMPILE_NOT_PERMITTED';
 const M = resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<any>>;
 

@@ -15,6 +15,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { getAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.js';
 import type { RunToolContext } from '../lib/runner/tools/types.js';
 import { testRunAgentId } from '../test/runAgent.js';
+import { activeMemoryReadGrant, activeMemoryWriteGrant } from '../test/appGrants5404.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../integrations/objectstore/index.js', () => ({ putObject: vi.fn(), deleteObject: vi.fn() }));
@@ -101,14 +102,17 @@ describe('#3278 userless run item admission', () => {
     expect(await canWriteToMemory(db, f.principal, f.publicMemory.id)).toBe(false);
     expect(await rejection(hadronCreateNode.execute(f.tool, { urn: urn(f.publicMemory, 'docs:no'), name: 'no' }))).not.toBeNull();
   });
-  it('CONTROL: a live automation read grant reads an unlinked memory, never widens discovery', async () => {
-    await M.setAutomationReadGrant({}, { appRef: f.app.id, triggerKind: 'SCHEDULE', triggerId: f.schedule.id, memoryRef: f.granted.id, prefix: 'docs' }, ctx(f.admin.id));
+  // #5404: the per-automation read grant (#2883) is retired; its replacement is a signed `memory.read` grant held by the App. Unlike
+  // the #2883 node-read arm it is a MEMORY-level reach (cor:acl:140:02), so the gate's own read answers true, without an item.
+  it('CONTROL: a signed memory.read grant reads an unlinked memory without an item', async () => {
+    expect(await rejection(hadronReadNode.execute(f.tool, { urn: urn(f.granted) }))).not.toBeNull();
+    await activeMemoryReadGrant(f.app.id, f.granted.id, { issuerUserId: f.admin.id });
     expect(await hadronReadNode.execute(f.tool, { urn: urn(f.granted) })).toMatchObject({ content: 'secret granted' });
-    expect(await canReadMemory(db, f.principal, f.granted.id)).toBe(false);
-    expect((await getMemoryAccess(db, f.principal)).has(f.granted.id)).toBe(false);
+    expect(await canReadMemory(db, f.principal, f.granted.id)).toBe(true);
+    expect(await canWriteToMemory(db, f.principal, f.granted.id)).toBe(false);
   });
-  it('CONTROL: explicit App write grant works without an item', async () => {
-    await M.setAppMemoryWriteGrant({}, { appRef: f.app.id, memoryRef: f.granted.id, prefix: 'docs', registerNodeUrn: 'hrn:node:example.com:register:authority' }, ctx(f.admin.id));
+  it('CONTROL: a signed memory.write grant works without an item (#5404, replaces the App write grant)', async () => {
+    await activeMemoryWriteGrant(f.app.id, f.granted.id, { issuerUserId: f.admin.id, prefix: 'docs' });
     expect(await hadronCreateNode.execute(f.tool, { urn: urn(f.granted, 'docs:new'), name: 'new', content: 'granted write' })).toMatchObject({ created: true });
     expect(await db.node.findUnique({ where: { loc_memoryId: { memoryId: f.granted.id, loc: 'docs:new' } } })).toMatchObject({ content: 'granted write' });
   });

@@ -57,6 +57,10 @@ import { ensurePeriodGrant, periodGrantDue } from '../../../lib/metering/periodG
 import { safeErrorCode } from '../../../lib/safeErrorCode.js';
 import type { CreditLedgerEntry, AiModelPrice } from '../../../generated/prisma/index.js';
 
+/** #5213: the price-row trigger's refusal of a past-dated row (SQLSTATE 23514), as the query engine renders a model write's error. */
+const PAST_DATED_PRICE_REFUSAL = /PostgresError \{ code: "23514", message: "Price rows are never dated in the past/;
+const isPastDatedPriceRefusal = (err: unknown) => err instanceof Error && PAST_DATED_PRICE_REFUSAL.test(err.message);
+
 const badInput = (message: string) =>
   new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
 
@@ -462,6 +466,13 @@ export const meteringMutations = {
       if ((err as { code?: string }).code === 'P2002') {
         throw badInput(
           `A price for ${provider}/${model} tier ${tier} at ${effectiveAt.toISOString()} already exists — post a new effectiveAt.`,
+        );
+      }
+      if (isPastDatedPriceRefusal(err)) {
+        // Only a database clock ahead of this process's by more than the lead gets here: the row is dated in the past by the
+        // database's own clock. Nothing was written; an explicit, later effectiveAt is the way round.
+        throw badInput(
+          `effectiveAt ${effectiveAt.toISOString()} is already in the past by the database's clock: a price is never dated in the past. Pass an effectiveAt further ahead.`,
         );
       }
       throw err;

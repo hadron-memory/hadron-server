@@ -12,6 +12,7 @@
  * writes at owner level through it. Interactive human-through-App identity is out of scope: a principal with a
  * userId and no run client keeps the person's own standing (established behavior), never the App's.
  */
+import { activeMemoryWriteGrant } from '../../../test/appGrants5404.js';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
@@ -306,7 +307,8 @@ describe('the write doors: generic GraphQL, MCP and the run tool path share the 
 describe('the real run principal: runContext, not a synthesized one (blind review F2)', () => {
   /** A userless run of `appId` with the principal `runContext` builds, optionally holding the write grant on `vault`. */
   async function runOf(appId: string, grant: boolean) {
-    if (grant) await db.appMemoryWriteGrant.create({ data: { appId, memoryId, prefix: 'vault', grantedBy: user.owner! } });
+    // #5404: the App's write grant is a signed `memory.write` grant (ruling 0083's unsigned row is retired).
+    if (grant) await activeMemoryWriteGrant(appId, memoryId, { issuerUserId: user.owner!, prefix: 'vault' });
     const run = await db.appRun.create({
       data: {
         id: generateId(), organizationId: org.id, appId, agentId: await testRunAgentId(db, org.id, appId), triggerKind: 'MANUAL',
@@ -509,7 +511,7 @@ describe('the live headless path: hadron_update_node under the real run principa
 
   /** A userless SCHEDULE run of `runApp`, with the write grant on `vault`, editing `loc` in `target`'s team space. */
   async function liveRun(runApp: string, target: { id: string; urn: string }, loc: string, grant = true): Promise<{ code: string; message: string }> {
-    if (grant) await db.appMemoryWriteGrant.create({ data: { appId: runApp, memoryId: target.id, prefix: 'vault', grantedBy: user.owner! } });
+    if (grant) await activeMemoryWriteGrant(runApp, target.id, { issuerUserId: user.owner!, prefix: 'vault' });
     const schedule = await db.agentSchedule.create({
       data: { id: generateId(), organizationId: org.id, appId: runApp, name: 'S', cron: '* * * * *', entryNodeUrn: ENTRY() },
     });

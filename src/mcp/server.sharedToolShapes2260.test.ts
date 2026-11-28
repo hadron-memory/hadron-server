@@ -18,7 +18,11 @@
  * #4967 amended exactly one (hadron_update_node), whose abstractStillAccurate / appendContent / prependContent text states
  * the join-under-lock concurrency and that an append is not idempotent.
  * #5408 amended exactly one (hadron_get_instructions): its stale-mapping sentence now states the phrase arm, and its
- * phrase/eventCode bounds are interpolated from MAX_QUERY_CHARS / MAX_ATOM_LEN (1 to N, blank refused).
+ * phrase/eventCode bounds are interpolated from MAX_QUERY_CHARS / MAX_ATOM_LEN (1 to N, blank refused). The SDK 2.x upgrade
+ * (#2605 step 1, @modelcontextprotocol/server 2.4.0) amended EVERY entry, for two reasons only, measured by diffing
+ * `tools/list` under 1.32.0 and 2.4.0 for the same principal: each tool's `inputSchema.$schema` is now JSON Schema 2020-12
+ * (was draft-07), and the tool-level `execution: { taskSupport: 'forbidden' }` is no longer emitted. Names, order,
+ * descriptions, properties, `required` and `additionalProperties` are unchanged.
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -26,8 +30,8 @@ import v8 from 'node:v8';
 import vm from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport } from '@modelcontextprotocol/client';
 import { createMcpServerInstance } from './server.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
@@ -151,6 +155,10 @@ describe('#2260 per-session state stays per-session', () => {
       }
     }
     expect(unshared, 'fields rebuilt per instance (keep any that depend on session state inline, and list them in the PR)').toEqual([]);
+    // #2605 (SDK 2.x): the `z.object` wrapping each shape is shared too (objectSchemaFor's cache, ./hadronMcpServer.ts),
+    // not rebuilt per tool per instance.
+    const unsharedObjects = names.filter((n) => regB[n].inputSchema !== regA[n].inputSchema);
+    expect(unsharedObjects, 'object schemas rebuilt per instance').toEqual([]);
 
     // Snapshot the whole shared graph (JSON Schema covers nested definitions, defaults and bounds), drive both
     // instances through registration + real invocations, and compare again.

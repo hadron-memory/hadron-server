@@ -199,7 +199,7 @@ describe('#2048 S11a scope and audience', () => {
     await target();
     const plain = await db.node.create({ data: { memoryId, loc: 'plain', name: 'plain', content: '{{> part signed}} {{> absent}}' } });
     expect(await page(plain.id)).toEqual({ items: [], total: 0, nextCursor: null });
-    const compiled = await db.node.create({ data: { memoryId, loc: 'compiled', name: 'compiled', content: '{{> part signed}}', role: 'boot-prompt.compiled', nodeType: 'system' } });
+    const compiled = await db.node.create({ data: { memoryId, loc: 'compiled', name: 'compiled', content: '{{> part signed}}', role: 'prompt.boot.compiled', nodeType: 'system' } });
     const result = await execute(`query($ref: ID!) { node(ref: $ref, raw: true) { lintWarnings { total } } }`, { ref: compiled.id });
     expect(result.errors).toBeUndefined();
     expect((result.data?.node as any).lintWarnings).toBeNull();
@@ -367,7 +367,7 @@ describe('#2048 S11b transport and ambiguity controls', () => {
     const root = await source('no tags');
     const agent = await db.agent.findFirstOrThrow({ where: { systemMemoryId: memoryId } });
     const memory = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
-    const compiled = await withCompileWrite(() => db.node.create({ data: { memoryId, loc: 'boot:compiled', name: 'compiled', role: 'boot-prompt.compiled', nodeType: 'system', content: 'expanded' } }));
+    const compiled = await withCompileWrite(() => db.node.create({ data: { memoryId, loc: 'boot:compiled', name: 'compiled', role: 'prompt.boot.compiled', nodeType: 'system', content: 'expanded' } }));
     await db.compiledPromptRevision.create({ data: { compiledNodeId: compiled.id, compiledRevNo: 1, targetKind: 'AGENT', targetAgentId: agent.id,
       contentHash: sha256Hex('expanded'), occurrenceCount: 1, provenance: { version: 1, occurrences: [{ order: 0, depth: 0, parent: null, kind: 'source', nodeId: root.id, revNo: 1,
         hash: sha256Hex('no tags'), selection: { rev: null, approved: false, signed: false } }] } } });

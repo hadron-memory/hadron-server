@@ -65,7 +65,7 @@ describe('git sync and boot prompts (#2043)', () => {
       id: generateId(), memoryId: graph.id, loc: 'compiled', name: 'Compiled', content: 'compiled text',
       role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE,
     } }));
-    mirror('compiled', `id: ${c.id}\nname: Hijacked\nrole: boot-prompt.source\ntype: info`, 'forged text');
+    mirror('compiled', `id: ${c.id}\nname: Hijacked\nrole: prompt.boot.source\ntype: info`, 'forged text');
     const result = await syncGraphFromGithub(graph);
     expect(result.error).toBeUndefined();
     expect(await db.node.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({
@@ -74,7 +74,7 @@ describe('git sync and boot prompts (#2043)', () => {
   });
 
   it.each([
-    ['the compiled role', 'role: boot-prompt.compiled\ntype: system'],
+    ['the compiled role', 'role: prompt.boot.compiled\ntype: system'],
     ['the retired node type', 'role: boot-prompt\ntype: compiled-boot-prompt'],
   ])('#5453: a file that declares %s creates no node (only a compile writes a compiled prompt)', async (_name, frontmatter) => {
     mirror('forged', `name: Forged\n${frontmatter}`, 'forged compiled text');
@@ -89,15 +89,15 @@ describe('git sync and boot prompts (#2043)', () => {
     expect(await db.node.findFirstOrThrow({ where: { memoryId: graph.id, loc: 'boot-source' } })).toMatchObject({ role: 'boot-prompt' });
   });
 
-  it('#5453 PR A: a worker session\'s sync writes a rule (boot-prompt.rule), as it wrote a boot-prompt-rule one', async () => {
+  it('#5453 PR A: a worker session\'s sync writes a rule (prompt.boot.rule), as it wrote a boot-prompt-rule one', async () => {
     const app = await db.app.create({ data: { id: generateId(), name: 'App', urn: 'test-org:app', organizationId: graph.organizationId! } });
     const agent = await db.agent.create({ data: { id: generateId(), name: 'Agent', urn: 'test-org:agent', organizationId: graph.organizationId! } });
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
     const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
-    mirror('rule', 'name: Rule\nrole: boot-prompt.rule\ntype: system', 'Post in the channel.');
+    mirror('rule', 'name: Rule\nrole: prompt.boot.rule\ntype: system', 'Post in the channel.');
     const result = await runAsActor({ workerId: worker.id, agentId: null }, () => syncGraphFromGithub(graph));
     expect(result.error).toBeUndefined();
-    expect(await db.node.findFirstOrThrow({ where: { memoryId: graph.id, loc: 'rule' } })).toMatchObject({ role: 'boot-prompt.rule' });
+    expect(await db.node.findFirstOrThrow({ where: { memoryId: graph.id, loc: 'rule' } })).toMatchObject({ role: 'prompt.boot.rule' });
   });
 
   it('a worker session\'s sync that writes a boot-prompt node is admitted (#5453 Ask 5; refused before)', async () => {

@@ -55,9 +55,9 @@ afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
 describe('#5453 Ask 5: a worker session\'s Git sync and boot prompts', () => {
   it.each([
-    ['the source leaf', 'role: boot-prompt.source\ntype: system', 'boot-prompt.source'],
+    ['the source leaf', 'role: prompt.boot.source\ntype: system', 'prompt.boot.source'],
     ['the bare legacy role', 'role: boot-prompt', 'boot-prompt'],
-    ['a rule', 'role: boot-prompt.rule\ntype: system', 'boot-prompt.rule'],
+    ['a rule', 'role: prompt.boot.rule\ntype: system', 'prompt.boot.rule'],
   ])('it creates a node that declares %s', async (_name, frontmatter, role) => {
     mirror('source', `name: Source\n${frontmatter}`, 'You are a worker.');
     expect((await syncAsWorker()).error).toBeUndefined();
@@ -67,14 +67,14 @@ describe('#5453 Ask 5: a worker session\'s Git sync and boot prompts', () => {
   });
 
   it('it changes the text of an existing source', async () => {
-    const src = await db.node.create({ data: { id: generateId(), memoryId: graph.id, loc: 'source', name: 'Source', content: 'old text', role: 'boot-prompt.source', nodeType: 'system', ownerRepo: 'test/repo' } });
-    mirror('source', `id: ${src.id}\nname: Source\nrole: boot-prompt.source\ntype: system`, 'new text from the repository');
+    const src = await db.node.create({ data: { id: generateId(), memoryId: graph.id, loc: 'source', name: 'Source', content: 'old text', role: 'prompt.boot.source', nodeType: 'system', ownerRepo: 'test/repo' } });
+    mirror('source', `id: ${src.id}\nname: Source\nrole: prompt.boot.source\ntype: system`, 'new text from the repository');
     expect((await syncAsWorker()).error).toBeUndefined();
     expect((await db.node.findUniqueOrThrow({ where: { id: src.id } })).content).toContain('new text from the repository');
   });
 
   it('it prunes a source whose file is gone, as the server\'s own sync does', async () => {
-    const src = await db.node.create({ data: { id: generateId(), memoryId: graph.id, loc: 'boot-source', name: 'Src', content: 'x', role: 'boot-prompt.source', nodeType: 'system', ownerRepo: 'test/repo' } });
+    const src = await db.node.create({ data: { id: generateId(), memoryId: graph.id, loc: 'boot-source', name: 'Src', content: 'x', role: 'prompt.boot.source', nodeType: 'system', ownerRepo: 'test/repo' } });
     mirror('other', 'name: Other', 'present');
     expect((await syncAsWorker()).error).toBeUndefined();
     expect(await db.node.findUnique({ where: { id: src.id } })).toBeNull();
@@ -85,8 +85,8 @@ describe('#5453 Ask 5: a worker session\'s Git sync and boot prompts', () => {
       id: generateId(), memoryId: graph.id, loc: 'compiled', name: 'Compiled', content: 'compiled text',
       role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE, ownerRepo: 'test/repo',
     } }));
-    mirror('compiled', `id: ${c.id}\nname: Hijacked\nrole: boot-prompt.source\ntype: info`, 'forged text');
-    mirror('forged', 'name: Forged\nrole: boot-prompt.compiled\ntype: system', 'forged compiled text');
+    mirror('compiled', `id: ${c.id}\nname: Hijacked\nrole: prompt.boot.source\ntype: info`, 'forged text');
+    mirror('forged', 'name: Forged\nrole: prompt.boot.compiled\ntype: system', 'forged compiled text');
     expect((await syncAsWorker()).error).toBeUndefined();
     expect(await db.node.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({
       name: 'Compiled', content: 'compiled text', nodeType: BOOT_PROMPT_NODE_TYPE, role: BOOT_PROMPT_COMPILED_ROLE,

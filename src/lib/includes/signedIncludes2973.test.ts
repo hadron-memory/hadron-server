@@ -223,7 +223,7 @@ describe('#2973 PR3 selection on reads and compile', () => {
     await source();
     vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'false');
     const plan = await compile();
-    const compiled = await withCompileWrite(() => db.node.create({ data: { memoryId, loc: 'boot:compiled', name: 'Compiled', content: plan.text, role: 'boot-prompt.compiled', nodeType: 'system' } }));
+    const compiled = await withCompileWrite(() => db.node.create({ data: { memoryId, loc: 'boot:compiled', name: 'Compiled', content: plan.text, role: 'prompt.boot.compiled', nodeType: 'system' } }));
     await db.compiledPromptRevision.create({ data: { compiledNodeId: compiled.id, compiledRevNo: 1, targetKind: 'AGENT', targetAgentId: agentId,
       contentHash: sha256Hex(plan.text), occurrenceCount: plan.occurrences.length, provenance: { version: 1, occurrences: plan.occurrences } as never } });
     for (const flag of ['false', 'true', 'false']) {

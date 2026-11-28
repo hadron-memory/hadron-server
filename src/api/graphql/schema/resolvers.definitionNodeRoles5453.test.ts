@@ -1,9 +1,9 @@
 /**
- * #5453 PR A (Ask 2) — the compile-only write guard, keyed on the ROLE `boot-prompt.compiled`.
+ * #5453 PR A (Ask 2) — the compile-only write guard, keyed on the ROLE `prompt.boot.compiled`.
  *
  * Until #5453 a compiled boot prompt was told apart by a node type of its own. The mark is the role now, and
  * the guard keeps its strength: outside a compile, no generic door produces, edits, re-roles, retypes, moves,
- * deletes, restores over or copies a `boot-prompt.compiled` node. One pin per door, each on a node that is
+ * deletes, restores over or copies a `prompt.boot.compiled` node. One pin per door, each on a node that is
  * type `system` (so the old type-keyed guard cannot be what refuses it).
  *
  * The same file pinned what PR A must NOT change: guard B's reach (a worker session wrote a rule and was refused a
@@ -25,9 +25,9 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
 }));
 
-const COMPILED = 'boot-prompt.compiled';
-const SOURCE = 'boot-prompt.source';
-const RULE = 'boot-prompt.rule';
+const COMPILED = 'prompt.boot.compiled';
+const SOURCE = 'prompt.boot.source';
+const RULE = 'prompt.boot.rule';
 
 let admin: { id: string };
 let orgId: string;
@@ -43,7 +43,7 @@ const codeOf = async (p: Promise<unknown>) => {
 const mk = (memoryId: string, loc: string, extra: Record<string, unknown> = {}) => db.node.create({
   data: { id: generateId(), memoryId, loc, name: loc, content: 'You are Basil.', ...extra },
 });
-/** A compiled prompt as #5453 stores it: type `system`, role `boot-prompt.compiled`. */
+/** A compiled prompt as #5453 stores it: type `system`, role `prompt.boot.compiled`. */
 const compiled = (memoryId = memory.id, loc = 'boot:compiled') =>
   withCompileWrite(() => mk(memoryId, loc, { nodeType: 'system', role: COMPILED }));
 const snapshot = async (id: string) => ({
@@ -260,7 +260,7 @@ describe('#5453 the database backstop', () => {
 });
 
 describe('#5453 PR B (Ask 5): guard B is gone. PR A kept its reach (a boot prompt itself, never a rule); a worker session now writes both', () => {
-  it('a worker session creates, edits, moves and deletes a boot-prompt.rule node, as it did a boot-prompt-rule one', async () => {
+  it('a worker session creates, edits, moves and deletes a prompt.boot.rule node, as it did a boot-prompt-rule one', async () => {
     const ok = (fn: () => Promise<unknown>) => asWorker(() => codeOf(fn()));
     expect(await ok(() => resolvers.Mutation.createNode(null, { input: { memoryRef: memory.id, loc: 'boot:rules:new', name: 'New', nodeType: 'system', role: RULE, content: 'a rule' } }, ctx()))).toBe('NO_ERROR');
     const rule = await db.node.findFirstOrThrow({ where: { memoryId: memory.id, loc: 'boot:rules:new' } });

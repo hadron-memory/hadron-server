@@ -131,7 +131,7 @@ describe('#1769 the caller-session gate itself (probe tool, not a governed door)
   const probe = async (shape: Record<string, z.ZodTypeAny>, args: Record<string, unknown>) => {
     const instance = createMcpServerInstance({ userId, roles: ['ADMIN'] }, () => undefined, null, {});
     let seen: Record<string, unknown> | undefined;
-    (instance as unknown as { tool: (...a: unknown[]) => unknown }).tool('hadron_probe_1769', shape, async (input: Record<string, unknown>) => {
+    (instance as unknown as { tool: (...a: unknown[]) => unknown }).tool('hadron_probe_1769', 'Probe for the caller-session gate.', shape, async (input: Record<string, unknown>) => {
       seen = input;
       return { content: [{ type: 'text' as const, text: 'ok' }] };
     });

@@ -104,7 +104,7 @@ describe('a worker session\'s compile: no batch grant is read (#5453 Ask 5; was 
   // not the CONFLICT the write step would raise later.
   it('#5453: a grant naming a node at the compiled address that is not compiled by role admits no compile', async () => {
     await source(installId, `boot:workers:${workerId}:source`, 'v1');
-    const squat = await db.node.create({ data: { id: generateId(), memoryId: installId, loc: `boot:workers:${workerId}:compiled`, name: 'Squat', content: 'old', nodeType: BOOT_PROMPT_NODE_TYPE, role: 'boot-prompt.source' } });
+    const squat = await db.node.create({ data: { id: generateId(), memoryId: installId, loc: `boot:workers:${workerId}:compiled`, name: 'Squat', content: 'old', nodeType: BOOT_PROMPT_NODE_TYPE, role: 'prompt.boot.source' } });
     await grant(squat.id);
     const before = await snapshot();
     expect(await codeOf(asWorker(() => M.compileWorkerBootPrompt(null, { workerRef: workerId }, ctx())))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
