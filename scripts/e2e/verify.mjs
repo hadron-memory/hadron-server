@@ -62,8 +62,7 @@ for (const root of ['e2e-alpha', 'e2e-beta']) {
 }
 console.log('Authenticated fixture journeys PASS (browser rendering checked independently by QA)');
 
-const { Client } = await import('@modelcontextprotocol/client');
-const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/client');
+const { Client, StreamableHTTPClientTransport } = await import('@modelcontextprotocol/client');
 for (const principal of ['alpha-admin', 'multi-app', 'e2e-alpha:team']) {
   const client = new Client({ name: 'e2e-fixture-check', version: '1.0.0' });
   const transport = new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {

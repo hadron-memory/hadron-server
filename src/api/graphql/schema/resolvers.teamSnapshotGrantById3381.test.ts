@@ -1,7 +1,6 @@
 /** #3381: person-only single-row metadata read; conceal all unauthorized ids, including revoked grants. */
 import { ApolloServer } from '@apollo/server';
-import { Client } from '@modelcontextprotocol/client';
-import { InMemoryTransport } from '@modelcontextprotocol/client';
+import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { McpServer } from '@modelcontextprotocol/server';
 import { withPositionalTool } from '../../../mcp/hadronMcpServer.js';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest';

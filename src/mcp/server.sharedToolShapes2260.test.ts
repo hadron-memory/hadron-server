@@ -30,9 +30,9 @@ import v8 from 'node:v8';
 import vm from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { Client } from '@modelcontextprotocol/client';
-import { InMemoryTransport } from '@modelcontextprotocol/client';
+import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { createMcpServerInstance } from './server.js';
+import type { HadronMcpServer } from './hadronMcpServer.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
@@ -101,6 +101,71 @@ describe('#2260 wire surface is unchanged', () => {
       expect(user).not.toContain(t);
       expect(app).not.toContain(t);
     }
+  });
+});
+
+describe('#5474: the two SDK 2.x tool-surface deltas, pinned structurally', () => {
+  // The golden above hashes each tool whole, so a regenerate-and-commit would accept any third change along with these
+  // two. These name the two the SDK 2.x upgrade made on purpose (#4630), for every principal kind.
+  // Read from the `tools/list` message the server sent, serialized as JSON the way the HTTP transport sends it, not from
+  // the client's parsed result: in memory every tool object holds an `execution` key whose value is undefined, which
+  // JSON drops, so only the serialized message shows what a client on the wire receives.
+  async function wireTools(auth: Record<string, unknown>): Promise<Array<Record<string, any>>> {
+    const server = build(auth);
+    const client = new Client({ name: 'wire-5474', version: '1' });
+    const [local, remote] = InMemoryTransport.createLinkedPair();
+    await server.connect(remote);
+    await client.connect(local);
+    const received: unknown[] = [];
+    const deliver = local.onmessage!;
+    local.onmessage = (message, extra) => { received.push(JSON.parse(JSON.stringify(message))); deliver(message, extra); };
+    try {
+      await client.listTools();
+    } finally {
+      await client.close();
+      await server.close();
+    }
+    const listed = received.find((m) => Array.isArray((m as { result?: { tools?: unknown } }).result?.tools)) as { result: { tools: Array<Record<string, any>> } } | undefined;
+    if (!listed) throw new Error('no tools/list result was received');
+    return listed.result.tools;
+  }
+
+  it('advertises every tool input schema as JSON Schema 2020-12 and no tool carries `execution`', async () => {
+    for (const [name, v] of Object.entries(VARIANTS)) {
+      const tools = await wireTools(v.auth);
+      expect(tools.length, `${name}: tools listed`).toBeGreaterThan(50);
+      const wrongDialect = tools.filter((t) => t.inputSchema.$schema !== 'https://json-schema.org/draft/2020-12/schema').map((t) => t.name);
+      expect(wrongDialect, `${name}: tools whose inputSchema.$schema is not 2020-12`).toEqual([]);
+      const withExecution = tools.filter((t) => 'execution' in t).map((t) => t.name);
+      expect(withExecution, `${name}: tools that carry execution`).toEqual([]);
+    }
+  });
+});
+
+describe('#5474: an argument a tool does not declare never reaches its handler', () => {
+  // Through the real registration gate (createMcpServerInstance's `tool`), not a bare SDK server: the gate replaces the
+  // shape (the added `session` field) and the handler, so this is the path every Hadron tool takes. The tool and its
+  // handler are this test's own, so the handler can record exactly what it was given.
+  it('strips an unknown argument key before the handler runs', async () => {
+    // createMcpServerInstance is typed as the SDK server; the gate installs `tool` on it (see ./hadronMcpServer.ts).
+    const server = build(VARIANTS.user.auth) as HadronMcpServer;
+    const seen: unknown[] = [];
+    server.tool('qa_record_input_5474', 'Records its input (test only).', { a: z.string() }, async (args) => {
+      seen.push(args);
+      return { content: [{ type: 'text', text: 'ok' }] };
+    });
+    const client = new Client({ name: 'strict-5474', version: '1' });
+    const [local, remote] = InMemoryTransport.createLinkedPair();
+    await server.connect(remote);
+    await client.connect(local);
+    try {
+      const result = await client.callTool({ name: 'qa_record_input_5474', arguments: { a: 'x', notDeclared: 'y' } });
+      expect(result.isError ?? false).toBe(false);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+    expect(seen).toEqual([{ a: 'x' }]);
   });
 });
 
