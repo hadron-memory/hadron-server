@@ -9,8 +9,10 @@ import { lockAppInstallation } from '../../../lib/appInstallations.js';
  * address keys, then the S6 writer. Inside it, in order:
  *
  *  1. the OWNER is re-read and the caller's authority decided on the live
- *     context. A caller who may not compile, a worker session, and a target
- *     that does not exist all answer the same `FORBIDDEN`;
+ *     context. A caller who may not compile and a target that does not exist
+ *     answer the same refusal. For a person the authority is managing the
+ *     Agent or the App; for a worker session it is the write gate of the memory
+ *     that holds the compiled node (#5453 Ask 5, {@link assertSessionMayWrite});
  *  2. only a caller who passed that gate learns the target is retired;
  *  3. the source is selected by exact address, the assembler is re-run under
  *     the locks (read-only), then the compiled node, its provenance row, its
@@ -19,12 +21,19 @@ import { lockAppInstallation } from '../../../lib/appInstallations.js';
  *
  * It never approves or signs (the API reports approvalIssued: false); the revision it writes is not one that
  * has been approved, so serving keeps the last approved one until a manager approves.
+ *
+ * A WORKER SESSION's compile (#5453 Ask 5; Holger, 2026-11-27: "Yes, also compile"; decision record
+ * hrn:node:hadronmemory.com:hadron-dev-team-shared:decisions:2026-11-27-holger-rulings-to-bo-system-nodes-and-roles,
+ * section 4b) needs no batch grant. It writes a NEW REVISION of an EXISTING compiled node in a memory the session
+ * may write, and exactly as under the batch grant before it never creates a compiled node or an install memory,
+ * never sets or moves a pointer and never provisions an organisation grant. The batch grant is no longer read
+ * here: it remains for approving (src/lib/nodeApproval.ts).
  */
 import { GraphQLError } from 'graphql';
 import type { Node as NodeRow, Prisma } from '../../../generated/prisma/index.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
 import { BOOT_PROMPT_COMPILED_ROLE, BOOT_PROMPT_NODE_TYPE, boundWorkerId, isCompiledBootPrompt, withCompileWrite } from '../../../lib/bootPrompt.js';
-import { bootPromptGrantRequiredError, hasBatchGrant } from '../../../lib/grants/bootPromptGrant.js';
+import { bootPromptGrantRequiredError } from '../../../lib/grants/bootPromptGrant.js';
 import {
   loadBootPromptPointerOwner,
   setBootPromptPointer,
@@ -44,7 +53,7 @@ import { includeHistoryClient, withIncludeHistoryTransaction } from '../../../li
 import { acquireLockSet } from '../../../lib/nodeSubtreeLock.js';
 import { liveTxContext } from './authorizedTx.js';
 import { ensureInstallMemory } from './installMemory.js';
-import { isMemoryReadableFresh, type Context } from './resolvers.helpers.js';
+import { isMemoryReadableFresh, isMemoryWriteRefusal, requireMemoryWriteAccess, type Context } from './resolvers.helpers.js';
 import { writeNodeCore } from './resolvers.mutation.node.js';
 
 /** What is compiled: the Agent's prompt, an App's compiled Agent prompt, or one worker's. */
@@ -173,27 +182,57 @@ function isBudgetFault(e: unknown): boolean {
   return x?.code === 'P2028' || x?.code === 'P2024' || x?.meta?.code === '55P03' || /lock timeout|lock_timeout|transaction expired|Transaction already closed|Include-history transaction expired/i.test(String(x?.message ?? ''));
 }
 
+/** The loc of the compiled node a compile of `target` writes. */
+const compiledLocOf = (target: CompileTargetInput): string =>
+  target.kind === 'WORKER' ? workerCompiledLoc(target.workerId) : target.kind === 'APP_AGENT' ? APP_COMPILED_LOC : AGENT_COMPILED_LOC;
+
+/** The live install memory of this (App, Agent), or null. A read: nothing here creates one. */
+async function findInstallMemoryId(db: Pick<Tx, 'memory'>, appId: string, agentId: string): Promise<string | null> {
+  return (await db.memory.findFirst({
+    where: { class: 'system', isInstallMemory: true, appId, installOfAgentId: agentId, deletedAt: null },
+    select: { id: true },
+  }))?.id ?? null;
+}
+
 /**
- * #3823 (Riana F2, Andi P2-2): the worker session's LOCK-FREE, non-authoritative gate. Like the manager gate it replaces for a worker,
- * it runs before anything is held, so a session with no batch grant never takes the tenant's exclusive anchors, never queues on the
- * platform-wide fence, and learns nothing but the one refusal. The authoritative judgement (FOR SHARE, fresh clock) stays in the
- * transaction. Reads only the compiled node the compile would write, and the grants that name it.
+ * #5453 Ask 5 — the worker session's gate: may this session WRITE the memory that holds the compiled node?
+ *
+ * "A memory the session may write" is the memory's own write gate, {@link requireMemoryWriteAccess}: the one gate
+ * every GraphQL node write of that memory passes, so a session that can edit the source or a rule of a prompt is
+ * the session that can compile it, and neither can drift from the other. It judges the PERSON behind the session
+ * (a worker session carries its holder's user): an Agent's system memory is written by whoever manages the Agent, an
+ * App's install memory by whoever manages the App while the Agent is installed, and never by an impersonation, a run
+ * or a credential with no user. Revoked membership does not authorize: the gate reads live memberships, and inside
+ * the deciding transaction (`ctx` is the transaction context there) it takes the install authority FOR SHARE first.
+ *
+ * Every way of not passing, a memory that does not exist included, is the one {@link compileNotPermitted}. Only the
+ * gate's own refusal is mapped; anything else (a database fault) passes through to the caller's handling.
  */
-async function batchPrecheck(ctx: Context, target: CompileTargetInput, before: CompileOwner): Promise<void> {
-  const workerId = boundWorkerId();
-  if (!workerId || !ctx.userId || ctx.appKeyId) throw compileNotPermitted();
-  const memoryId = target.kind === 'AGENT'
-    ? before.agent.systemMemoryId
-    : (await ctx.db.memory.findFirst({
-      where: { class: 'system', isInstallMemory: true, appId: before.appId, installOfAgentId: before.agent.id, deletedAt: null },
-      select: { id: true },
-    }))?.id ?? null;
-  const loc = target.kind === 'WORKER' ? workerCompiledLoc(target.workerId) : target.kind === 'APP_AGENT' ? APP_COMPILED_LOC : AGENT_COMPILED_LOC;
-  const node = memoryId ? await ctx.db.node.findFirst({ where: { memoryId, loc, deletedAt: null }, select: { id: true, role: true } }) : null;
-  if (!memoryId || !node || !isCompiledBootPrompt(node)
-    || !(await hasBatchGrant(ctx.db as unknown as Prisma.TransactionClient, workerId, { id: node.id, memoryId, loc }))) {
-    throw compileNotPermitted();
+async function assertSessionMayWrite(ctx: Context, memoryId: string | null): Promise<void> {
+  // Without a person behind it the session has no standing at all (as under the batch grant, Riana F4).
+  if (!ctx.userId || ctx.appKeyId || !memoryId) throw compileNotPermitted();
+  try {
+    await requireMemoryWriteAccess(ctx, memoryId);
+  } catch (e) {
+    if (isMemoryWriteRefusal(e)) throw compileNotPermitted();
+    throw e;
   }
+}
+
+/**
+ * The worker session's LOCK-FREE, non-authoritative gate (#3823, Riana F2 and Andi P2-2; the grant it read is replaced by the
+ * memory's write gate, #5453 Ask 5). Like the manager gate it stands in for, it runs before anything is held, so a session that
+ * may not write the memory never takes the tenant's exclusive anchors, never queues on the platform-wide fence, and learns nothing
+ * but the one refusal. The write gate comes FIRST, so a session that fails it does the same work whether or not a compiled node is
+ * there. The authoritative judgement stays in the transaction.
+ */
+async function sessionPrecheck(ctx: Context, target: CompileTargetInput, before: CompileOwner): Promise<void> {
+  const memoryId = target.kind === 'AGENT' ? before.agent.systemMemoryId : before.appId ? await findInstallMemoryId(ctx.db, before.appId, before.agent.id) : null;
+  // A pooled-client decision on an install memory is a pre-flight (installMemory.ts): the transaction below decides.
+  await assertSessionMayWrite({ ...ctx, installWritePreflight: true }, memoryId);
+  // A worker session's compile never creates a compiled node: refused here before the fence is taken.
+  const node = await ctx.db.node.findFirst({ where: { memoryId: memoryId!, loc: compiledLocOf(target), deletedAt: null }, select: { role: true } });
+  if (!node || !isCompiledBootPrompt(node)) throw compileNotPermitted();
 }
 
 /** Race a probe against the operation deadline: an unbounded read must not outlive the budget. */
@@ -265,10 +304,10 @@ export async function compileBootPrompt(
     // on the platform-wide fence or take the tenant's anchors, which would be a cheap lock-DoS and an existence
     // oracle (Rook P2-1 on #2258). The in-transaction gate below stays the authoritative one.
     try {
-      // #3823: a worker session compiles only under a batch grant, which is judged on the locked compiled node in the transaction;
-      // the manager gate is the person's and does not apply to it (a session with no grant is refused there, as before).
+      // #5453 Ask 5: a worker session compiles where it may write the memory that holds the compiled node; the manager gate is
+      // the person's and does not apply to it.
       if (!boundWorkerId()) await withinBudget(deadline, assertMayWriteBootPromptPointer(ctx, before.owner));
-      else await withinBudget(deadline, batchPrecheck(ctx, target, before));
+      else await withinBudget(deadline, sessionPrecheck(ctx, target, before));
     } catch (e) {
       if (e instanceof GraphQLError && e.extensions?.code !== 'CONFLICT') throw compileNotPermitted();
       if (e instanceof GraphQLError) throw e;
@@ -333,12 +372,15 @@ async function decide(
     const live = await loadCompileOwner(tx, target);
     if (!live) throw compileNotPermitted();
     const txCtx = await liveTxContext(ctx, tx);
-    // #3823: under a worker session the manager gate is replaced by the batch grant on the compiled node (checked below, once the node
-    // is known). Without a person-user the session has no standing at all.
-    const batchWorkerId = boundWorkerId();
-    if (batchWorkerId && (!ctx.userId || ctx.appKeyId)) throw compileNotPermitted();
+    // Where the output goes when the target is an App's or a worker's. Read once, here: a worker session's gate is about this memory.
+    let installMemoryId = live.appId ? await findInstallMemoryId(tx, live.appId, live.agent.id) : null;
+    // #5453 Ask 5: under a worker session the manager gate is replaced by the write gate of the memory that holds the compiled node,
+    // judged on the live state under the anchors held above, BEFORE the drift check, the retired answer and anything that is
+    // assembled: a session that may not write the memory is told nothing else about the target.
+    const sessionWorkerId = boundWorkerId();
     // The fresh gate comes BEFORE the drift check, so a caller denied on the live owner is refused, never retried.
-    if (!batchWorkerId) await assertMayWriteBootPromptPointer(txCtx, live.owner);
+    if (sessionWorkerId) await assertSessionMayWrite(txCtx, target.kind === 'AGENT' ? live.agent.systemMemoryId : installMemoryId);
+    else await assertMayWriteBootPromptPointer(txCtx, live.owner);
     const tenant = tenantOf(live.owner);
     if (tenant.organizationId !== expected.organizationId || tenant.ownerUserId !== expected.ownerUserId) {
       throw new OwnerTenantChanged();
@@ -350,43 +392,31 @@ async function decide(
     }
 
     // 3. Where the source is and where the output goes.
-    let installMemoryId = live.appId
-      ? (await tx.memory.findFirst({
-        where: { class: 'system', isInstallMemory: true, appId: live.appId, installOfAgentId: live.agent.id, deletedAt: null },
-        select: { id: true },
-      }))?.id ?? null
-      : null;
     // An App's first compile IS its first customisation: the install memory is made lazily (S7), inside this
     // transaction, so a later refusal rolls it back. A worker's source lives in that memory, so with none there is
-    // genuinely no source (Dara P2-2).
-    if (target.kind === 'APP_AGENT' && !installMemoryId && live.appId && !batchWorkerId) {
+    // genuinely no source (Dara P2-2). A worker session's compile never creates one (#3823, Andi): with none its gate
+    // above has already refused.
+    if (target.kind === 'APP_AGENT' && !installMemoryId && live.appId && !sessionWorkerId) {
       installMemoryId = (await ensureInstallMemory(tx, txCtx, live.appId, live.agent.id)).id;
     }
     const agentMemoryId = live.agent.systemMemoryId;
-    // #3823 (Andi): a batch compile never creates an install memory, so a missing one is the one refusal, not a source error.
-    if (batchWorkerId && target.kind !== 'AGENT' && !installMemoryId) throw compileNotPermitted();
     const noSource = () => compileError('BOOT_PROMPT_NO_SOURCE', 'the target has no source boot prompt to compile from.');
     if (!agentMemoryId) throw noSource();
     if (target.kind !== 'AGENT' && !installMemoryId) throw noSource();
     const out = target.kind === 'AGENT'
       ? { memoryId: agentMemoryId, loc: AGENT_COMPILED_LOC }
-      : { memoryId: installMemoryId!, loc: target.kind === 'APP_AGENT' ? APP_COMPILED_LOC : workerCompiledLoc(target.workerId) };
+      : { memoryId: installMemoryId!, loc: compiledLocOf(target) };
 
-    let batchNodeId: string | null = null;
-    if (batchWorkerId) {
-      // #3823 (V49, V52, V53): a batch compile writes a NEW REVISION of a compiled node the grant names. It never creates one, and only
-      // a live batch grant held by this worker for this very node admits it. Judged BEFORE anything is assembled or provisioned, so a
-      // session without one learns nothing else about the target, and everything rolls back on a refusal. The grant row is the last
-      // lock taken before the writes (FOR SHARE: a revocation either committed first or waits).
+    let sessionNodeId: string | null = null;
+    if (sessionWorkerId) {
+      // #3823 (V49, V53), kept by #5453 Ask 5: a worker session's compile writes a NEW REVISION of a compiled node that is already
+      // there. It never creates one. Judged BEFORE anything is assembled or provisioned, and everything rolls back on a refusal.
       const node = await tx.node.findFirst({ where: { memoryId: out.memoryId, loc: out.loc, deletedAt: null }, select: { id: true, role: true } });
-      batchNodeId = node?.id ?? null;
-      if (!node || !isCompiledBootPrompt(node)
-        || !(await hasBatchGrant(tx, batchWorkerId, { id: node.id, memoryId: out.memoryId, loc: out.loc }, true))) {
-        throw compileNotPermitted();
-      }
+      sessionNodeId = node?.id ?? null;
+      if (!node || !isCompiledBootPrompt(node)) throw compileNotPermitted();
       // V53 (cor:agt:040:12) states this for the App-level compile only: an Agent or worker compile has no pointer requirement, so a
-      // batch worker may refresh a compiled prompt nothing serves yet. That is the ruling, not an omission.
-      // V53 (cor:agt:040:12): an App-level compile under a batch grant only refreshes what the App already serves, so the App's
+      // worker session may refresh a compiled prompt nothing serves yet. That is the ruling, not an omission.
+      // V53 (cor:agt:040:12): a worker session's App-level compile only refreshes what the App already serves, so the App's
       // pointer must ALREADY name this compiled node. Read under the App and Agent anchors held above; it is never written.
       if (target.kind === 'APP_AGENT') {
         const pointed = await tx.appAgent.findUnique({ where: { appId_agentId: { appId: live.appId!, agentId: live.agent.id } }, select: { bootPromptNodeId: true } });
@@ -433,8 +463,9 @@ async function decide(
     if (recipient.kind === 'org') {
       for (const grant of plan.grants) {
         if (!grant.provision) continue;
-        // #3823: a batch compile never provisions an AgentOrgGrant (V53).
-        if (batchWorkerId) throw bootPromptGrantRequiredError();
+        // #3823 (V53), kept by #5453 Ask 5: a worker session's compile never provisions an AgentOrgGrant. Known only once the
+        // plan is; it is told only to a session that passed the write gate above, and nothing has been written.
+        if (sessionWorkerId) throw bootPromptGrantRequiredError();
         // The included Agent is not one of the held anchors: lock its row and re-read it, so a retirement or a
         // transfer that committed since the plan is seen and no grant is minted for it (Rook P3-1).
         const still = await tx.$queryRaw<Array<{ id: string }>>`
@@ -447,7 +478,8 @@ async function decide(
     // #2047 PR-C (§10 #2698): the pointer owner's locks come BEFORE the compiled node is written. A bind takes the worker
     // assignment lock and the worker row, then share-locks the compiled node (resolveServedBootPrompt); taking them in the
     // other order here, node first, is a lock-order cycle. One order everywhere: assignment lock, worker row, node.
-    const setPointer = !batchWorkerId && (target.kind === 'APP_AGENT' || options.setPointer !== false);
+    // A worker session's compile never sets or moves a pointer, whatever the caller asks (V53).
+    const setPointer = !sessionWorkerId && (target.kind === 'APP_AGENT' || options.setPointer !== false);
     const pointerOwner = setPointer ? await loadBootPromptPointerOwner(tx, ptr(target), { lockForWrite: true }) : null;
     if (setPointer && !pointerOwner) throw compileNotPermitted();
 
@@ -456,8 +488,9 @@ async function decide(
       where: { memoryId: out.memoryId, loc: out.loc, deletedAt: null },
       select: { id: true, role: true },
     });
-    // The grant was judged for ONE node id; a delete and re-create at the same address in between is a node it never named (Andi).
-    if (batchWorkerId && existing?.id !== batchNodeId) throw compileNotPermitted();
+    // The session's compile was judged for ONE node id; a delete and re-create at the same address in between would make this write
+    // a create, or a write to a node that was never judged (Andi).
+    if (sessionWorkerId && existing?.id !== sessionNodeId) throw compileNotPermitted();
     if (existing && options.createOnly) {
       throw new GraphQLError('The compiled boot prompt address is occupied.', { extensions: { code: 'ADDRESS_OCCUPIED' } });
     }

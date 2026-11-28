@@ -16639,11 +16639,18 @@ export const typeDefs = `#graphql
     one, even when the text is unchanged), with its provenance and a derived 'compiled-from' edge to the source.
     Sets 'Agent.bootPromptRef' unless 'setPointer: false'. Never approves or signs ('approvalIssued' is always false).
 
-    Whoever manages the Agent, as themselves: a request bound to a worker session, a non-manager, an App key, an
-    impersonation, a run, and a target that does not exist are alike refused BOOT_PROMPT_COMPILE_NOT_PERMITTED. Only then: BOOT_PROMPT_TARGET_RETIRED, BOOT_PROMPT_NO_SOURCE, BOOT_PROMPT_SOURCE_INVALID, the
+    Whoever manages the Agent, as themselves: a non-manager, an App key, an impersonation, a run, and a target that
+    does not exist are alike refused BOOT_PROMPT_COMPILE_NOT_PERMITTED. Only then: BOOT_PROMPT_TARGET_RETIRED, BOOT_PROMPT_NO_SOURCE, BOOT_PROMPT_SOURCE_INVALID, the
     include refusals (BOOT_PROMPT_INCLUDE_*, _GRANT_REQUIRED, _COMPILE_LIMIT_EXCEEDED, with the tag's 'position'),
     and CONFLICT when the compile could not settle inside its 30-second budget (retry).
     A refusal changes nothing. No MCP twin.
+
+    A request bound to a worker session (#5453) compiles where the session may write the memory that holds the compiled
+    node, with no grant: a new unapproved revision of a compiled node that already exists. It never creates the compiled
+    node, never sets or moves a pointer (setPointer is ignored, and compileAppAgentBootPrompt needs
+    'AppAgent.bootPromptRef' to name the node already) and never provisions an organisation grant
+    (BOOT_PROMPT_GRANT_REQUIRED). A session that may not write that memory, and one whose compile would create the node
+    or change a pointer, get the same BOOT_PROMPT_COMPILE_NOT_PERMITTED, decided before anything is assembled.
     """
     compileAgentBootPrompt(agentRef: String!, setPointer: Boolean = true): CompiledBootPrompt!
     """

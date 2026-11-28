@@ -197,6 +197,36 @@ describe('#5453 Ask 5: a worker session compiles with no grant, where it may wri
   });
 });
 
+describe('#5453 Ask 5: "the last approved revision" is judged by TEXT, for a worker session\'s compile as for anyone\'s', () => {
+  // An approval covers a text, not a revision number (cor:dmo:120:04: only a change to the hashed content ends an
+  // approval). So a compile that reproduces a text a person approved EARLIER writes a revision that reads approved,
+  // and the serve picks it as the newest approved one. That is the law as it stands and it was true of a person's
+  // compile and of a batch compile before #5453. What Ask 5 changes is who can cause it with no person in the loop: a
+  // worker session that may write the memory can put the source back to an earlier approved text and compile. It
+  // can never get a text served that no person approved. Pinned as it is, so a change of this rule is a deliberate
+  // one (reported on the PR for a ruling).
+  it('a compile to a NEW text is not served; a compile back to an EARLIER approved text is, with no new approval act', async () => {
+    const s = await source(agentMemId, 'boot:source', 'text one');
+    const first = await compileAgent(ctxOf(manager.id));
+    await M.approveNode(null, { nodeRef: first.node.id }, ctxOf(manager.id));
+    await M.updateNode(null, { input: { ref: s.id, content: 'text two' } }, ctxOf(manager.id));
+    await compileAgent(ctxOf(manager.id));
+    await M.approveNode(null, { nodeRef: first.node.id }, ctxOf(manager.id));
+    const served = async () => (await resolveServedBootPrompt(db, { surface: 'chat', appId, agent: { id: agentId, name: agentName } })).content;
+    expect(await served()).toBe('text two');
+    // A text nobody approved: compiled by the session, never served.
+    await asWorker(() => M.updateNode(null, { input: { ref: s.id, content: 'text three, never approved' } }, ctxOf(manager.id)));
+    await asWorker(() => compileAgent(ctxOf(manager.id)));
+    expect(await served()).toBe('text two');
+    // The earlier approved text again: the session's compile is served, and no approval was recorded for it.
+    const approvedRevNo = (await db.node.findUniqueOrThrow({ where: { id: first.node.id } })).approvedRevNo;
+    await asWorker(() => M.updateNode(null, { input: { ref: s.id, content: 'text one' } }, ctxOf(manager.id)));
+    await asWorker(() => compileAgent(ctxOf(manager.id)));
+    expect(await served()).toBe('text one');
+    expect((await db.node.findUniqueOrThrow({ where: { id: first.node.id } })).approvedRevNo).toBe(approvedRevNo);
+  });
+});
+
 describe('#5453 Ask 5: what a worker session\'s compile never does', () => {
   it('it never creates a compiled node: with none there it is refused and nothing is written', async () => {
     await source(installId, workerSource());
@@ -214,6 +244,34 @@ describe('#5453 Ask 5: what a worker session\'s compile never does', () => {
     expect(await codeOf(asWorker(() => compileWorker(ctxOf(manager.id))))).toBe(NOT_PERMITTED);
     expect(await snapshot()).toEqual(before);
     expect((await db.node.findUniqueOrThrow({ where: { id: squat.id } })).content).toBe('old');
+  });
+
+  it('a compile that would create the node is refused at once, without queueing on the tenant\'s exclusive anchors', async () => {
+    await source(installId, workerSource());
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const lockedP = new Promise<void>((r) => { locked = r; });
+    const holder = db.$transaction(async (tx) => { await lockAuthorityAnchors(tx, [{ kind: 'app', id: appId }, { kind: 'agent', id: agentId }], 'exclusive'); locked(); await held; }, { timeout: 20000 });
+    await lockedP;
+    const t0 = Date.now();
+    const code = await codeOf(asWorker(() => compileWorker(ctxOf(manager.id))));
+    const took = Date.now() - t0;
+    release(); await holder;
+    expect(code).toBe(NOT_PERMITTED);
+    expect(took).toBeLessThan(3000);
+  });
+
+  it.each([
+    ['deleted', async (id: string) => { await db.node.delete({ where: { id } }); }],
+    ['turned into a source', async (id: string) => { await withCompileWrite(() => db.node.update({ where: { id }, data: { role: SOURCE } })); }],
+  ])('the compiled node is %s after the first check: the transaction\'s own check refuses, before anything is assembled', async (_what, change) => {
+    await source(installId, workerSource(), 'a {{> parts:missing}} b');   // assembling this would answer BOOT_PROMPT_INCLUDE_UNAVAILABLE
+    const c = await compiled(installId, workerCompiled());
+    const compiledRevisions = await db.compiledPromptRevision.count();
+    expect(await codeOf(asWorker(() => compileBootPrompt(ctxOf(manager.id), { kind: 'WORKER', workerId }, { seams: { beforeFence: () => change(c.id) } } as never)))).toBe(NOT_PERMITTED);
+    expect(await db.compiledPromptRevision.count()).toBe(compiledRevisions);
+    expect(await db.node.count({ where: { memoryId: installId, role: COMPILED } })).toBe(0);
   });
 
   it('it never sets or moves a pointer: an App-level compile is refused unless the App\'s pointer already names the node', async () => {
