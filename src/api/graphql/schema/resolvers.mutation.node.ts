@@ -4,11 +4,9 @@ import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { assertNoGenericMessageSeqWrite } from '../../../lib/legacyMessageSeq.js';
 import { stampEmbeddingObligation } from '../../../services/embedding/obligation.js';
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
-import { currentActor } from '../../../lib/requestActor.js';
 import { edgeDisplayOrder } from '../../../lib/edgeOrder.js';
 import { foreignEdgeMemoryIds } from '../../../lib/foreignEdgeMemories.js';
-import { assertBootPromptWriteAllowedOrGranted, spendEditGrantFor, graphqlEditFacts, withUpdateNodeDoor } from '../../../lib/grants/bootPromptGrant.js';
-import { assertBootPromptWriteAllowed, assertNoBootPromptRows, inCompileScope, isBootPromptItselfRole, isCompiledBootPrompt } from '../../../lib/bootPrompt.js';
+import { assertBootPromptWriteAllowed, assertNoBootPromptRows, inCompileScope, isCompiledBootPrompt } from '../../../lib/bootPrompt.js';
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentError, commentGovernedError } from '../../../lib/comments/index.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, restoreThreadsOfTargets, softDeleteThreadsOfTargets } from '../../../lib/comments/lifecycle.js';
 import { questionContainedError, isQuestionFamilyRole, refuseQuestionFamily, refuseUnderQuestionLog } from '../../../lib/questions/index.js';
@@ -727,9 +725,9 @@ async function writeNodeCoreRaw(
       // #2987 (V13) — a message outside a Channel (assertLocWritable above already refused one under a
       // Channel) keeps its seq: no generic write sets or changes it. A clone copies the source's seq to a new row.
       if (!opts?.copiesSeq || existing) assertNoGenericMessageSeqWrite(existing, input.nodeType, input.seq, mode === 'update' ? 'update' : 'create');
-      // #2043 — the compiled-node and worker-session boot-prompt guards (cor:agt:040:11).
-      // #3823 — the one lift: a worker session's in-place text edit of its own source, under an edit grant (a read here; spent below).
-      await assertBootPromptWriteAllowedOrGranted(ctx.db as unknown as Prisma.TransactionClient, existing, { nodeType: input.nodeType, role: normalizeRole(input.role), ...graphqlEditFacts(input) }, mode === 'update' ? 'update' : 'create');
+      // #2043 — the compiled-node guard: only a compile writes one. #5453 Ask 5: it asks nothing about the caller. A worker
+      // session's write of a source or a rule is decided by the memory's write gate above, like any other node's, with no grant.
+      assertBootPromptWriteAllowed(existing, { nodeType: input.nodeType, role: normalizeRole(input.role) }, mode === 'update' ? 'update' : 'create');
       // #1641 — a log's child locs are its question codes: only the question
       // doors write there, so a squatter can never block a code.
       if (!existing && opts?.ownsKind !== 'question') {
@@ -1332,7 +1330,7 @@ async function writeNodeCoreRaw(
         assertNotCommentWrite(current.nodeType, input.nodeType, 'update');
         // #2987 — re-checked under the lock with the row it guards, like the comment gate.
         if (!opts?.copiesSeq) assertNoGenericMessageSeqWrite(current, input.nodeType, input.seq, 'update');
-        await assertBootPromptWriteAllowedOrGranted(tx, current, { nodeType: input.nodeType, role: normalizeRole(input.role), ...graphqlEditFacts(input) }, 'update');
+        assertBootPromptWriteAllowed(current, { nodeType: input.nodeType, role: normalizeRole(input.role) }, 'update');
         assertGovernedWrite(
           current,
           mergedGovernedState(current, { role: input.role, isRunnable: input.isRunnable }),
@@ -1443,10 +1441,6 @@ async function writeNodeCoreRaw(
                 return { conflict: true, node: null };
               }
             }
-
-            // #3823 — spend the worker session's edit grant ONCE, on the final locked row and in this transaction, so any later
-            // refusal rolls the spend back. The last lock the act takes is the grant row.
-            await spendEditGrantFor(tx, current, { nodeType: input.nodeType, role: normalizeRole(input.role), ...graphqlEditFacts(input) });
 
             // #1330 — H1 strict sub-roles, judged on the locked row: a role the
             // write assigns must be declared under a strict parent.
@@ -2967,8 +2961,7 @@ export const nodeMutations = {
     // Update an existing node (spec 039 Phase 0 D2–D4). Target = `id` (PK or
     // fully-qualified node URN) XOR (`memoryId` + `loc`); never creates,
     // never moves. All content fields preserve-on-omit.
-    // #3823: the one GraphQL door whose update writes may spend a worker session's boot-prompt edit grant.
-    updateNode: (_: unknown, { input }: { input: UpdateNodeArgs }, ctx: Context) => withUpdateNodeDoor(async () => {
+    updateNode: async (_: unknown, { input }: { input: UpdateNodeArgs }, ctx: Context) => {
       requireCallerIdentity(ctx);
       if (input.install) {
         // #3628 / ruling0234: shared participant/manager gates and live-install
@@ -2988,7 +2981,7 @@ export const nodeMutations = {
         return written;
       }
       return updateNodeCore(toUpdateNodeInput(input) as UpdateNodeInput, ctx, 'updateNode', { governedContext: 'node-write' });
-    }),
+    },
 
 
     // Shallow-merge a JSON patch into a node's `data` bag (issue #366).
@@ -3286,9 +3279,9 @@ export const nodeMutations = {
       for (const row of nodeById.values()) {
         // #1606 — a comment is governed too (cor:dmo:110:04): skipped, reported as governed.
         if (governedKindsOf({ role: row.role, isRunnable: row.isRunnable }).length > 0 || row.nodeType === COMMENT_NODE_TYPE
-          // #2043 — compiled boot prompts are written only by a compile; a worker session also skips sources.
-          // #5453 — compiled by role; the worker-session skip reaches a boot prompt itself, never a rule (PR A).
-          || isCompiledBootPrompt(row) || (isBootPromptItselfRole(row.role) && currentActor().workerId != null)) {
+          // #2043 — compiled boot prompts are written only by a compile (#5453: compiled by role). A source and a rule are
+          // replaced in like any other node, by a worker session too (#5453 Ask 5).
+          || isCompiledBootPrompt(row)) {
           skipCounts.governed += 1;
           continue;
         }

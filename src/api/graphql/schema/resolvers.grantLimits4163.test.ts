@@ -2,15 +2,16 @@
  * #4163 (part of #1975; cor:acl:140:02, :03; cor:agt:040:11; Holger's ruling of 2026-11-14) — a boot-prompt grant that has been
  * used, or whose hour has passed, must read `allows: false` on the shared live definition, and a grant ended that way keeps its
  * first end when its worker goes (ruling 0259). The action carries the limits (a count of uses, a lifetime from activation); the
- * edit door spends through the guarded `use_count + 1`.
+ * spend goes through the guarded `use_count + 1`.
+ *
+ * #5453 Ask 5: a worker session edits a boot prompt source with NO grant, so no door spends an edit grant any more. The limits,
+ * the count and the first end are the action's and the shared spend's, and they are still pinned here: "the edit" below is the
+ * spend itself (`spendEditGrant`), called the way the door called it, in one transaction for this worker and this source.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
-import { resolvers, type Context } from './resolvers.js';
-import { runAsActor } from '../../../lib/requestActor.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { upsertPlatformActions, PLATFORM_ACTIONS } from '../../../lib/grants/actions.js';
 import { createPendingGrant, GrantCreateRefusal } from '../../../lib/grants/create.js';
@@ -19,6 +20,7 @@ import { getGrantForWorker } from '../../../lib/grants/read.js';
 import { isGrantLive, readGrantForUpdate } from '../../../lib/grants/live.js';
 import { readFileSync } from 'node:fs';
 import { DB_NOW, insertGrantUnguarded, raw, type World } from '../../../lib/grants/grantFixtures3668.js';
+import { spendEditGrant } from '../../../lib/grants/bootPromptGrant.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -29,13 +31,16 @@ let admin: { id: string };
 let appId: string;
 let workerId: string;
 let installMemoryId: string;
-const ctx = (): Context => ({ db, userId: admin.id, roles: [] });
 const world = () => ({ appId, userId: admin.id } as unknown as World);
 const grant = (values: Record<string, unknown>, over: Record<string, unknown> = {}) => insertGrantUnguarded(world(), {
   user_id: null, worker_id: workerId, action: EDIT, action_values: values, max_uses: 1,
   activated_at: raw(DB_NOW), verification_kind: 'passkey', verified_by: admin.id, issuer_user_id: admin.id, expires_at: null, ...over,
 } as never);
-const edit = (id: string) => runAsActor({ workerId, agentId: null }, () => resolvers.Mutation.updateNode(null, { input: { ref: id, content: 'edited' } }, ctx()));
+/** Spend one edit grant for this worker and source, as the edit door did before #5453. True when a grant was spent. */
+const spend = async (id: string) => {
+  const node = await db.node.findUniqueOrThrow({ where: { id }, select: { id: true, memoryId: true, loc: true } });
+  return db.$transaction((tx) => spendEditGrant(tx, workerId, node));
+};
 const view = async (id: string) => (await getGrantForWorker(db, { appId, workerId }, id))!;
 const row = (id: string) => db.grant.findUniqueOrThrow({ where: { id } });
 
@@ -78,45 +83,45 @@ describe('the action carries the limits (cor:acl:140:02)', () => {
   });
 });
 
-describe('item 1: the edit door counts the use', () => {
+describe('item 1: the spend counts the use (the edit door did this before #5453; no door spends an edit grant now)', () => {
   it('after the one edit the grant reads spent: use_count 1, allows false, and the in-memory verdict agrees', async () => {
     const s = await source();
     const g = await grant({ sourceNode: s.id });
     expect(await view(g)).toMatchObject({ allows: true, useCount: 0 });
-    await edit(s.id);
+    expect(await spend(s.id)).toBe(true);
     expect(await view(g)).toMatchObject({ allows: false, useCount: 1 });
     const r = await row(g);
     expect(isGrantLive({ ...r, appDeletedAt: null, actionMaxUses: 1, actionLifetimeSeconds: 3600 }, new Date())).toBe(false);
   });
-  it('a stored grant WITHOUT a count is still spent by its USE event: the door refuses a second edit', async () => {
+  it('a stored grant WITHOUT a count is still spent by its USE event: a second spend is refused', async () => {
     const s = await source();
     const g = await grant({ sourceNode: s.id }, { max_uses: null });
-    await edit(s.id);
+    expect(await spend(s.id)).toBe(true);
     // the action's own count reads it spent too, though the row never said "max-uses 1"
     expect(await view(g)).toMatchObject({ allows: false, useCount: 1 });
-    await expect(edit(s.id)).rejects.toBeInstanceOf(GraphQLError);
+    expect(await spend(s.id)).toBe(false);
   });
-  it('a grant stored with a USE event but no count (use_count 0) is refused by the door on the event alone (candidates back-compat clause, LOCAL P3 Arianna)', async () => {
+  it('a grant stored with a USE event but no count (use_count 0) is refused on the event alone (candidates back-compat clause, LOCAL P3 Arianna)', async () => {
     const s = await source();
     const g = await grant({ sourceNode: s.id }, { max_uses: null, use_count: 0 });
     await db.grantEvent.create({ data: { grantId: g, appId, action: 'USE', workerId } });
     // by the count it is live (0 < the action's 1): only the USE event says it was spent
     expect(await view(g)).toMatchObject({ allows: true, useCount: 0 });
-    await expect(edit(s.id)).rejects.toBeInstanceOf(GraphQLError);
+    expect(await spend(s.id)).toBe(false);
     expect((await row(g)).useCount).toBe(0);
     expect((await db.node.findUniqueOrThrow({ where: { id: s.id } })).content).toBe('original');
   });
-  it('a refused edit spends nothing: the count and the events stay at zero', async () => {
+  it('a refused spend spends nothing: the count and the events stay at zero', async () => {
     const s = await source();
     const g = await grant({ sourceNode: s.id }, { activated_at: raw(`${DB_NOW} - interval '61 minutes'`) });
-    await expect(edit(s.id)).rejects.toBeInstanceOf(GraphQLError);
+    expect(await spend(s.id)).toBe(false);
     expect((await row(g)).useCount).toBe(0);
   });
-  it('three racing edits on one grant: one is admitted, use_count is exactly 1', async () => {
+  it('three racing spends on one grant: one is admitted, use_count is exactly 1', async () => {
     const s = await source();
     const g = await grant({ sourceNode: s.id });
-    const out = await Promise.allSettled([edit(s.id), edit(s.id), edit(s.id)]);
-    expect(out.filter((o) => o.status === 'fulfilled')).toHaveLength(1);
+    const out = await Promise.allSettled([spend(s.id), spend(s.id), spend(s.id)]);
+    expect(out.filter((o) => o.status === 'fulfilled' && o.value === true)).toHaveLength(1);
     expect((await row(g)).useCount).toBe(1);
   });
 });
@@ -199,7 +204,7 @@ describe('item 3: a grant ended by use or by the hour keeps its first end when t
   it('a used grant, a grant past its hour and a spent batch get no holder_departed_at; a live one does', async () => {
     const s = await source();
     const used = await grant({ sourceNode: s.id });
-    await edit(s.id);
+    expect(await spend(s.id)).toBe(true);
     const timedOut = await grant({ sourceNode: s.id }, { activated_at: raw(`${DB_NOW} - interval '61 minutes'`) });
     const batchOld = await grant({ compiledNode: [s.id] }, { action: BATCH, max_uses: null, activated_at: raw(`${DB_NOW} - interval '2 hours'`) });
     const live = await grant({ sourceNode: s.id });
@@ -210,7 +215,7 @@ describe('item 3: a grant ended by use or by the hour keeps its first end when t
   it('the holder-gone trigger on a hard delete keeps the same first end', async () => {
     const s = await source();
     const used = await grant({ sourceNode: s.id });
-    await edit(s.id);
+    expect(await spend(s.id)).toBe(true);
     const timedOut = await grant({ sourceNode: s.id }, { activated_at: raw(`${DB_NOW} - interval '61 minutes'`) });
     const live = await grant({ sourceNode: s.id });
     await db.$executeRawUnsafe(`DELETE FROM workers WHERE id = '${workerId}'`);

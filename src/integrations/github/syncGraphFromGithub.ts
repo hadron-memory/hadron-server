@@ -7,7 +7,7 @@ import { OWNER_LIMIT_NO_NUMBER_MESSAGE, OwnerLimitReachedError } from '../../lib
 import { GitCommandError } from './execGit.js';
 import { syncFailureText } from './syncErrorText.js';
 import { stampEmbeddingObligation } from '../../services/embedding/obligation.js';
-import { NOT_COMPILED_BOOT_PROMPT_WHERE, RETIRED_COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRows, assertNoWorkerSessionBootPromptWrite, boundWorkerId, isCompiledBootPrompt, isCompiledBootPromptRole, withSyncCaller } from '../../lib/bootPrompt.js';
+import { NOT_COMPILED_BOOT_PROMPT_WHERE, RETIRED_COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRows, isCompiledBootPrompt, isCompiledBootPromptRole } from '../../lib/bootPrompt.js';
 import { currentActor } from '../../lib/requestActor.js';
 import { assertIncludesWritable, prospectiveNodeId, includeRefusalCode, storedIncludeTags, syncDerivedIncludesEdges } from '../../lib/includes/writeIncludes.js';
 import { runAsSystem } from '../../lib/requestActor.js';
@@ -1171,9 +1171,8 @@ const syncGraphFromGithubAsSystem = async (
             return true;
           }
           // #2043 — git sync never writes a compiled boot prompt (a compile does):
-          // a file landing on one is skipped and the node kept. A worker session's
-          // sync that would create or change any boot-prompt node is refused whole
-          // (cor:agt:040:11); the server's own webhook/startup syncs carry no worker.
+          // a file landing on one is skipped and the node kept. A source or a rule is
+          // mirrored like any other node, whoever asked for the sync (#5453 Ask 5).
           // #5453 — compiled by ROLE: the live row's, or the role the file declares. A file that still
           // declares the retired node type is skipped the same way, so it never reaches the CHECK.
           if (isCompiledBootPrompt(prior) || isCompiledBootPromptRole(governedSignalsFromMirror(node).role)
@@ -1184,7 +1183,6 @@ const syncGraphFromGithubAsSystem = async (
             refusedRoleLocs.add(loc);
             return true;
           }
-          assertNoWorkerSessionBootPromptWrite(prior?.role, governedSignalsFromMirror(node).role ?? undefined, 'import');
           const signals = governedSignalsFromMirror(node);
           // #1641 §3.2 — no mirror ever writes a question or a question log:
           // anyone with push access could otherwise forge one. A file that
@@ -1563,7 +1561,7 @@ const syncGraphFromGithubAsSystem = async (
           AND: [NOT_COMPILED_BOOT_PROMPT_WHERE],
         };
         const pruned = await tx.node.findMany({ where: cleanupWhere, select: { id: true, loc: true } });
-        // #2043 (cor:agt:040:11) — nor does a worker session's sync delete a boot-prompt source.
+        // #2043 — the filter above keeps compiled rows out of `pruned`; judged again on the rows it returned.
         await assertNoBootPromptRows(tx, pruned.map((n) => n.id), 'import');
         if (memoryState.readBranch == null && !memoryState.readBranchCorrected && pruned.length > 0) {
           // #1566: old blank-read syncs could ingest the write branch and
@@ -2059,4 +2057,4 @@ function extractOwnerRepo(gitUrl: string): string {
  * the system even inside a worker's request: node and revision then agree.
  */
 export const syncGraphFromGithub: typeof syncGraphFromGithubAsSystem = (...args) =>
-  withSyncCaller(boundWorkerId(), () => runAsSystem(() => syncGraphFromGithubAsSystem(...args)));
+  runAsSystem(() => syncGraphFromGithubAsSystem(...args));

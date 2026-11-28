@@ -2,7 +2,7 @@ import { ENGINE_KEYS } from '../../lib/chatRootEngineState.js';
 import { softDeleteMemoryAssets } from '../../lib/asset/memoryDelete.js';
 import { resetEmbeddingObligations, stampEmbeddingObligation } from '../../services/embedding/obligation.js';
 import { memoryIsVectorIndexed } from '../../lib/embedding/indexing.js';
-import { NOT_COMPILED_BOOT_PROMPT_WHERE, assertNoBootPromptMergeCollisions, assertNoBootPromptRows, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
+import { NOT_COMPILED_BOOT_PROMPT_WHERE, assertNoBootPromptMergeCollisions, assertNoBootPromptRows } from '../../lib/bootPrompt.js';
 import { resyncDerivedIncludesForNodes } from '../../lib/includes/writeIncludes.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from '../../lib/nodeRoleWriters.js';
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
@@ -395,13 +395,10 @@ async function runMerge(
   // before the first batch commits.
   await assertMemoryBulkMutable(db, sourceMemoryId, 'merge', { comments: 'carry' });
   await assertMemoryBulkMutable(db, targetMemoryId, 'merge into', { comments: 'carry' });
-  // #2043 (cor:agt:040:11) — a worker session's merge that would write ANY
-  // boot-prompt node (source or compiled) is refused whole, before any batch
-  // commits. For any other caller compiled nodes are excluded below, like
-  // comments: a merge is not a compile and the target recompiles.
-  await assertNoBootPromptRowsForWorkerSession(db, sourceMemoryId, 'merge');
-  // Destination writes too (Ruth P2): a source node folding onto a compiled target, or onto a
-  // boot-prompt target under a worker session, is refused before any batch commits.
+  // #2043 — compiled boot prompts are excluded below, like comments: a merge is not a compile and
+  // the target recompiles. Sources and rules are carried, for a worker session too (#5453 Ask 5).
+  // Destination writes too (Ruth P2): a source node folding onto a compiled target is refused
+  // before any batch commits.
   await assertNoBootPromptMergeCollisions(db, sourceMemoryId, targetMemoryId);
   await preflightMergeComments(db, sourceMemoryId, targetMemoryId);
   // #1468 — every source node leaves the source memory (relocated, or folded

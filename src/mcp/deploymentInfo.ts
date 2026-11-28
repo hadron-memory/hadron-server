@@ -398,7 +398,22 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // App approves it, link lint applies to it, and a direct read shows its platform variables as written. Who may WRITE is unchanged: a
 // worker session still writes a rule and is still refused a source (worker sessions writing sources and compiling is PR B). The MCP
 // `nodeType` descriptions no longer list `task` or `compiled-boot-prompt`. (0.58.0 is #5404, merged first; 0.59.0 is left for #5452, the opt-in read, built in parallel.)
-export const HADRON_SERVER_VERSION = '0.60.0';
+// 0.61.0 — WIDENING (behaviour; the SDL changes in descriptions only) (#5453 PR B, Ask 5; Holger 2026-11-27, decision record
+// hrn:node:hadronmemory.com:hadron-dev-team-shared:decisions:2026-11-27-holger-rulings-to-bo-system-nodes-and-roles, section 4b; this
+// reverses cor:agt:040:11 and cor:agt:040:12 in part): a request bound to a WORKER SESSION now writes a boot prompt source
+// (`prompt.boot.source`, the bare `boot-prompt`) and a rule (`prompt.boot.rule`) wherever its holder may write the memory, on every door
+// (create, update, delete, move, merge, restore, import, clone, replace, Git sync), with no grant. `BOOT_PROMPT_WORKER_SESSION_REFUSED`
+// is no longer returned by a WRITE; a session whose holder may not write the memory gets that memory's own refusal, as any caller does.
+// The edit grant (`bootprompt.source.edit`) is neither required nor spent; the action stays registered. A worker session also COMPILES
+// with no batch grant (`compileAgentBootPrompt`, `compileAppAgentBootPrompt`, `compileWorkerBootPrompt`): a new unapproved revision of a
+// compiled node that already exists, in a memory the session may write. As before it never creates the compiled node, sets or moves a
+// pointer (`pointerSet` is false) or provisions an organisation grant (`BOOT_PROMPT_GRANT_REQUIRED`, whose text changed), and every other
+// refusal is the one `BOOT_PROMPT_COMPILE_NOT_PERMITTED`. Unchanged: only a compile writes a compiled node (`BOOT_PROMPT_COMPILED_WRITE`);
+// a worker session approves a source, a rule or a compiled node only under a batch grant (`bootprompt.compile.approve`, where
+// `BOOT_PROMPT_WORKER_SESSION_REFUSED` is still the answer); what is served is the last approved revision. A client that treated the
+// write refusal as "ask a person to edit" can now let the session edit and compile, and ask the person to approve.
+// (0.60.0 is #5453 PR A, which this is stacked on.)
+export const HADRON_SERVER_VERSION = '0.61.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

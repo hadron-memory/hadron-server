@@ -86,14 +86,16 @@ describe('#5453 the bare prompt and prompt.other roles are not in the boot-promp
       .toBe('BOOT_PROMPT_COMPILED_WRITE');
   });
 
-  it('rule 2, guard B (no worker-session write): a worker session creates, updates and deletes a template, and is refused a source', async () => {
+  it('rule 2, worker sessions (guard B is gone in PR B): a worker session creates, updates and deletes a template, and also a source; a compiled node stays out of its reach', async () => {
     const ctx = ctxOf(adminId);
     const created: any = await asWorker(() => M.createNode(null, { input: { memoryRef: agentMem, loc: 'prompts:t2', name: 'T2', content: 'x', nodeType: 'system', role: TEMPLATE } }, ctx));
     expect(created.role).toBe(TEMPLATE);
     expect(await codeOf(asWorker(() => M.updateNode(null, { input: { ref: created.id, content: 'y' } }, ctx)))).toBe('NO_ERROR');
     expect(await codeOf(asWorker(() => M.deleteNode(null, { nodeRef: created.id }, ctx)))).toBe('NO_ERROR');
     const source = await mk('boot:source', 'prompt.boot.source');
-    expect(await codeOf(asWorker(() => M.updateNode(null, { input: { ref: source.id, content: 'z' } }, ctx)))).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+    expect(await codeOf(asWorker(() => M.updateNode(null, { input: { ref: source.id, content: 'z' } }, ctx)))).toBe('NO_ERROR');
+    const compiled = await mk('boot:compiled', 'prompt.boot.compiled');
+    expect(await codeOf(asWorker(() => M.updateNode(null, { input: { ref: compiled.id, content: 'z' } }, ctx)))).toBe('BOOT_PROMPT_COMPILED_WRITE');
   });
 
   it('rule 3, manager-only approval: a template takes no boot-prompt approval refusal for an ordinary writer', async () => {

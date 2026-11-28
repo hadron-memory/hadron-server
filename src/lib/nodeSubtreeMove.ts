@@ -507,8 +507,8 @@ export async function moveNodeSubtree(
   // same transaction (cor:dmo:110:02), and is refused when the destination
   // cannot hold comments.
   if (subtree.some((n) => n.nodeType === COMMENT_NODE_TYPE)) throw commentGovernedError('move', 'edits');
-  // #2043 — a compiled boot prompt is placed by its compile, never moved.
-  // and (cor:agt:040:11) a worker session never moves a boot-prompt source either.
+  // #2043 — a compiled boot prompt is placed by its compile, never moved. A source or a rule moves
+  // like any other node, under a worker session too (#5453 Ask 5).
   for (const n of subtree) assertBootPromptWriteAllowed(n, {}, 'move');
   // #1641 §3.2 — a question's loc IS its code, so neither a question nor a log
   // (nor an ancestor of one) moves; and nothing moves into a log's code space.
