@@ -22,6 +22,7 @@ const SITES: Record<string, Verdict> = {
   'src/api/graphql/schema/resolvers.mutation.app.ts': { n: 2, kind: 'refuses', because: 'createApp: the App and each dependency App ask `apps`', asks: 'apps' },
   'src/api/graphql/schema/resolvers.mutation.appMemory.ts': { n: 2, kind: 'free', because: 'a memory inside an App (app_id set) is not in the `memories` count' },
   'src/api/graphql/schema/installMemory.ts': { n: 1, kind: 'free', because: 'an install memory is not in the `memories` count' },
+  'src/api/graphql/schema/chatHome.ts': { n: 1, kind: 'free', because: 'startChat\'s own personal or private memory in the App (#5027 Ask 3, app_id set) is not in the `memories` count' },
   'src/api/graphql/schema/chat-scope.ts': { n: 1, kind: 'free', because: 'the shared App-class memory (class app) is not in the `memories` count' },
   'src/api/graphql/schema/resolvers.worker.ts': { n: 1, kind: 'free', because: 'a worker memory is App-class and not in the `memories` count' },
   'src/api/graphql/schema/resolvers.mutation.session.ts': { n: 2, kind: 'free', because: 'startAgentSession memories carry app_id (class app/personal inside an App) and are never refused' },
@@ -125,6 +126,7 @@ const INSERTS: Record<string, InsertVerdict> = {
   [`${G}/resolvers.teamWork.ts#teamWorkMutations.recordTeamWork`]: { n: 1, kind: 'counts-not-refused', because: 'a worklog record; never refused' },
   'src/lib/contextReset/contextReset.ts#registerContextResetRecovery': { n: 1, kind: 'counts-not-refused', because: 'a context-reset checkpoint (a session handoff); never refused' },
   'src/lib/agentSkeleton.ts#seedAgentSkeleton': { n: 1, kind: 'counts-not-refused', because: 'an Agent\'s skeleton parents, part of creating the Agent (its own `agents` key is A7c)' },
+  'src/lib/chatbotAncestors.ts#createChatbotContainers': { n: 1, kind: 'counts-not-refused', because: '#5390: the empty container parents of a conversation, stage or prompt node. A door that refuses (writeNodeCore, hadron_create_node, hadron_create_parent_node) counts them in its own `amount` first; the Git sync in its net; the retrofit is a platform write, never refused' },
 };
 
 /**
@@ -278,6 +280,7 @@ const CONTENT_WRITES: Record<string, { n: number; checks: number; because: strin
   'src/integrations/github/syncGraphFromGithub.ts': { n: 3, checks: 1, because: 'each file is judged before its row is touched; over the ceiling it is skipped and reported' },
   'src/jobs/embedNodes.ts': { n: 3, checks: 0, because: 'embedding bookkeeping columns only' },
   'src/lib/agentSkeleton.ts': { n: 1, checks: 0, because: 'an Agent\'s skeleton parents, composed by the platform' },
+  'src/lib/chatbotAncestors.ts': { n: 1, checks: 0, because: '#5390: empty container parents (a name and a fixed description), composed by the platform' },
   'src/lib/channels.ts': { n: 10, checks: 0, because: 'channel roots and their revival or deletion, composed by the platform' },
   'src/lib/chatRoot.ts': { n: 3, checks: 0, because: 'a chat\'s engine state, written by the platform' },
   'src/lib/comments/lifecycle.ts': { n: 2, checks: 0, because: 'comment thread deletion and restore: no content' },

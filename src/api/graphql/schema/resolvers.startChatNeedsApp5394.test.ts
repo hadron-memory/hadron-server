@@ -35,10 +35,8 @@ const adminCtx = (extra: Partial<Context> = {}): Context => ({ db, userId: admin
 
 const seedFlow = async (memoryId: string) => {
   for (const row of [
-    { loc: 'conversations', data: {} },
     { loc: 'conversations:flow', data: { stageOrder: ['step'], isSetup: false } },
     { loc: 'conversations:flow:step', data: { promptRef: 'prompts:step' } },
-    { loc: 'prompts', data: {} },
     { loc: 'prompts:step', content: 'NEEDS APP STAGE', data: {} },
   ]) await db.node.create({ data: { memoryId, name: row.loc, nodeType: 'system', ...row } });
 };
@@ -300,6 +298,79 @@ describe('#5394 shared chats run under the identified App', () => {
     const before = await counts();
     const r = await refusal(M.startChat({}, { agentRef: agentId, scope: 'shared', appRef: bare.id }, as(ann)));
     expect(r.code).toBe('SHARED_CHAT_REQUIRES_APP_CONTEXT');
+    expect(await counts()).toEqual(before);
+  });
+});
+
+// #5430 (#5407 local review P3-1): appKeyMayActFor admits two kinds of shared starter for a pure App key, a live AppMember
+// of its App and a user that App minted (createAppUser, User.externalAppId), who today has no AppMember row. These pin
+// the second kind's shared start: its home, and that the App's members list it (hrn:node:hadronmemory.com:specs:cor:acl:030:01:
+// the creator is provenance, not a gate). Whether the minted user reads it back is deliberately unpinned, in either
+// direction, pending the ruling on trusted or certified Apps (hrn:node:hadronmemory.com:specs:cor:dmo:050:04).
+// Every test starts from the file's beforeEach (cleanDb, fresh org and Apps), so the createUserPermission set here never
+// reaches another test.
+describe('#5430 a shared chat an App key starts for a user its App minted', () => {
+  const appKey = (appId: string, sessionId?: string) => ({ db, appId, roles: [], ...(sessionId ? { sessionId } : {}) }) as unknown as Context;
+  const mint = async (appId: string, externalId: string) => {
+    await db.app.update({ where: { id: appId }, data: { createUserPermission: 'EXPLICIT' } });
+    const user = await M.createAppUser({}, { externalId }, appKey(appId));
+    const row = await db.user.findUniqueOrThrow({ where: { id: user.id }, select: { id: true, externalAppId: true, externalId: true } });
+    expect(row).toEqual({ id: user.id, externalAppId: appId, externalId });
+    return user.id as string;
+  };
+  const noAppMember = async (userId: string) =>
+    expect(await db.appMember.findUnique({ where: { appId_userId: { appId: appB, userId } } })).toBeNull();
+  const mintedStart = async (via: 'session' | 'userId') => {
+    const minted = await mint(appB, `ext-5430-${via}`);
+    // The premise: the App minted this user and wrote no AppMember row for it.
+    await noAppMember(minted);
+    let started;
+    if (via === 'userId') {
+      started = await M.startChat({}, { agentRef: agentId, conversationName: 'flow', scope: 'shared', userId: minted }, appKey(appB));
+    } else {
+      const session = await M.startAgentSession({}, { agentRef: agentId, externalUserId: `ext-5430-${via}` }, appKey(appB));
+      expect(session.userId).toBe(minted);
+      started = await M.startChat({}, { agentRef: agentId, conversationName: 'flow', scope: 'shared' }, appKey(appB, session.id));
+    }
+    // Still no AppMember row after the start: the start admitted the minted user as such, not as a member.
+    await noAppMember(minted);
+    const root = await chatNodeByLocOrThrow(db, started.chatId);
+    // The chat records the minted user as its starter (startChat's data.userId), in the shared tier.
+    expect({ userId: (root.data as any)?.userId, scope: (root.data as any)?.scope }).toEqual({ userId: minted, scope: 'shared' });
+    return { minted, started, root };
+  };
+
+  for (const via of ['session', 'userId'] as const) {
+    it(`home: the chat lives in the App's own shared app-class memory (key ${via === 'session' ? 'bound to the minted user\'s session' : 'naming the minted user by userId'})`, async () => {
+      const { root } = await mintedStart(via);
+      const home = await db.memory.findUniqueOrThrow({ where: { id: root.memoryId as string } });
+      expect({ class: home.class, appId: home.appId, ownerUserId: home.ownerUserId, userId: home.userId })
+        .toEqual({ class: 'app', appId: appB, ownerUserId: null, userId: null });
+      // The same memory a member's shared start in that App uses: one shared home per App, not one per starter.
+      const memberStart = await M.startChat({}, { agentRef: agentId, conversationName: 'flow', scope: 'shared', appRef: appB }, as(ann));
+      expect(await homeOf(memberStart.chatId)).toBe(home.id);
+    });
+
+    it(`listing: an AppMember of the App sees the chat in myChats and myChatsPage (key ${via === 'session' ? 'bound to a session' : 'naming by userId'})`, async () => {
+      const { root } = await mintedStart(via);
+      const Q = resolvers.Query as any;
+      const listed = await Q.myChats({}, { agentRef: agentId }, as(ann));
+      expect(listed.map((c: { loc: string }) => c.loc)).toContain(root.loc);
+      const page = await Q.myChatsPage({}, { agentRef: agentId }, as(ann));
+      expect(page.items.map((c: { loc: string }) => c.loc)).toContain(root.loc);
+    });
+  }
+
+  // The SDL comment's other branch: a user the key may not act for gets the unknown-user refusal and no chat.
+  it('a key of appB naming a user another App minted, or a deleted minted user, is refused USER_NOT_FOUND; nothing is written', async () => {
+    const otherAppsUser = await mint(appA, 'ext-5430-other');
+    const deleted = await mint(appB, 'ext-5430-gone');
+    await db.user.update({ where: { id: deleted }, data: { deletedAt: new Date() } });
+    const before = await counts();
+    for (const userId of [otherAppsUser, deleted]) {
+      const r = await refusal(M.startChat({}, { agentRef: agentId, conversationName: 'flow', scope: 'shared', userId }, appKey(appB)));
+      expect(r.code).toBe('USER_NOT_FOUND');
+    }
     expect(await counts()).toEqual(before);
   });
 });

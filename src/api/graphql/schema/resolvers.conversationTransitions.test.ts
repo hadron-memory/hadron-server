@@ -103,7 +103,6 @@ describe('Hierarchical extractionSpec', () => {
           ],
         },
       },
-      { loc: 'conversations', name: 'conversations' },
       {
         loc: 'conversations:onboarding',
         name: 'onboarding',
@@ -125,7 +124,6 @@ describe('Hierarchical extractionSpec', () => {
           ],
         },
       },
-      { loc: 'prompts', name: 'prompts' },
       { loc: 'prompts:onboarding', name: 'onboarding' },
       { loc: 'prompts:onboarding:welcome', name: 'welcome', content: 'Hello!' },
     ]);
@@ -162,7 +160,6 @@ describe('Hierarchical extractionSpec', () => {
 
   it('stage-level fields override conversation-level on conflict', async () => {
     await seedNodes([
-      { loc: 'conversations', name: 'conversations' },
       {
         loc: 'conversations:test',
         name: 'test',
@@ -204,7 +201,6 @@ describe('Hierarchical extractionSpec', () => {
 describe('onTrack in processChatResponse', () => {
   it('returns onTrack: true by default', async () => {
     await seedNodes([
-      { loc: 'conversations', name: 'conversations' },
       {
         loc: 'conversations:basic',
         name: 'basic',
@@ -234,7 +230,6 @@ describe('onTrack in processChatResponse', () => {
 
   it('returns onTrack: false with reason when LLM reports off-track', async () => {
     await seedNodes([
-      { loc: 'conversations', name: 'conversations' },
       {
         loc: 'conversations:basic',
         name: 'basic',
@@ -280,7 +275,6 @@ describe('onTrack in processChatResponse', () => {
 describe('Goal stack and route history', () => {
   it('startChat initializes goal stack and route history', async () => {
     await seedNodes([
-      { loc: 'conversations', name: 'conversations' },
       {
         loc: 'conversations:onboarding',
         name: 'onboarding',
@@ -320,7 +314,6 @@ describe('Goal stack and route history', () => {
 
   it('processChatResponse appends to route history on stage transition', async () => {
     await seedNodes([
-      { loc: 'conversations', name: 'conversations' },
       {
         loc: 'conversations:flow',
         name: 'flow',
@@ -366,7 +359,6 @@ describe('Goal stack and route history', () => {
 describe('Edge evaluation in processChatResponse', () => {
   it('follows an on_complete edge to another conversation', async () => {
     const nodeIds = await seedNodes([
-      { loc: 'conversations', name: 'conversations' },
       {
         loc: 'conversations:onboarding',
         name: 'onboarding',
@@ -428,7 +420,6 @@ describe('Edge evaluation in processChatResponse', () => {
 
   it('follows a conditional edge only when condition is met', async () => {
     const nodeIds = await seedNodes([
-      { loc: 'conversations', name: 'conversations' },
       {
         loc: 'conversations:main',
         name: 'main',
@@ -496,7 +487,6 @@ describe('Edge evaluation in processChatResponse', () => {
 
   it('does NOT follow a conditional edge when condition is NOT met', async () => {
     const nodeIds = await seedNodes([
-      { loc: 'conversations', name: 'conversations' },
       {
         loc: 'conversations:main',
         name: 'main',
@@ -577,7 +567,6 @@ describe('Edge evaluation in processChatResponse', () => {
     // The existing "NOT met" test above does not discriminate (it passes on Boolean(result) too), so this one reads the
     // condition off `message.data.*`, which the turn's own data does populate, with an absent-field reachability control.
     const nodeIds = await seedNodes([
-      { loc: 'conversations', name: 'conversations' },
       { loc: 'conversations:main', name: 'main', data: { stageOrder: ['check'], isSetup: false } },
       { loc: 'conversations:main:check', name: 'check', data: {} },
       { loc: 'conversations:profile', name: 'profile', data: { stageOrder: ['fill'], isSetup: false } },
@@ -629,7 +618,6 @@ describe('Edge evaluation in processChatResponse', () => {
     // the same scopes Pong uses on email events: message.data (the
     // extracted payload) + chat (the running thread).
     const nodeIds = await seedNodes([
-      { loc: 'conversations', name: 'conversations' },
       {
         loc: 'conversations:thread',
         name: 'thread',
@@ -695,7 +683,6 @@ describe('Edge evaluation in processChatResponse', () => {
 
   it('JSONLogic condition does NOT fire when message.data is unset', async () => {
     const nodeIds = await seedNodes([
-      { loc: 'conversations', name: 'conversations' },
       {
         loc: 'conversations:thread',
         name: 'thread',
@@ -751,7 +738,6 @@ describe('Edge evaluation in processChatResponse', () => {
     // should resolve against the user override (later layer wins).
     const nodeIds = await seedNodes([
       { loc: 'data', name: 'agent-defaults', data: { threshold: 6 } },
-      { loc: 'conversations', name: 'conversations' },
       {
         loc: 'conversations:gate',
         name: 'gate',
@@ -831,7 +817,6 @@ describe('Edge evaluation in processChatResponse', () => {
     // condition (<5) should fail → edge does NOT fire.
     const nodeIds = await seedNodes([
       { loc: 'data', name: 'agent-defaults', data: { threshold: 6 } },
-      { loc: 'conversations', name: 'conversations' },
       {
         loc: 'conversations:gate',
         name: 'gate',
@@ -884,7 +869,6 @@ describe('Edge evaluation in processChatResponse', () => {
 
   it('does not evaluate edges when next_stage is set (normal transition)', async () => {
     const nodeIds = await seedNodes([
-      { loc: 'conversations', name: 'conversations' },
       {
         loc: 'conversations:flow',
         name: 'flow',
@@ -944,7 +928,6 @@ describe('Edge evaluation in processChatResponse', () => {
 describe('Goal descriptions on conversations', () => {
   it('startChat uses goalDescriptions for the initial goal stack entry', async () => {
     await seedNodes([
-      { loc: 'conversations', name: 'conversations' },
       {
         loc: 'conversations:mentoring',
         name: 'mentoring',
@@ -974,7 +957,6 @@ describe('Goal descriptions on conversations', () => {
 
   it('falls back to conversation name when no goalDescriptions', async () => {
     await seedNodes([
-      { loc: 'conversations', name: 'conversations' },
       {
         loc: 'conversations:simple',
         name: 'simple',
@@ -1005,7 +987,6 @@ describe('Goal descriptions on conversations', () => {
 describe('Fallback re-routing', () => {
   it('re-routes from fallback to a matching conversation on sendChatMessage', async () => {
     await seedNodes([
-      { loc: 'conversations', name: 'conversations' },
       {
         loc: 'conversations:fallback',
         name: 'fallback',
@@ -1023,7 +1004,6 @@ describe('Fallback re-routing', () => {
         },
       },
       { loc: 'conversations:mentoring:start', name: 'start', data: { promptRef: 'prompts:mentoring:start' } },
-      { loc: 'prompts', name: 'prompts' },
       { loc: 'prompts:mentoring', name: 'mentoring' },
       { loc: 'prompts:mentoring:start', name: 'start', content: 'Help the user find a mentor.' },
     ]);
@@ -1064,7 +1044,6 @@ describe('Fallback re-routing', () => {
 
   it('stays in fallback when no conversation matches', async () => {
     await seedNodes([
-      { loc: 'conversations', name: 'conversations' },
       {
         loc: 'conversations:fallback',
         name: 'fallback',

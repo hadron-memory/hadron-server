@@ -300,10 +300,10 @@ describe('D: the paths the blind review named (#5400 at a1457934)', () => {
   });
 
   it('D3 the period grant whose owner is deleted between its check and its append writes nothing, logs nothing, caches nothing', async () => {
-    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"organization":"500"}' });
-    setPeriodGrantWriterForTests(async (d, params) => { await softDeleteOrg(org); return grantCredits(d, params); });
+    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"user":"500"}' });
+    setPeriodGrantWriterForTests(async (d, params) => { await softDeleteUser(p); return grantCredits(d, params); });
     const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    await expect(ensurePeriodGrant(db, { organizationId: org }, new Date())).resolves.toBeUndefined();
+    await expect(ensurePeriodGrant(db, { userId: p }, new Date())).resolves.toBeUndefined();
     expect(await db.creditLedgerEntry.count()).toBe(0);
     expect(errors).not.toHaveBeenCalled();
     expect(periodGrantCacheKeysForTests()).toEqual([]);

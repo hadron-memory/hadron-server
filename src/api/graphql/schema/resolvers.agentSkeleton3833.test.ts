@@ -13,7 +13,8 @@ import { AGENT_SKELETON, retrofitAgentSkeletons } from '../../../lib/agentSkelet
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 
-const LOCS = ['boot', 'boot:rules', 'processes', 'tasks'];
+// #5390 added `conversations` and `prompts`.
+const LOCS = ['boot', 'boot:rules', 'processes', 'tasks', 'conversations', 'prompts'];
 let orgId: string;
 let adminId: string;
 

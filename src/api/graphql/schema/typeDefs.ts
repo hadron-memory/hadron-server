@@ -2311,7 +2311,7 @@ export const typeDefs = `#graphql
     key: String!
     "The limit in force, a base-10 integer string: the owner's own limit, else the deployment default for that kind of owner. Null means unlimited."
     limit: String
-    "How much the owner holds now, a base-10 integer string, counted when asked for. A total only."
+    "How much the owner holds now, a base-10 integer string, counted when asked for. A total only. For nodes (hadron-server issue 5434): the nodes a person writes in their personal memory made under an Agent count for that person, not for the Agent's organization."
     used: String!
   }
 
@@ -5394,6 +5394,8 @@ export const typeDefs = `#graphql
     for it, and a SHORT_LIVED Agent's workers ignore it. Set by whoever manages the Agent.
     """
     contextCap: Int
+    "#5027 (hrn:node:hadronmemory.com:specs:cor:acl:030:01): the home a chat takes when startChat names neither memoryRef nor scope. Null (the default) keeps the behaviour from before this field existed. Set by whoever manages the Agent (hrn:node:hadronmemory.com:specs:cor:dmo:050:13), like usesTasks."
+    defaultChatHome: ChatHome
     type: AgentType!
     surfaces: [String!]!
     # #928/#974 persona dressing (cor:agt:020:01): universal metadata that
@@ -5944,9 +5946,14 @@ export const typeDefs = `#graphql
     createdAt: DateTime!
     lastMessageAt: DateTime
     """
-    017-chat-visibility-and-personal-memory.
+    017-chat-visibility-and-personal-memory. #5027: a label derived from the home memory's class (personal, private or
+    knowledge reads private; app or group reads shared), kept for installed clients.
     """
-    scope: ChatScope!
+    scope: ChatScope! @deprecated(reason: "Use homeMemoryClass and homeMemoryUrn (#5027).")
+    "#5027 (hrn:node:hadronmemory.com:specs:cor:acl:030:01, R2: every surface shows the host memory's own kind plus its URN): the class of the memory this chat lives in. scope is kept for installed clients and is a label derived from this class."
+    homeMemoryClass: MemoryClass!
+    "#5027 (hrn:node:hadronmemory.com:specs:cor:acl:030:01): the URN of the memory this chat lives in, in the same form Memory.urn returns (hrn:mem:...)."
+    homeMemoryUrn: String!
     """
     The chat's author (chat-root node's createdBy). Null for legacy
     chats predating createdBy persistence. Surfaces who started a
@@ -15219,7 +15226,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    updateAgent(ref: ID!, name: String, urn: String, description: String, systemMemoryRef: ID, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#4224: omitted or null leaves it unchanged." lifecycle: AgentLifecycle, "#4225: the context cap in tokens, a whole number from 1; omitted leaves it, null clears it (no cap)." contextCap: Int, registerDefaults: RegisterDefaultsInput, "#2171 (R211): replaces the member roles the Agent offers (and nothing else in its installation policy). Omitted or null: unchanged. Empty or malformed: BAD_USER_INPUT. Existing members keep their role." memberRoles: [String!]): Agent!
+    updateAgent(ref: ID!, name: String, urn: String, description: String, systemMemoryRef: ID, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#4224: omitted or null leaves it unchanged." lifecycle: AgentLifecycle, "#4225: the context cap in tokens, a whole number from 1; omitted leaves it, null clears it (no cap)." contextCap: Int, registerDefaults: RegisterDefaultsInput, "#2171 (R211): replaces the member roles the Agent offers (and nothing else in its installation policy). Omitted or null: unchanged. Empty or malformed: BAD_USER_INPUT. Existing members keep their role." memberRoles: [String!], "#5027 (hrn:node:hadronmemory.com:specs:cor:acl:030:01): the Agent's default chat home. Omitted leaves it; null clears it (today's behaviour). The same gate as every other field here: whoever manages the Agent (hrn:node:hadronmemory.com:specs:cor:dmo:050:13)." defaultChatHome: ChatHome): Agent!
 
     """
     Soft-delete an Agent and its owned system memory. Requires management
@@ -15772,11 +15779,14 @@ export const typeDefs = `#graphql
     and detail), and nothing is created. A named start never checks a condition.
     """
     # 017: scope defaults to private (FR-003). #5394: a shared request
-    # runs under the identified App, an App credential's included, and is
-    # started by a person (the signed-in user, or the user an App key acts
-    # for) who is an AppMember of that App, which installs this Agent with a
-    # live licence (FR-006). Otherwise SHARED_CHAT_REQUIRES_APP_CONTEXT.
-    # (SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS is retired.)
+    # runs under the identified App, an App credential's included, which
+    # installs this Agent with a live licence (FR-006), and is started by a
+    # person: a signed-in user who is an AppMember of that App, or the user a
+    # pure App key of that App acts for, who must be a live AppMember of the
+    # App or a user the App created (createAppUser; #5430). Otherwise
+    # SHARED_CHAT_REQUIRES_APP_CONTEXT (or the unknown-user refusal for a user
+    # the key may not act for). Either way the chat lives in the App's shared
+    # app-class memory. (SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS is retired.)
     #
     # 019: isTestRun suppresses the AgentSubscription auto-provision
     # side-effect for chats started by the spec-019 Tester. Default
@@ -15799,7 +15809,7 @@ export const typeDefs = `#graphql
     # session, and chats only with its session's Agent. Anything else reads as an unknown user
     # or Agent. A signed-in user acts as themselves. The
     # subscription is provisioned in the transaction that creates the chat.
-    startChat(agentRef: ID!, userId: String, conversationName: String, scope: ChatScope = private, isTestRun: Boolean = false, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String, "#3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): optional AI config choice for this chat, stored with it: \`default\` or one of the chat App's own config ids from chatAiConfigChoices. Omitted keeps what the chat has. Any other id is refused as a missing config, revealing nothing about it." aiConfigChoice: String, "#5394 (hrn:node:hadronmemory.com:specs:cor:cht:010:02): the App this chat runs under (ID or URN), for a caller whose credential carries no App; the CLI's global --app. Naming another App than the credential's is refused CHAT_APP_NOT_IDENTIFIED." appRef: ID): ChatStartResult!
+    startChat(agentRef: ID!, userId: String, conversationName: String, "Omitted: memoryRef decides when given, else the Agent's defaultChatHome, else private (#5027). With memoryRef it must be omitted or equal the label the named memory's class derives, else BAD_USER_INPUT, judged after the memoryRef gate so it never discloses the class of a memory the caller cannot use, and before anything is written." scope: ChatScope, "#5027 (hrn:node:hadronmemory.com:specs:cor:acl:030:01): the memory the chat is saved in, an id or URN. It must be readable and writable by the caller as themselves, of class app, group, personal or private, and of this App's scope; anything else is refused CHAT_HOME_INVALID with one fixed message, before anything is created. An encrypted memory is allowed; with no cached key the start answers MEMORY_ENCRYPTED_NO_KEY." memoryRef: ID, isTestRun: Boolean = false, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String, "#3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): optional AI config choice for this chat, stored with it: \`default\` or one of the chat App's own config ids from chatAiConfigChoices. Omitted keeps what the chat has. Any other id is refused as a missing config, revealing nothing about it." aiConfigChoice: String, "#5394 (hrn:node:hadronmemory.com:specs:cor:cht:010:02): the App this chat runs under (ID or URN), for a caller whose credential carries no App; the CLI's global --app. Naming another App than the credential's is refused CHAT_APP_NOT_IDENTIFIED." appRef: ID): ChatStartResult!
     """
     Process a user message (saves message, builds context, returns next prompt).
     #3501: CHAT_STATE_INVALID refuses unusable conversational state before the turn writes or builds a model prompt.
@@ -18315,6 +18325,16 @@ export const typeDefs = `#graphql
   and model: a reporting input, never authorization.
   """
   enum EffortLevel { LOW MEDIUM HIGH XHIGH MAX UNSET NOT_APPLICABLE }
+
+  "#5027 (hrn:node:hadronmemory.com:specs:cor:acl:030:01, D-2026-11-26-008): where a chat goes when its starter names no home memory. There is no GROUP value: a group home needs a named memory, so it is chosen only through startChat(memoryRef:)."
+  enum ChatHome {
+    "The App's shared memory, found or created as a shared chat's is."
+    APP_SHARED
+    "The caller's own personal memory in the App (one per class, hrn:node:hadronmemory.com:specs:cor:dmo:060:20)."
+    PERSONAL
+    "The caller's own private memory in the App (one per class, hrn:node:hadronmemory.com:specs:cor:dmo:060:20)."
+    PRIVATE
+  }
 
   "#4224 (S3 of #4229): how long an Agent's workers run."
   enum AgentLifecycle {
