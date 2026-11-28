@@ -50,7 +50,8 @@
     "@aws-sdk/s3-request-presigner": "^3.1171.0",
     "@hadron-memory/access-control": "0.3.0",
     "@hadron-memory/urn-lib-js": "0.0.23",
-    "@modelcontextprotocol/sdk": "^1.32.0",
+    "@modelcontextprotocol/node": "2.1.2",
+    "@modelcontextprotocol/server": "2.4.0",
     "@mozilla/readability": "^0.6.0",
     "@nats-io/jetstream": "^3.4.0",
     "@nats-io/transport-node": "^3.4.0",
@@ -81,6 +82,7 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "2.4.0",
     "@types/bcrypt": "^5.0.2",
     "@types/commonmark": "0.27.10",
     "@types/cookie-parser": "^1.4.10",

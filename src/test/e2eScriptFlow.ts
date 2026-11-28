@@ -1,4 +1,5 @@
 import type { PrismaClient } from '../generated/prisma/index.js';
+import { activeMemoryWriteGrant } from './appGrants5404.js';
 
 /**
  * #4624 — the E2E stack's script-node fixture flows (cor:agt:010:04). A script node makes one run-tool call with NO
@@ -6,7 +7,7 @@ import type { PrismaClient } from '../generated/prisma/index.js';
  * The tool is `hadron_create_node`: an in-process write, nothing leaves the stack.
  *
  * One synthetic knowledge memory per org carries two entry flows. Authority is NOT stubbed: the run resolves its principal
- * and its write authority through the product (consent principal, App write grant, policy chain), so the fixture only
+ * and its write authority through the product (consent principal, a signed `memory.write` grant (#5404), policy chain), so the fixture only
  * supplies the data those paths read:
  *  - `flows:script-write` creates `runs:script-write-result`, a loc under the one prefix the App holds a write grant for;
  *  - `flows:script-refused` targets `denied:script-refused-result`, under a prefix with NO grant, so the product refuses it.
@@ -47,11 +48,11 @@ export async function seedE2eScriptFlow(db: PrismaClient, o: {
   await db.agentMemoryItem.create({ data: { id: o.id(`${o.org}:flows:item`), agentId: o.agentId, memoryId, role: 'read' } });
   const node = (loc: string, extra: Record<string, unknown> = {}) => db.node.create({ data: { id: o.id(`${o.org}:flows:${loc}`),
     memoryId, loc, name: loc.split(':').pop()!, tags: ['e2e'], ...extra } as never });
-  // The register node a write grant cites as its authority (cor:acl, the grant's own record).
+  // The register node the fixture's write authority cites (cor:acl, the grant's own record).
   await node('register:script-fixture-authority', { content: 'Synthetic E2E fixture: the authority the script write grant cites.' });
-  await db.appMemoryWriteGrant.create({ data: { id: o.id(`${o.org}:flows:grant`), appId: o.appId, memoryId,
-    prefix: E2E_SCRIPT_GRANT_PREFIX, grantedBy: o.grantedBy,
-    registerNodeUrn: e2eFlowNodeUrn(o.org, 'register:script-fixture-authority') } });
+  // #5404: the App's write authority is a signed `memory.write` grant on the one prefix (ruling 0083's unsigned row is retired),
+  // written ACTIVE around the signing ceremony. `grantedBy` signs it, so it must manage the flows memory for the write to count.
+  await activeMemoryWriteGrant(o.appId, memoryId, { issuerUserId: o.grantedBy, prefix: E2E_SCRIPT_GRANT_PREFIX, db });
   const call = (loc: string) => ({ script: { call: { tool: 'hadron_create_node', args: {
     urn: e2eFlowNodeUrn(o.org, loc), name: 'Script result', content: 'Written by the script-node fixture run.', nodeType: 'info' } } } });
   await node(E2E_SCRIPT_WRITE_ENTRY, { data: call(E2E_SCRIPT_WRITE_RESULT) as never });

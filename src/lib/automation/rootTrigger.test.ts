@@ -1,12 +1,13 @@
 /**
- * #2883: a run's root trigger, the automation a read grant belongs to (Vera, team chat #66533, Q1 and Q2).
+ * #2883: a run's root trigger (Vera, team chat #66533, Q1 and Q2). #5404 retired the per-automation read grant it was written for;
+ * the function moved to src/lib/automation/rootTrigger.ts, where the team read (runTeamRead) still uses it.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
-import { db } from '../integrations/db/client.js';
-import { cleanDb, createDbAppWithKey } from '../test/helpers.js';
-import { generateId } from './id.js';
-import { rootTriggerOfRun } from './automationReadGrant.js';
-import { testRunAgentId } from '../test/runAgent.js';
+import { db } from '../../integrations/db/client.js';
+import { cleanDb, createDbAppWithKey } from '../../test/helpers.js';
+import { generateId } from '../id.js';
+import { rootTriggerOfRun } from './rootTrigger.js';
+import { testRunAgentId } from '../../test/runAgent.js';
 
 let org: { id: string };
 let app: { id: string };

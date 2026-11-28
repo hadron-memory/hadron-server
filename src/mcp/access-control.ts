@@ -46,7 +46,7 @@ import { isRunPrincipal } from '../lib/auth/runPrincipal.js';
 import { isForeignUserHolding, isUserHolding } from '../lib/auth/userHolding.js';
 import { mcpRequestSessionContext } from './requestSession.js';
 import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../lib/auth/publicKnowledgeRead.js';
-import { userlessRunHoldsWriteGrant, type WriteDestination } from '../lib/appWriteGrant.js';
+import { userlessRunHoldsMemoryWriteGrant, type WriteDestination } from '../lib/grants/writeGrant.js';
 import { installMemoryAudience, isInstallMemoryRow, readableInstallMemoryIds } from '../lib/auth/installMemory.js';
 import { canManageAgentSystemMemory } from '../lib/auth/managedSystemMemory.js';
 
@@ -1004,7 +1004,7 @@ export interface MemoryGateOptions {
   /**
    * #2484: the node the caller is about to create or update, and where. Named ONLY by the node write door and the run
    * write pre-check; every other verb (delete, move, edges, settings, stored files) leaves it unset. It is what lets
-   * an App's prefix-scoped write grant ({@link userlessRunHoldsWriteGrant}) answer at all, so a forgotten option
+   * an App's `memory.write` grant ({@link userlessRunHoldsMemoryWriteGrant}) answer at all, so a forgotten option
    * fails closed.
    */
   destination?: WriteDestination;
@@ -1093,12 +1093,13 @@ export async function canWriteToMemory(
   // authority fence (Diego P2 on #2064); an inline MCP writer cannot, so it gets no write.
   if (isInstallMemoryRow(memory)) return false;
 
-  // #2484 (cor:agt:010:01): the one way a USERLESS run principal writes outside what it already could — an App's
-  // prefix-scoped, live-checked write grant on THIS destination. Additive and fail-closed: a miss falls through to
-  // every rule below unchanged. It sits before the personal/private branch because that branch answers a run
-  // principal with no user false, and a private memory is otherwise "categorically unavailable to every AppRun"
-  // (#1719 R5a): Holger's 2026-10-27 ruling lets the memory's OWNER lift that for one prefix, never an encrypted one.
-  if (opts.destination && await userlessRunHoldsWriteGrant(db, auth, memoryId, opts.destination)) return true;
+  // #5404 (cor:acl:140:02, cor:agt:010:01): the one way a USERLESS run principal writes outside what it already could, a signed
+  // `memory.write` grant held by its App that covers THIS destination, judged live (it replaces ruling 0083's unsigned write grant,
+  // #2484, whose rows are deleted at deploy). Additive and fail-closed: a miss falls through to every rule below unchanged. It sits
+  // before the personal/private branch because that branch answers a run principal with no user false, and a private memory is
+  // otherwise "categorically unavailable to every AppRun" (#1719 R5a): the memory's OWNER lifts that by signing the grant, never for
+  // an encrypted one.
+  if (opts.destination && await userlessRunHoldsMemoryWriteGrant(db, auth, memoryId, opts.destination)) return true;
 
   if (memory.class === 'personal' || memory.class === 'private') {
     if (auth.userId !== memory.userId || auth.impersonation) return false;

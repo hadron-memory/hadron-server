@@ -42,7 +42,8 @@ import {
   GOVERNED_KINDS,
 } from '../lib/governedRole.js';
 import { assertEdgeSourceWritersById, assertRoleWritersForNodes, assertRoleWritersForWrite, roleWriterRefusalText } from '../lib/nodeRoleWriters.js';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer, createMcpHandler, isInitializeRequest } from '@modelcontextprotocol/server';
+import { registerLegacyTool, type HadronMcpServer } from './hadronMcpServer.js';
 import { generateId } from '../lib/id.js';
 import {
   type UsageNodeRef,
@@ -121,8 +122,7 @@ import {
   lockEdgeEndpointMemories,
   lockLiveEdgeEndpoints,
 } from '../lib/edgeEndpointLock.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { NodeStreamableHTTPServerTransport as StreamableHTTPServerTransport, toNodeHandler } from '@modelcontextprotocol/node';
 import { z } from 'zod';
 import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
@@ -402,12 +402,13 @@ function noteFragment(projection: string, fragment: string | undefined): string 
 // #1012 — durable per-client MCP selections (active App / active memory).
 import {
   CLIENT_KEY_HEADER,
-  normalizeClientKey,
+  selectionClientKey,
   loadMcpSessionState,
   saveActiveApp,
   saveActiveMemory,
   saveActiveOrg,
   saveActiveScope,
+  type RestoredMcpSelection,
 } from '../lib/mcpSessionState.js';
 // Spec 049 Phase 1 — the active-organization ladder (D-2026-09-13-003).
 import { resolveActiveOrg, type ActiveOrgResolution } from '../lib/auth/activeOrg.js';
@@ -2467,6 +2468,8 @@ export function createMcpServerInstance(
     restoredOrgId?: string;
     /** Spec 049 Phase 3 — an already-re-authorized active-scope selection to start from. */
     restoredScopeId?: string;
+    /** #2605 — built for ONE sessionless request: nothing is held between requests, and no server-to-client request can be serviced. */
+    sessionless?: boolean;
   } = {},
 ): McpServer {
   /**
@@ -2475,6 +2478,14 @@ export function createMcpServerInstance(
    * keeps the pre-#1012 in-memory-only behaviour, so opting out costs nothing.
    */
   const clientKey = opts.clientKey ?? null;
+  const sessionless = opts.sessionless === true;
+  /**
+   * #2605: under sessionless serving a caller with no stored-selection key keeps nothing from one request to the next,
+   * so a successful `hadron_set_active_*` must not read as durable. Empty everywhere else.
+   */
+  const requestOnlyNote = sessionless && clientKey === null
+    ? ' This selection applies to this request only: the connection holds no state between requests, and this caller has no stored selection (an OAuth login, or the X-Hadron-Client-Id header, gives one).'
+    : '';
 
   /**
    * #1009 — this MCP session replaced one the client had already been using
@@ -2502,10 +2513,11 @@ export function createMcpServerInstance(
     'memory you had selected — selections live only for the current connection, ' +
     'and clients re-connect without mentioning it. This is not a client ' +
     'limitation and nothing you did is wrong: re-select and continue.';
+  // `tool` is Hadron's own positional registration method, installed by the gate below (see ./hadronMcpServer.ts).
   const server = new McpServer(
     { name: 'hadron', version: HADRON_SERVER_VERSION },
     { capabilities: { tools: {} } },
-  );
+  ) as HadronMcpServer;
 
   /**
    * "Worker Name (session <id>)" for each session, in order — for refusals and
@@ -2678,7 +2690,7 @@ export function createMcpServerInstance(
 
   {
     type ToolCallback = (args: unknown, extra: unknown) => unknown;
-    const sdkRegisterTool = server.tool.bind(server) as (...args: unknown[]) => unknown;
+    const sdkRegisterTool = (...args: unknown[]) => registerLegacyTool(server, args);
     // Every registered handler (including reads and caller-session settlement)
     // gets this outer boundary before the SDK can stringify a database fault.
     const registerTool = (...args: unknown[]) => {
@@ -2705,8 +2717,10 @@ export function createMcpServerInstance(
       }
       const cbIndex = args.length - 1;
       const callback = args[cbIndex] as ToolCallback;
-      // The parameter shape is the first plain object after the name (a
-      // description string may precede it; annotations may follow it).
+      // The parameter shape is the first plain object after the name. Since SDK
+      // 2.x (#2605) the only accepted form is (name, description, shape,
+      // handler): registerLegacyTool refuses any other at registration, so a
+      // tool that adds annotations fails at boot until the shim learns them.
       const shapeIndex = args.findIndex((a, i) => i > 0 && i < cbIndex && typeof a === 'object' && a !== null);
       if (shapeIndex < 0) {
         throw new Error(`#1701: tool ${name} is gated as a writer but declares no parameter shape to carry session`);
@@ -3580,7 +3594,7 @@ export function createMcpServerInstance(
       const dep = getDeploymentInfo();
       return textResult(
         `Active memory set to: ${safeEmitEntityUrnV2('memory', mem.urn)} ` +
-          `(server: ${dep.baseUrl}, version: ${dep.version}).`,
+          `(server: ${dep.baseUrl}, version: ${dep.version}).` + requestOnlyNote,
       );
     },
   );
@@ -3887,7 +3901,7 @@ export function createMcpServerInstance(
             appUrn: r.app.urn,
           });
           return textResult(
-            `Active App set to: **${safeEmitEntityUrnV2('app', r.app.urn)}** (${r.app.name}). Subsequent App-scoped tools will operate against this App. Call hadron_set_active_app again with a different identifier to switch, or hadron_list_apps to see other options.`,
+            `Active App set to: **${safeEmitEntityUrnV2('app', r.app.urn)}** (${r.app.name}). Subsequent App-scoped tools will operate against this App. Call hadron_set_active_app again with a different identifier to switch, or hadron_list_apps to see other options.` + requestOnlyNote,
           );
         }
         case 'ambiguous': {
@@ -4008,7 +4022,7 @@ export function createMcpServerInstance(
           ? ` Note: your active App is owned by ${await renderOrgLine(effective.organizationId)}, which outranks this selection while it is active — the ladder resolves to that organization until you switch or clear the App.`
           : '';
       return textResult(
-        `Active organization set to ${await renderOrgLine(r.organizationId)} and stored for this client. It is the ladder's third rung: a call that names an organization, or an org-owned active App, outranks it. hadron_server_info reports what currently resolves; the scope ladder (spec 049 Phase 3) is the read surface that consumes it.${outranked}`,
+        `Active organization set to ${await renderOrgLine(r.organizationId)} and stored for this client. It is the ladder's third rung: a call that names an organization, or an org-owned active App, outranks it. hadron_server_info reports what currently resolves; the scope ladder (spec 049 Phase 3) is the read surface that consumes it.${outranked}${requestOnlyNote}`,
       );
     },
   );
@@ -4474,7 +4488,7 @@ export function createMcpServerInstance(
       await saveActiveScope(db, auth, clientKey, row.id);
       mcpLog('info', 'active_scope_set', { userId: auth.userId, mcpSessionId: getSessionId(), scopeId: row.id });
       const now = await mcpSearchScope(undefined, false);
-      return textResult(`Active scope set to "${row.name}" (id ${row.id}) and stored for this client.${now ? `\n${scopeNoteLine(now)}` : ''}`);
+      return textResult(`Active scope set to "${row.name}" (id ${row.id}) and stored for this client.${now ? `\n${scopeNoteLine(now)}` : ''}${requestOnlyNote}`);
     },
   );
 
@@ -9435,6 +9449,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
   }
 
   function clientSupportsElicitation(): boolean {
+    // #2605: a per-request instance has no stream back to the client, so a picker would hang or be dropped. Report no
+    // support: every caller already falls back to the list relay, which is the typed answer (cor:api:060:03).
+    if (sessionless) return false;
     try {
       return !!server.server.getClientCapabilities()?.elicitation;
     } catch {
@@ -9449,6 +9466,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     options: Array<{ const: string; title: string }>,
     message: string,
   ): Promise<string | null> {
+    if (sessionless) throw new Error('Elicitation is not available under sessionless serving.');
     const result = await server.server.elicitInput({
       mode: 'form',
       message,
@@ -13143,6 +13161,108 @@ async function handleUnknownOrNewMcpSession(req: Request, res: Response, session
   }
 }
 
+/**
+ * #2605: what a request needs settled about its principal before a server instance is built for it: the App the
+ * credential resolves to, the key its selections are stored under, and its re-authorized stored selections applied to
+ * `auth`. ONE function for both serving modes (a connection being opened, and a sessionless request), so the
+ * precedence below cannot drift between them. Mutates `auth` in place.
+ *
+ * `opened` is the connection being opened, or null for a sessionless request. Its two log lines record an event that
+ * happens once per connection; per request they would repeat on every call and say nothing.
+ */
+async function prepareMcpPrincipal(
+  req: Request,
+  auth: AuthContext,
+  opened: { isReconnect: boolean } | null,
+): Promise<{ cachedAppResolution: AppResolution | null; clientKey: string | null; restored: RestoredMcpSelection }> {
+  // Spec 025 / 026 — App-identification resolution at the MCP boundary for
+  // user-credential callers (userId set, appId not set; JWT or
+  // hdr_user_<…> Bearer). App-key callers already have appId populated by
+  // the middleware and skip this block.
+  //
+  // **Spec-026 change** (relative to spec-025):
+  // - The legacy `multiple_apps_resolved` HTTP 409 NO LONGER fires here at
+  //   session-init time. Spec 026 requires multi-App sessions to OPEN so
+  //   the user can call `hadron_list_apps` + `hadron_set_active_app` to pick an App.
+  // - For multi-App users, `auth.appId` is left unset at session-init and
+  //   the resolution is cached for per-tool-call dispatch.
+  // - Single-App users continue to get `auth.appId` populated here (regime
+  //   `a` unchanged from spec 025).
+  // - The legacy 409 text survives as the FR-016 fall-through tool-error
+  //   envelope: an App-scoped tool call from a multi-App user who has NOT
+  //   touched the new selection surface gets that text in a tool error
+  //   instead of an HTTP 409.
+  //
+  // **`auth` is mutated in place** on the resolved path. Today this is
+  // safe — `auth` is local to handleMcpRequest and the closure inside
+  // `createMcpServerInstance` reads the post-mutation state.
+  let cachedAppResolution: AppResolution | null = null;
+  /** #1012 — did `auth.appId` come from the single-App default rather than a credential? */
+  let appIdFromSingleAppDefault = false;
+  if (auth.userId && !auth.appId) {
+    cachedAppResolution = await resolveAppForRequest(auth.userId, db);
+    if (cachedAppResolution.kind === 'resolved') {
+      auth.appId = cachedAppResolution.appId;
+      auth.organizationId = cachedAppResolution.organizationId ?? undefined;
+      // #1012 (PR #1013 review, Codex P1): remember that this came from the
+      // regime-a DEFAULT, not from a credential — a stored explicit selection
+      // is allowed to override it below, but must never re-point an App key.
+      appIdFromSingleAppDefault = true;
+    }
+    if (cachedAppResolution.kind === 'multi-app' && opened) {
+      mcpLog('warn', 'multi_app_session_opened_without_selection', {
+        userId: auth.userId,
+      });
+    }
+    // 'no-app': continue without setting appId; downstream tool calls
+    // fail with their existing errors (zero-App fall-through unchanged
+    // from spec 025).
+  }
+
+  // #1012: the client's stable instance id, if it opted in. Read here — at
+  // session construction — because that is the one moment a restore is useful:
+  // the selections must be in place before the first tool call, not after one
+  // has already been refused.
+  const clientKey = selectionClientKey(req.headers[CLIENT_KEY_HEADER], auth);
+
+  // Restore this client's durable selections, re-authorized (see
+  // loadMcpSessionState — a stored selection is a cache of a choice, never a
+  // grant). Applied to `auth` before the server instance closes over it, so
+  // every downstream `if (!auth.appId)` sees the restored value with no
+  // per-tool plumbing — the same shape requireAppScope already relies on.
+  const restored = await loadMcpSessionState(db, auth, clientKey);
+  // Precedence, strongest first (PR #1013 review, Codex P1):
+  //
+  //   1. an App-KEY credential — App identity IS the credential and a stored
+  //      selection must never re-point it (`appIdFromSingleAppDefault` is false
+  //      there, and `loadMcpSessionState` returns nothing for a userId-less
+  //      principal anyway);
+  //   2. this client's EXPLICIT stored selection, re-authorized above;
+  //   3. the regime-a single-App default.
+  //
+  // 2 outranking 3 is the fix: a user who explicitly chose App A can later drop
+  // to exactly one AppMember row (say App B) while remaining a valid
+  // participant in A by org CONTRIBUTOR or ownership. `resolveAppForRequest`
+  // then resolves B as "their only App", and taking that over the choice they
+  // actually made would silently retarget the next App-scoped write. A stated
+  // preference outranks an inferred default whenever it still authorizes.
+  if (restored.appId && (!auth.appId || appIdFromSingleAppDefault)) {
+    const overrodeDefault = auth.appId !== undefined && auth.appId !== restored.appId;
+    auth.appId = restored.appId;
+    auth.organizationId = restored.organizationId ?? undefined;
+    if (opened) {
+      mcpLog('info', 'mcp_session_state_restored', {
+        userId: auth.userId,
+        appId: restored.appId,
+        restoredMemory: Boolean(restored.memoryUrn),
+        overrodeSingleAppDefault: overrodeDefault,
+        reconnect: opened.isReconnect,
+      });
+    }
+  }
+  return { cachedAppResolution, clientKey, restored };
+}
+
 async function openOrRejectMcpSession(
   req: Request,
   res: Response,
@@ -13239,58 +13359,6 @@ async function openOrRejectMcpSession(
   }
   held.reservation = reservation;
 
-  // Spec 025 / 026 — App-identification resolution at the MCP boundary for
-  // user-credential callers (userId set, appId not set; JWT or
-  // hdr_user_<…> Bearer). App-key callers already have appId populated by
-  // the middleware and skip this block.
-  //
-  // **Spec-026 change** (relative to spec-025):
-  // - The legacy `multiple_apps_resolved` HTTP 409 NO LONGER fires here at
-  //   session-init time. Spec 026 requires multi-App sessions to OPEN so
-  //   the user can call `hadron_list_apps` + `hadron_set_active_app` to pick an App.
-  // - For multi-App users, `auth.appId` is left unset at session-init and
-  //   the resolution is cached for per-tool-call dispatch.
-  // - Single-App users continue to get `auth.appId` populated here (regime
-  //   `a` unchanged from spec 025).
-  // - The legacy 409 text survives as the FR-016 fall-through tool-error
-  //   envelope: an App-scoped tool call from a multi-App user who has NOT
-  //   touched the new selection surface gets that text in a tool error
-  //   instead of an HTTP 409.
-  //
-  // **`auth` is mutated in place** on the resolved path. Today this is
-  // safe — `auth` is local to handleMcpRequest and the closure inside
-  // `createMcpServerInstance` reads the post-mutation state.
-  let cachedAppResolution: AppResolution | null = null;
-  /** #1012 — did `auth.appId` come from the single-App default rather than a credential? */
-  let appIdFromSingleAppDefault = false;
-  if (auth.userId && !auth.appId) {
-    cachedAppResolution = await resolveAppForRequest(auth.userId, db);
-    if (cachedAppResolution.kind === 'resolved') {
-      auth.appId = cachedAppResolution.appId;
-      auth.organizationId = cachedAppResolution.organizationId ?? undefined;
-      // #1012 (PR #1013 review, Codex P1): remember that this came from the
-      // regime-a DEFAULT, not from a credential — a stored explicit selection
-      // is allowed to override it below, but must never re-point an App key.
-      appIdFromSingleAppDefault = true;
-    }
-    if (cachedAppResolution.kind === 'multi-app') {
-      mcpLog('warn', 'multi_app_session_opened_without_selection', {
-        userId: auth.userId,
-      });
-    }
-    // 'no-app': continue without setting appId; downstream tool calls
-    // fail with their existing errors (zero-App fall-through unchanged
-    // from spec 025).
-  }
-
-  // Session not found or no session — create a new one.
-  // This handles both first-time connections and reconnections after server restart.
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: sessionId
-      ? () => sessionId  // Reuse the client's session ID so it doesn't need to re-init
-      : () => randomUUID(),
-  });
-
   // #1009: is this session replacing one the client had already been using?
   // Two shapes — a re-initialize still carrying the stale id (certain), or a
   // headerless re-initialize shortly after this process 404'd someone's session
@@ -13299,45 +13367,15 @@ async function openOrRejectMcpSession(
   // client that will not mention it, so the tools need to be able to say so.
   const isReconnect = isLikelyReconnect(sessionId);
 
-  // #1012: the client's stable instance id, if it opted in. Read here — at
-  // session construction — because that is the one moment a restore is useful:
-  // the selections must be in place before the first tool call, not after one
-  // has already been refused.
-  const clientKey = normalizeClientKey(req.headers[CLIENT_KEY_HEADER]);
+  const { cachedAppResolution, clientKey, restored } = await prepareMcpPrincipal(req, auth, { isReconnect });
 
-  // Restore this client's durable selections, re-authorized (see
-  // loadMcpSessionState — a stored selection is a cache of a choice, never a
-  // grant). Applied to `auth` before the server instance closes over it, so
-  // every downstream `if (!auth.appId)` sees the restored value with no
-  // per-tool plumbing — the same shape requireAppScope already relies on.
-  const restored = await loadMcpSessionState(db, auth, clientKey);
-  // Precedence, strongest first (PR #1013 review, Codex P1):
-  //
-  //   1. an App-KEY credential — App identity IS the credential and a stored
-  //      selection must never re-point it (`appIdFromSingleAppDefault` is false
-  //      there, and `loadMcpSessionState` returns nothing for a userId-less
-  //      principal anyway);
-  //   2. this client's EXPLICIT stored selection, re-authorized above;
-  //   3. the regime-a single-App default.
-  //
-  // 2 outranking 3 is the fix: a user who explicitly chose App A can later drop
-  // to exactly one AppMember row (say App B) while remaining a valid
-  // participant in A by org CONTRIBUTOR or ownership. `resolveAppForRequest`
-  // then resolves B as "their only App", and taking that over the choice they
-  // actually made would silently retarget the next App-scoped write. A stated
-  // preference outranks an inferred default whenever it still authorizes.
-  if (restored.appId && (!auth.appId || appIdFromSingleAppDefault)) {
-    const overrodeDefault = auth.appId !== undefined && auth.appId !== restored.appId;
-    auth.appId = restored.appId;
-    auth.organizationId = restored.organizationId ?? undefined;
-    mcpLog('info', 'mcp_session_state_restored', {
-      userId: auth.userId,
-      appId: restored.appId,
-      restoredMemory: Boolean(restored.memoryUrn),
-      overrodeSingleAppDefault: overrodeDefault,
-      reconnect: isReconnect,
-    });
-  }
+  // Session not found or no session — create a new one.
+  // This handles both first-time connections and reconnections after server restart.
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: sessionId
+      ? () => sessionId  // Reuse the client's session ID so it doesn't need to re-init
+      : () => randomUUID(),
+  });
 
   const mcpServer = createMcpServerInstance(
     auth,
@@ -13375,6 +13413,189 @@ async function openOrRejectMcpSession(
     }
   } else {
     reservation.convert();
+  }
+}
+
+// ── #2605: sessionless serving, behind MCP_SERVING_MODE (off by default) ─────────────────────────────────────────────
+//
+// The ruled end state of /mcp (Holger, 2026-11-20): the server keeps nothing about a connection, so any request can be
+// served by any process. This path exists beside the sessionful one so it can merge without serving anyone and be
+// tested first (ruling 8); the setting and the sessionful code are removed together once it has replaced them.
+//
+// One server instance is built per request by the SDK's per-request handler, which serves both protocol eras on one
+// endpoint: a 2025-era client's `initialize` gets no `Mcp-Session-Id` and its later requests are served without one,
+// and a 2026-07-28 client is served natively. GET and DELETE answer 405: there is no stream to open and no session to
+// end.
+//
+// What a request gets instead of connection state:
+//   - its credential, resolved on every request (so a revoked credential or a changed role takes effect at once);
+//   - the `X-Hadron-Session` header is REFUSED (400, `SESSION_HEADER_UNSUPPORTED`), not bound and not dropped: it narrows a
+//     pure App key, so dropping it would widen the key; honouring it is plan H1/H2;
+//   - its stored selections (`prepareMcpPrincipal`, keyed by client id header or OAuth client).
+// Nothing is remembered between two requests of one client: a selection made by a caller with no stored-selection key
+// lasts for that one request. A named session supplying the App and memory is the next slice (plan H1/H2).
+//
+// Known limits, and why the mode is off (each must be settled before it is turned on):
+//   - The stored selection is read on EVERY request, so two chats that present one credential (two conversations in
+//     one connector) move each other's App and memory between calls, with no warning. Sessionful serving reads it only
+//     when a connection is opened. Pinned in server.sessionless2605.test.ts; the session handle (H1/H2) fixes it.
+//   - No bound on requests in flight (plan Q6). That includes `subscriptions/listen`, a long-lived SSE response over
+//     POST, which the 405 does not stop and the stopping-drain shutdown close (#3797) does not track. The SDK's own cap
+//     on listen streams (1024) is one pool for every principal, so one caller can fill it for all.
+//   - Encrypted memories cannot be unlocked: `hadron_unlock_memory` and `hadron_lock_memory` hold the key per
+//     connection and answer "No active MCP session." here.
+//   - Turning the mode back off strands connected clients: they send no `Mcp-Session-Id`, and the sessionful path
+//     answers a non-initialize request without one with the SDK's 400 "Server not initialized", which clients treat
+//     as fatal until they restart.
+
+/** The exact value that selects sessionless serving. Anything else, including unset, is today's sessionful serving. */
+export const MCP_SERVING_MODE_SESSIONLESS = 'sessionless';
+
+/** Read per request, so the mode changes with a restart and no redeploy. */
+export function mcpServingMode(): 'sessionful' | 'sessionless' {
+  return process.env.MCP_SERVING_MODE === MCP_SERVING_MODE_SESSIONLESS ? 'sessionless' : 'sessionful';
+}
+
+/** The JSON-RPC messages of a request body (one, or a batch), tolerating any other shape. */
+function jsonRpcMessages(body: unknown): Array<{ method?: unknown; id?: unknown }> {
+  const items = Array.isArray(body) ? body : [body];
+  return items.filter((m): m is { method?: unknown; id?: unknown } => typeof m === 'object' && m !== null);
+}
+
+const MCP_SESSION_HEADER_NAME = 'X-Hadron-Session';
+
+/** True when the request names a worker session in the header, in any spelling bindPresentedSession would act on. */
+function presentedSessionHeader(req: Request): boolean {
+  const header = req.headers['x-hadron-session'];
+  return (Array.isArray(header) ? header[0] : header) ? true : false;
+}
+
+/** What `handleMcpSessionlessRequest` settled about the principal, handed to the per-request factory. */
+interface SessionlessPrincipal {
+  auth: AuthContext;
+  cachedAppResolution: AppResolution | null;
+  clientKey: string | null;
+  restored: RestoredMcpSelection;
+}
+
+/** The key under the SDK's pass-through `authInfo.extra` that carries the {@link SessionlessPrincipal}. */
+const SESSIONLESS_PRINCIPAL_KEY = 'hadronPrincipal';
+
+const sessionlessMcpHandler = createMcpHandler(
+  ({ authInfo }) => {
+    const principal = authInfo?.extra?.[SESSIONLESS_PRINCIPAL_KEY] as SessionlessPrincipal | undefined;
+    // Only handleMcpSessionlessRequest calls this handler, and it always passes one. Building an instance for nobody
+    // would be an unauthenticated tool surface, so refuse instead.
+    if (!principal) throw new Error('sessionless MCP request reached the server factory without a principal');
+    return createMcpServerInstance(principal.auth, () => undefined, principal.cachedAppResolution, {
+      isReconnect: false,
+      sessionless: true,
+      clientKey: principal.clientKey,
+      restoredMemoryUrn: principal.restored.memoryUrn,
+      restoredOrgId: principal.restored.activeOrgId,
+      restoredScopeId: principal.restored.activeScopeId,
+    });
+  },
+  {
+    // Fixed text only: an SDK error can quote request content.
+    onerror: (error) => mcpLog('error', 'mcp_sessionless_handler_error', { name: error.name }),
+  },
+);
+const sessionlessMcpNodeHandler = toNodeHandler(sessionlessMcpHandler, {
+  onerror: (error) => mcpLog('error', 'mcp_sessionless_adapter_error', { name: error.name }),
+});
+
+/** Serve one /mcp request with no session (see the section comment above). */
+export async function handleMcpSessionlessRequest(req: Request, res: Response): Promise<void> {
+  try { await dispatchMcpSessionlessRequest(req, res); }
+  catch (error) { if (!respondSessionSuperseded(res, error)) throw error; }
+}
+
+async function dispatchMcpSessionlessRequest(req: Request, res: Response): Promise<void> {
+  // Before authentication, like the unknown-session 404 of the sessionful path: the answer is the same for everyone
+  // and says nothing about any principal.
+  if (req.method !== 'POST') {
+    res.setHeader('Allow', 'POST');
+    res.status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed.' }, id: null });
+    return;
+  }
+
+  // The same refusals, in the same order, as a connection being opened (openOrRejectMcpSession), with one difference:
+  // a database failure answers 503 here (the credential lookup, and below the session binding and the principal's
+  // App and stored selections), where the sessionful open lets the error propagate. That path meets it once per
+  // connection and answers 503 on an open one (authenticateBoundMcpSession); this path meets it on every request, and
+  // Express 4 never answers a rejected async handler.
+  let auth: AuthContext;
+  try {
+    auth = (await resolveCredentialContextWithStatus(req, db)).auth;
+  } catch (error) {
+    mcpLog('error', 'mcp_sessionless_auth_failed', { name: (error as Error)?.name });
+    res.status(503).json({ error: 'Authentication temporarily unavailable' });
+    return;
+  }
+  if (auth.impersonation) {
+    res.status(401).json({ error: 'Impersonation tokens are not accepted on /mcp' });
+    return;
+  }
+  const surfaceRefusal = oauthSurfaceRefusal(auth, 'mcp');
+  if (surfaceRefusal) {
+    res.setHeader('WWW-Authenticate', 'Bearer error="insufficient_scope", scope="mcp"');
+    res.status(403).json({ error: oauthSurfaceRefusalMessage(surfaceRefusal, 'This OAuth credential does not grant MCP access'), code: 'FORBIDDEN', ...surfaceRefusal });
+    return;
+  }
+  if (!auth.appId && !auth.userId && !auth.clientId) {
+    respondMcpAuthenticationRequired(req, res);
+    return;
+  }
+
+  let principal: SessionlessPrincipal;
+  try {
+    // The header is REFUSED, never dropped: on a pure App key it narrows the key's reach to the session's scope
+    // (cor:aut:020:02, cor:agt:020:03, cor:acl:010:04), so ignoring it would widen the key, and honouring it is the
+    // H1/H2 slice. Checked before the principal's stored selections are read, so a refused request touches nothing.
+    if (presentedSessionHeader(req)) {
+      res.status(400).json({
+        jsonrpc: '2.0',
+        error: { code: -32600, message: `The ${MCP_SESSION_HEADER_NAME} header is not supported by sessionless MCP serving. Send the request without it.`, data: { code: 'SESSION_HEADER_UNSUPPORTED', header: MCP_SESSION_HEADER_NAME } },
+        id: null,
+      });
+      return;
+    }
+    // `subscriptions/listen` is a long-lived SSE response over POST, which nothing here bounds or drains (plan Q6, T3):
+    // answered with a typed refusal, never a stream that holds the request open or an answer that drops it silently.
+    const listen = jsonRpcMessages(req.body).find((m) => m.method === 'subscriptions/listen');
+    if (listen) {
+      res.status(400).json({
+        jsonrpc: '2.0',
+        error: { code: -32601, message: 'subscriptions/listen is not supported by sessionless MCP serving.', data: { code: 'SUBSCRIPTIONS_LISTEN_UNSUPPORTED' } },
+        id: listen.id ?? null,
+      });
+      return;
+    }
+    // Nothing is bound, so this only publishes the validated user behind the request's writes (#2176).
+    await bindPresentedSession(req, db, auth);
+    // #2123: session-sensitive consumers read THIS request's binding result.
+    auth.requestSession = { sessionId: auth.sessionId, refused: auth.sessionBindingRefused === true };
+    const { cachedAppResolution, clientKey, restored } = await prepareMcpPrincipal(req, auth, null);
+    principal = { auth, cachedAppResolution, clientKey, restored };
+  } catch (error) {
+    // A superseded session keeps its own refusal; anything else here is the database (see above).
+    if (respondSessionSuperseded(res, error)) return;
+    mcpLog('error', 'mcp_sessionless_prepare_failed', { name: (error as Error)?.name });
+    res.status(503).json({ error: 'Authentication temporarily unavailable' });
+    return;
+  }
+  // The SDK forwards `req.auth` to the factory untouched and verifies nothing itself. No credential goes in it.
+  (req as Request & { auth?: unknown }).auth = { token: '', clientId: '', scopes: [], extra: { [SESSIONLESS_PRINCIPAL_KEY]: principal } };
+  // The adapter answers a conversion or handler failure itself (a 500 through its onerror fallback); this catch is for
+  // what is left (a write to a response whose client went away), because Express 4 never answers a rejected async
+  // handler and an unhandled rejection is process-fatal on current Node.
+  try {
+    await sessionlessMcpNodeHandler(req as never, res as never, req.body);
+  } catch (error) {
+    mcpLog('error', 'mcp_sessionless_adapter_threw', { name: (error as Error)?.name });
+    if (!res.headersSent) res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal error' }, id: null });
+    else res.destroy();
   }
 }
 

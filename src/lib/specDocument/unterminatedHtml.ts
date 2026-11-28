@@ -55,6 +55,10 @@ const MAX_RESTARTS = 32;
 /** #5265 — the scans the last call of escapeUnterminatedHtml ran (one per model per escape), for a pin that bounds the work, not the wall clock. */
 let scansRun = 0;
 /** #5332 — a raw-text element's (or `plaintext`) start: it takes the rest of the page as text once a reader emits it. */
+// #5384: the span between a bare `<![` and its first `>` (exclusive) ends in a raw-text start's name and attributes at a line head, up to three
+// spaces in.
+const BARE_BANG_BRACKET_HIDES_RAW_START =
+  /\n {0,3}<(?:script|style|textarea|title|xmp|iframe|noembed|noframes|noscript|plaintext|template)(?=[\s/]|$)[^<]*$/i;
 const RAW_TEXT_START = /<(script|style|textarea|title|xmp|iframe|noembed|noframes|noscript|plaintext)(?=[\s/>]|$)/i;
 /**
  * #5332 — where a bogus comment (`<!` or `</` with no letter after it, at `at`, running to the `>` at `close`) hides a raw-text start that
@@ -632,6 +636,19 @@ type LineKind = 'blank' | 'code' | 'nonpara' | 'marker' | 'other';
  */
 type ReaderModel = 'commonmark' | 'marked';
 
+/**
+ * Whether the text at `i` is `<!` and a name that no blank or letter follows (so marked takes no declaration there, #5211). Sticky on the whole
+ * text, so a text with no line break costs no search for one (#5476). The regex is shared: `lastIndex` is set before every use and nothing
+ * else reads it.
+ */
+const DECLARATION_NAME = /<![A-Za-z]+(?![A-Za-z\s])/y;
+function declarationWithoutBlankAt(text: string, i: number): boolean {
+  DECLARATION_NAME.lastIndex = i;
+  const found = DECLARATION_NAME.test(text);
+  DECLARATION_NAME.lastIndex = 0;
+  return found;
+}
+
 /** The index of the `<` that opens the first unterminated construct at or after `from`, or -1, as `model` reads the text. */
 function firstUnterminated(text: string, from: number, model: ReaderModel = 'commonmark'): number {
   scansRun += 1;
@@ -943,10 +960,18 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
     }
     // #5211 — marked takes a declaration only when a blank follows its name; any other `<!` and a name is text to it, so what follows is read.
     // At the head of a line that interrupts no paragraph it starts an HTML block in marked too, and is complete there.
-    if (model === 'marked' && /<![A-Za-z]+(?![A-Za-z\s])/y.test(text.slice(i, text.indexOf('\n', i) === -1 ? n : text.indexOf('\n', i) + 1)) && !(startsLine(i) && prevBefore !== 'other' && prevBefore !== 'marker' && !prevDefinition)) { i += 2; continue; }
+    if (model === 'marked' && declarationWithoutBlankAt(text, i) && !(startsLine(i) && prevBefore !== 'other' && prevBefore !== 'marker' && !prevDefinition)) { i += 2; continue; }
     if (text.startsWith('<!', i)) {
       const close = text.indexOf('>', i + 2);
       if (close === -1 || close + 1 > blockLimit(i)) return i;
+      // #5384 — a bare `<![` (no `CDATA[`) starts nothing in Markdown: no HTML block (type 5 needs `<![CDATA[`) and no inline HTML, so the
+      // readers write it as paragraph text and read on. Only inside an HTML block's raw lines does a browser see it raw, as a bogus comment to its
+      // first `>`. Below those lines, when that `>` ends a raw-text start at a line head (a new line, up to three spaces in), the jump would
+      // leave that start as written: the walk reads on after the `<![` instead, so the start is judged as without it. The rule is that narrow on purpose: reading past every bare `<![` exposes later constructs (a `<?` that
+      // interrupts the paragraph, a start four columns into a list item) to escapes that lose the anchor where the jump kept it (fuzz at f27a59aa,
+      // 87 regressing pairs). With no `>` in reach the `<!` is escaped as above: a reader that keeps the line raw (marked after a line-head
+      // `<?>`) would have the bogus comment take what follows.
+      if (i >= rawUntil && text[i + 2] === '[' && BARE_BANG_BRACKET_HIDES_RAW_START.test(text.slice(i + 3, close))) { i += 3; continue; }
       // #5388 QA F2 (at 722ea31f): `<!` and no letter is text to Markdown, so a later line that opens a comment block (type 2, which
       // interrupts a paragraph) is read afresh there, while a browser reading the raw string has that `<!--` inside the bogus comment. When the
       // comment it opens does not end before the bogus comment's `>`, the two readings resume in different places: escape the `<!`.
@@ -954,6 +979,12 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       if (i >= rawUntil && !isLetter(text[i + 2])) {
         const hidden = bogusHiddenTag(text, i, close, hiddenCtx);
         if (hidden !== -1) return hidden;
+      }
+      // #5323 — the `>` that ends the bogus comment may be that of a type 1 end tag alone at the head of a later line (`<!\n\n</textarea>`):
+      // Markdown reads that line afresh, so the end tag's rule below applies to it as well.
+      if (model === 'marked' && i >= rawUntil && !isLetter(text[i + 2])) {
+        const f = markedFenceBehindBogus(text, i, close);
+        if (f !== -1) return f;
       }
       // marked ends such a block at the declaration's first `>` and reads the rest of the line as text (#5211); CommonMark keeps it raw.
       if (startsLine(i) && isLetter(text[i + 2]) && model === 'commonmark') raw(lineEndAt(close));
@@ -1028,6 +1059,14 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       if (BLOCK6_NAMES.has(name)) raw(containerEnd(i, true));
       else if ((!TYPE1_NAMES.has(name) || (isEnd && model === 'commonmark')) && !text.slice(i, tagEnd).includes('\n') && text.slice(tagEnd, lineEndAt(tagEnd)).trim() === '' && !interrupts()) {
         raw(containerEnd(i, true));
+      } else if (isEnd && model === 'marked' && i >= rawUntil && lineContainers.length === 0
+        && !text.slice(i, tagEnd).includes('\n') && text.slice(tagEnd, lineEndAt(tagEnd)).trim() === '' && !interrupts()) {
+        // #5323 — reached for a type 1 end tag alone on its line (any other name took the branch above): it starts a type 7 block in
+        // CommonMark and markdown-it, and none in marked, which reads the block's later lines as markup: a fence opener there that nothing
+        // closes takes the anchor in marked alone. It is written as character references, which the other readers' block passes on raw and
+        // a browser decodes to the same characters (#5320's escape).
+        const f = markedFenceUnder(text, lineEndAt(tagEnd), containerEnd(i, true));
+        if (f !== -1) return f;
       }
     }
     if (isEnd) {
@@ -1140,6 +1179,65 @@ function markedUnclosedFenceAfter(text: string, from: number): number {
     s = e + 1;
   }
   return from + m[1]!.length;
+}
+
+/**
+ * #5323 — where the first character of a fence opener is that marked opens on a line after `from` (the end of a line-head type 1 end tag's
+ * line) and before `to` (the end of the HTML block that tag starts in CommonMark) with no line after it closing it; -1 otherwise. A line that
+ * opens a closed fence or starts with a `<` ends the search: what marked reads after it is not judged here, so nothing is escaped (the safe
+ * side for bytes; the over-escape check pins it).
+ */
+function markedFenceUnder(text: string, from: number, to: number): number {
+  // After a list item's marker line, an indented fence is the item's content, which the item ends: only a fence at the line head counts.
+  let listed = false;
+  for (let s = from + 1; s < to;) {
+    const f = markedUnclosedFenceAfter(text, s);
+    if (f !== -1) return fenceRunBefore(text, f, text.lastIndexOf('\n', from - 1) + 1) || (listed && f > s) ? -1 : f;
+    const e = text.indexOf('\n', s);
+    const line = text.slice(s, e === -1 ? text.length : e);
+    if (/^ {0,3}(?:`{3,}|~{3,}|<)/.test(line)) return -1;
+    if (/^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|\r?$)/.test(line)) listed = true;
+    if (e === -1) return -1;
+    s = e + 1;
+  }
+  return -1;
+}
+
+/**
+ * #5323 (fuzz at 2c4cc253) — whether the text before `before` holds a run of the fence character at `at` no longer than the run there: a fence
+ * that run opened (at the head of a line, or after a declaration's `>` in marked) would be closed by the line at `at`, which is then a closer and
+ * must stay. The walk does not follow every such fence (a construct may run across its opener), so any run counts.
+ */
+function fenceRunBefore(text: string, at: number, before: number): boolean {
+  const c = text[at]!;
+  let len = 0;
+  while (text[at + len] === c) len += 1;
+  const runs = text.slice(0, before).match(c === '~' ? /~{3,}/g : /`{3,}/g) ?? [];
+  return runs.some((r) => r.length <= len);
+}
+
+/**
+ * #5323 — {@link markedFenceUnder} for a type 1 end tag that ends a bogus comment (`<!` at `at`, its `>` at `close`) on a later line: the tag
+ * must be alone on its line (up to three spaces before it, blanks only after it), and the line above must leave no paragraph open (blank, a
+ * setext underline or an ATX heading), where it starts a type 7 block in CommonMark.
+ */
+function markedFenceBehindBogus(text: string, at: number, close: number): number {
+  // The line break is looked for inside the bogus comment only, backwards from `close` and no further than `at`: a search to the start of a text
+  // with no line break made each comment cost the whole text before it (#5476, a quadratic walk on a long single line).
+  let brk = close;
+  while (brk > at && text[brk] !== '\n') brk -= 1;
+  if (brk === at) return -1;
+  const ls = brk + 1;
+  if (!/^ {0,3}<\/(?:script|style|textarea|pre)[ \t]*>$/i.test(text.slice(ls, close + 1))) return -1;
+  const nl = text.indexOf('\n', close);
+  const le = nl === -1 ? text.length : nl;
+  if (text.slice(close + 1, le).trim() !== '') return -1;
+  const above = text.slice(text.lastIndexOf('\n', ls - 2) + 1, ls - 1);
+  if (!(above.trim() === '' || /^ {0,3}(?:=+|-+)[ \t]*\r?$/.test(above) || /^ {0,3}#{1,6}(?:[ \t]|\r?$)/.test(above))) return -1;
+  const blank = /\n[ \t\r]*\n/g;
+  blank.lastIndex = ls;
+  const m = blank.exec(text);
+  return markedFenceUnder(text, le, m ? m.index : text.length);
 }
 
 /**

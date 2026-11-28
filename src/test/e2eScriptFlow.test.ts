@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from './helpers.js';
+import { revokeGrantRow } from './appGrants5404.js';
 import { generateId } from '../lib/id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { executeAppRun } from '../jobs/appRuns.js';
@@ -70,7 +71,8 @@ describe('#4624 script-node fixture on the production run path', () => {
   });
 
   it('control: the write is authorized by the grant, not by the fixture (revoke it and the same flow is refused)', async () => {
-    await db.appMemoryWriteGrant.updateMany({ where: { appId }, data: { revokedAt: new Date(), revokedBy: admin.id } });
+    // #5404: the grant is the App's signed `memory.write` grant; revoke every one it holds.
+    for (const g of await db.grant.findMany({ where: { granteeAppId: appId, action: 'memory.write' }, select: { id: true } })) await revokeGrantRow(g.id, admin.id);
     const run = await trigger(E2E_SCRIPT_WRITE_ENTRY);
     expect(await executeAppRun(db, run.id, makeProdRunDeps(db))).toBe('failed');
     expect(await written(E2E_SCRIPT_WRITE_RESULT)).toBeNull();

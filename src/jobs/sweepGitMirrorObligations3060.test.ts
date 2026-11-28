@@ -48,6 +48,8 @@ vi.mock('../integrations/github/execGit.js', () => ({
 import { withMirrorCheckoutLock } from '../integrations/github/mirrorCheckoutLock.js';
 import { takeAttemptSeq } from '../integrations/github/mirrorObligations.js';
 import { nodeFilePath, orphanedLegacyPaths } from '../integrations/github/nodeFrontmatter.js';
+import { disableMirrorWriteCapture } from '../test/disableMirrorWriteCapture.js';
+disableMirrorWriteCapture(); // #5469: these suites seed their own obligation rows
 
 const SOURCE = 'https://github.com/acme/repo.git';
 const ORG_URN = 'mirror3060-org';

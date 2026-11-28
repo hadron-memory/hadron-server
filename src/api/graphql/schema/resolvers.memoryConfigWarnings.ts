@@ -36,10 +36,12 @@
  *   - the target is a user-owned memory: its owner does; or
  *   - the target is a group memory: each MemoryMember does; or
  *   - the target is org-owned knowledge with no subscriber, App or Agent link, no
- *     unrevoked App write or automation read grant, and not PUBLIC, and the task's memory is org knowledge of that SAME org.
+ *     live `memory.read` or `memory.write` grant reaching it, and not PUBLIC, and the task's memory is org knowledge of that
+ *     SAME org.
  *
- * A live App write grant or automation read grant on the target makes any non-public
- * task unproven for every class, because those runs reach the memory outside the read gate.
+ * A live `memory.read` or `memory.write` grant naming the target (or a `memory.read` grant naming its organization, form (a))
+ * makes any non-public task unproven for every class, because those runs reach the memory outside the read gate (#5404:
+ * these replace the dropped App write grant and per-automation read grant rows).
  * Every other shape (an App, team, session, worker or system memory, a PUBLIC
  * target, a target with subscribers or Agent links, more explicit principals than
  * {@link MAX_POINT_CHECKED_PRINCIPALS}) cannot be proven and WARNS. A false
@@ -61,6 +63,9 @@
 import type { PrismaClient } from '../../../generated/prisma/index.js';
 import { getAccessibleMemoryIds, type Context } from './resolvers.helpers.js';
 import { refViewOnce, type RuleRefRow } from './resolvers.memoryConfig.js';
+import { grantLiveSql } from '../../../lib/grants/live.js';
+import { MEMORY_READ_ACTION } from '../../../lib/grants/readGrant.js';
+import { MEMORY_WRITE_ACTION } from '../../../lib/grants/writeGrant.js';
 
 export const TASK_LESS_VISIBLE = 'TASK_LESS_VISIBLE';
 
@@ -184,6 +189,19 @@ async function everyUserReads(db: PrismaClient, scope: WarningScope, userIds: re
   return true;
 }
 
+/** True when a live `memory.read` or `memory.write` grant names `memoryId`, or a live `memory.read` names `organizationId`. */
+async function grantReachesTarget(db: PrismaClient, memoryId: string, organizationId: string | null): Promise<boolean> {
+  const rows = await db.$queryRaw<Array<{ id: string }>>`
+    SELECT g.id FROM grants g
+    WHERE g.action IN (${MEMORY_READ_ACTION}, ${MEMORY_WRITE_ACTION}) AND ${grantLiveSql('g')}
+      AND (g.action_values -> 'memory' = to_jsonb(${memoryId}::text)
+        OR g.action_values -> 'memory' @> jsonb_build_array(${memoryId}::text)
+        OR (g.action = ${MEMORY_READ_ACTION} AND ${organizationId}::text IS NOT NULL
+            AND g.action_values -> 'memory' = to_jsonb(${organizationId}::text)))
+    LIMIT 1`;
+  return rows.length > 0;
+}
+
 const MEMORY_SHAPE = {
   id: true, class: true, userId: true, ownerUserId: true, organizationId: true, appId: true,
   userMemoryOfAgentId: true, visibility: true, isInstallMemory: true,
@@ -217,13 +235,11 @@ export async function taskMemoryCoversTargetReaders(
   if (target.appId !== null || target.userMemoryOfAgentId !== null || target.isInstallMemory ||
       target.class === 'app' || target.class === 'system') return false;
 
-  // An App's runs reach a memory through a live write or automation read grant on it, a reach that does not
-  // pass through the shared read gate and is not enumerable here. Any unrevoked grant makes containment unproven.
-  const [writeGrants, automationGrants] = await Promise.all([
-    db.appMemoryWriteGrant.count({ where: { memoryId: target.id, revokedAt: null } }),
-    db.appAutomationReadGrant.count({ where: { memoryId: target.id, revokedAt: null } }),
-  ]);
-  if (writeGrants > 0 || automationGrants > 0) return false;
+  // An App's runs reach a memory through a live `memory.read` / `memory.write` grant naming it (or, for `memory.read`, naming its
+  // organization), a reach that does not pass through the shared read gate and is not enumerable here. Any live grant makes
+  // containment unproven. Liveness is the one definition (`grantLiveSql`); the giver and target re-checks are left out, so this
+  // can only overcount (a false warning, never a false silence).
+  if (await grantReachesTarget(db, target.id, target.organizationId)) return false;
 
   if (target.class === 'personal' || target.class === 'private') {
     if (!target.userId) return false;

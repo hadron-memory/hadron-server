@@ -65,6 +65,17 @@ export interface AuthContext {
    */
   oauthScopes?: string[];
   /**
+   * #2605: the OAuth client the presented `hdr_user_` key was issued to by the OAuth token exchange itself
+   * (`UserApiKey.issuedVia` is `oauth:<client_id>` and `mintedByKeyId` is null). Identifies the client APPLICATION,
+   * for keying that client's stored MCP selection (`selectionClientKey`); it is never an authorization input.
+   *
+   * Absent for a portal or legacy key, a JWT, an App key, and a key MINTED BY an OAuth-issued key. That last one
+   * inherits `issuedVia`, but it is handed to some other client (`hadron auth token create` for an agent's MCP
+   * config), and several such keys would otherwise share one OAuth client's selection and the per-user record:
+   * agents on API keys following one record, which ruling 7 (Holger, 2026-11-20) kept them out of.
+   */
+  oauthClientId?: string;
+  /**
    * Set when the request authenticated with an impersonation JWT: `userId` is
    * the TARGET user, `roles` is `[]`, and this carries the session + the
    * admin actor + the single org the session may see into. Read surfaces
@@ -495,7 +506,19 @@ async function resolveUserApiKey(
     ...(userApiKey.oauthScopes.length > 0
       ? { oauthScopes: userApiKey.oauthScopes }
       : {}),
+    ...(oauthClientIdOf(userApiKey) ? { oauthClientId: oauthClientIdOf(userApiKey) } : {}),
   };
+}
+
+/**
+ * The `<client_id>` of a key the OAuth token exchange issued (`issuedVia = oauth:<client_id>`, no minting key), or
+ * undefined for any other key, including one minted by an OAuth-issued key (see `AuthContext.oauthClientId`).
+ */
+function oauthClientIdOf(key: { issuedVia: string | null; mintedByKeyId: string | null }): string | undefined {
+  const { issuedVia } = key;
+  if (key.mintedByKeyId !== null || !issuedVia?.startsWith('oauth:')) return undefined;
+  const clientId = issuedVia.slice('oauth:'.length);
+  return clientId.length > 0 ? clientId : undefined;
 }
 
 /**

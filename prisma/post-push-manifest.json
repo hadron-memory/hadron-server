@@ -1438,6 +1438,12 @@
       "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
     },
     {
+      "name": "hadron_git_mirror_capture_node_write",
+      "kind": "function",
+      "file": "git-mirror-obligation-invariants.sql",
+      "why": "Function created and owned by the raw-SQL corpus; lives outside the Prisma schema entirely."
+    },
+    {
       "name": "hadron_grant_holder_gone",
       "kind": "function",
       "file": "grant-invariants.sql",
@@ -2915,6 +2921,18 @@
     },
     {
       "name": "nodes.git_mirror_node_remove_soft_delete",
+      "kind": "trigger",
+      "file": "git-mirror-obligation-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "nodes.git_mirror_node_write_insert",
+      "kind": "trigger",
+      "file": "git-mirror-obligation-invariants.sql",
+      "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."
+    },
+    {
+      "name": "nodes.git_mirror_node_write_update",
       "kind": "trigger",
       "file": "git-mirror-obligation-invariants.sql",
       "why": "Trigger wiring an invariant to its table; lives outside the Prisma schema entirely."

@@ -53,6 +53,8 @@ import { gitMirrorSweepTick } from './sweepGitMirrorObligations.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { takeAttemptSeq } from '../integrations/github/mirrorObligations.js';
 import { nodeFilePath } from '../integrations/github/nodeFrontmatter.js';
+import { disableMirrorWriteCapture } from '../test/disableMirrorWriteCapture.js';
+disableMirrorWriteCapture(); // #5469: these suites seed their own obligation rows
 
 const SOURCE = 'https://github.com/acme/repo.git';
 const ORG_URN = 'mirror3180-org';

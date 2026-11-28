@@ -1,9 +1,9 @@
 /** #3403: NUL-only LIST hardening after admission, on real GraphQL/MCP adapters. */
 import { afterAll, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { Client } from '@modelcontextprotocol/client';
 import { Client as PgClient } from 'pg';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { InMemoryTransport } from '@modelcontextprotocol/client';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -246,8 +246,10 @@ for (const worker of [false, true]) for (const unauthorized of [false, true]) {
     const before = await snapshot();
     const result = await invoke('mcp', worker, { triggerKind: null, triggerId: '\u0000' }, unauthorized && !worker ? f.stranger.id : f.holder.id);
     expect(result.error?.code).toBeUndefined();
-    expect(result.error?.message).toContain('MCP error -32602: Input validation error:');
-    expect(result.error?.message).toContain('expected string, received null at triggerKind');
+    // SDK 2.x (#2605): the schema rejection is still an isError tool result; its text lost the "MCP error -32602: " prefix
+    // and names the field first.
+    expect(result.error?.message).toContain('Input validation error:');
+    expect(result.error?.message).toContain('triggerKind: Invalid input: expected string, received null');
     expect(await snapshot()).toEqual(before);
   });
 }

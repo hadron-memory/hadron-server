@@ -6683,10 +6683,14 @@ model AgentWebhook {
 /// Behaviour:
 /// - One row per user and `clientKey`, written by upsert when a selection changes (src/lib/mcpSessionState.ts).
 ///   `clientKey` is the client's own stable id, sent in the `X-Hadron-Client-Id` header. A client that sends none is
-///   not stored at all and keeps its selections in memory only.
+///   keyed `oauth:<client_id>` when its key was issued by an OAuth exchange (#2605); any other client that sends none
+///   is not stored at all and keeps its selections in memory only.
 /// - The key is the client, not the MCP session id, because the session id is what does not survive. It is per client
 ///   and not per user, so that one person using several clients at once does not have one of them change the active
 ///   App of the others.
+/// - One exception per user (#2605, ruling 7): the row whose `clientKey` is the empty string, which no header can
+///   name, holds a copy of the last whole selection an OAuth client made. An OAuth client with no row of its own
+///   starts from a copy of it once; after that, other clients never change its row.
 /// - The row remembers a choice and grants nothing. Each selection is authorized again when it is read: the App by
 ///   current participation, the memory by the memory read gate, the organization by current membership, the scope by
 ///   whether the caller can read it.

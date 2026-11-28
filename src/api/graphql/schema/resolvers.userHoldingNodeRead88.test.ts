@@ -261,37 +261,52 @@ describe('a per-user chat holding is read on the node side by its creator alone 
     });
   });
 
-  describe('an automation read grant never serves a holding (hadron-internal#88, SECOND delta P1-1)', () => {
-    const scheduleOn = () => db.agentSchedule.create({ data: { id: generateId(), organizationId: orgId, appId, name: 'S', cron: '* * * * *', entryNodeUrn: `hrn:node:${plainUrn}:docs:entry` } });
-    const give = (who: string, memoryRef: string, triggerId: string) =>
-      M.setAutomationReadGrant({}, { appRef: appId, triggerKind: 'SCHEDULE', triggerId, memoryRef, prefix: null }, gql(who));
-    it('the library judge refuses a holding for any giver, and still judges an ordinary memory by its own rules', async () => {
-      const { readGrantTargetRefusal, READ_GRANT_MEMORY_SELECT } = await import('../../../lib/automationReadGrant.js');
-      const holding = await db.memory.findUniqueOrThrow({ where: { id: holdingId }, select: READ_GRANT_MEMORY_SELECT });
+  // #5404: the per-automation read grant (#2883) is retired, and so is ruling 0083's App write grant. Their replacements, the signed
+  // `memory.read` and `memory.write` grants an App holds, carry the same rule: no grant ever serves a holding. Restated for both.
+  describe('no grant an App holds serves a holding (hadron-internal#88, SECOND delta P1-1; restated for memory.read / memory.write, #5404)', () => {
+    it('the library judges refuse a holding, and still judge an ordinary memory by their own rules', async () => {
+      const { memoryReadTargetRefusal, READ_GRANT_TARGET_SELECT } = await import('../../../lib/grants/readGrant.js');
+      const { memoryWriteTargetRefusal, WRITE_GRANT_TARGET_SELECT } = await import('../../../lib/grants/writeGrant.js');
       const app = { id: appId, organizationId: orgId, ownerUserId: null };
-      expect(await readGrantTargetRefusal(db, app, holding as never)).toBe('user-holding');
-      const plain = await db.memory.findUniqueOrThrow({ where: { id: plainId }, select: READ_GRANT_MEMORY_SELECT });
-      expect(await readGrantTargetRefusal(db, app, plain as never)).toBeNull();
+      const readRow = (id: string) => db.memory.findUniqueOrThrow({ where: { id }, select: READ_GRANT_TARGET_SELECT });
+      const writeRow = (id: string) => db.memory.findUniqueOrThrow({ where: { id }, select: WRITE_GRANT_TARGET_SELECT });
+      expect(await memoryReadTargetRefusal(db as never, appId, await readRow(holdingId) as never)).toBe('user-holding');
+      expect(await memoryReadTargetRefusal(db as never, appId, await readRow(plainId) as never)).toBeNull();
+      expect(memoryWriteTargetRefusal(app as never, await writeRow(holdingId) as never)).toBe('user-holding');
+      expect(memoryWriteTargetRefusal(app as never, await writeRow(plainId) as never)).toBeNull();
     });
     for (const who of ['orgadmin', 'orgowner', 'platformadmin', 'platformowner', 'creator'] as const) {
-      it(`${who}: giving a read grant on the holding is refused like a missing memory and writes no grant row`, async () => {
-        const s = await scheduleOn();
-        expect(await code88(give(who, holdingId, s.id))).toBe(await code88(give(who, generateId(), s.id)));
-        expect(await code88(give(who, holdingId, s.id))).not.toBe('ok');
-        expect(await db.appAutomationReadGrant.count({ where: { memoryId: holdingId } })).toBe(0);
-        // The same giver CAN give the same grant on an ordinary memory (so the refusal is about the holding, not the giver).
-        expect(await code88(give(who, plainId, s.id)), `${who} control`).toBe('ok');
+      it(`${who}: asking for a memory.read or memory.write grant on the holding is refused like a missing memory and writes no grant row`, async () => {
+        const { createPendingGrant } = await import('../../../lib/grants/create.js');
+        const { upsertPlatformActions } = await import('../../../lib/grants/actions.js');
+        await upsertPlatformActions(db);
+        const ask = (action: 'memory.read' | 'memory.write', memory: string) => code88(db.$transaction((tx) => createPendingGrant(tx, {
+          appId, requester: { userId: u[who], workerId: null, sessionId: null }, holder: { kind: 'app', id: appId }, action,
+          values: action === 'memory.write' ? { memory, prefix: '*' } : { memory }, reason: 'r',
+          canReadMemory: async (id: string) => (await getAccessibleMemoryIds(gql(who), id)).includes(id),
+        } as never)));
+        for (const action of ['memory.read', 'memory.write'] as const) {
+          const holding = await ask(action, holdingId);
+          expect(holding, `${who} ${action}`).not.toBe('ok');
+          expect(holding).toBe(await ask(action, generateId()));
+          // The same requester CAN ask for the same grant on an ordinary memory (so the refusal is about the holding, not who asks).
+          expect(await ask(action, plainId), `${who} ${action} control`).toBe('ok');
+        }
+        const onHolding = await db.$queryRaw<Array<{ n: number }>>`SELECT count(*)::int AS n FROM grants WHERE action_values -> 'memory' = to_jsonb(${holdingId}::text)`;
+        expect(onHolding[0]!.n).toBe(0);
       });
     }
-    it('a grant row inserted on a holding reads nothing through the run (the live re-judge); the same row on an ordinary memory reads', async () => {
-      const { runHoldsReadGrant } = await import('../../../lib/automationReadGrant.js');
-      const { testRunAgentId } = await import('../../../test/runAgent.js');
-      const s = await scheduleOn();
-      const run = await db.appRun.create({ data: { id: generateId(), organizationId: orgId, appId, agentId: await testRunAgentId(db, orgId, appId), userId: null, triggerKind: 'SCHEDULE', triggerId: s.id, entryNodeUrn: s.entryNodeUrn } });
-      const principal = { appId, userId: undefined } as never;
-      for (const memoryId of [holdingId, plainId]) await db.appAutomationReadGrant.create({ data: { appId, triggerKind: 'SCHEDULE', triggerId: s.id, memoryId, prefix: null, grantedBy: u.creator } });
-      expect(await runHoldsReadGrant(db, principal, run.id, plainId, 'docs:entry')).toBe(true);
-      expect(await runHoldsReadGrant(db, principal, run.id, holdingId, nodeLoc)).toBe(false);
+    it('an ACTIVE grant naming a holding reaches nothing through the run (the live re-judge); the same grant on an ordinary memory does', async () => {
+      const { activeMemoryReadGrant, activeMemoryWriteGrant } = await import('../../../test/appGrants5404.js');
+      const run = { db, ...runAuthContext({ id: generateId(), appId, userId: null, organizationId: orgId }) } as unknown as Context;
+      for (const memoryId of [holdingId, plainId]) {
+        await activeMemoryReadGrant(appId, memoryId, { issuerUserId: u.creator });
+        await activeMemoryWriteGrant(appId, memoryId, { issuerUserId: u.creator });
+      }
+      expect(await canReadMemory(db, run as never, plainId)).toBe(true);
+      expect(await canReadMemory(db, run as never, holdingId)).toBe(false);
+      expect(await canWriteToMemory(db, run as never, plainId, { destination: { loc: 'docs:new', verb: 'create' } })).toBe(true);
+      expect(await canWriteToMemory(db, run as never, holdingId, { destination: { loc: `${nodeLoc}:new`, verb: 'create' } })).toBe(false);
     });
   });
 

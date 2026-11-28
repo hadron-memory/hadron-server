@@ -105,6 +105,8 @@ import { nodeFilePath } from '../integrations/github/nodeFrontmatter.js';
 import { withMirrorCheckoutLock } from '../integrations/github/mirrorCheckoutLock.js';
 import { validateMemoryNodes } from '../lib/memoryValidation.js';
 import { existsSync } from 'fs';
+import { disableMirrorWriteCapture } from '../test/disableMirrorWriteCapture.js';
+disableMirrorWriteCapture(); // #5469: these suites seed their own obligation rows
 
 const tick = async (now = new Date()) => (await import('./sweepGitMirrorObligations.js')).gitMirrorSweepTick(db, now);
 const old = () => new Date(Date.now()-24*60*60*1000);
