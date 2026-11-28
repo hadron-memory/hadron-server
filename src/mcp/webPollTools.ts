@@ -10,7 +10,7 @@
  */
 import { z } from 'zod';
 import { GraphQLError } from 'graphql';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { HadronMcpServer as McpServer } from './hadronMcpServer.js';
 import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import type { AuthContext } from '../middleware/auth.js';

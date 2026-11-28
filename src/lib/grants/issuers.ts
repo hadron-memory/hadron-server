@@ -19,8 +19,7 @@ import { PLATFORM_ACTIONS, type IssuerRuleKey } from './actions.js';
 import { managesApp } from '../auth/appManagement.js';
 import { resolveAppRef } from '../entityRef/appRef.js';
 import { requireSecretReadClientIssuer } from '../secrets/readClientIssuer.js';
-import { managesReadGrantTarget } from '../../api/graphql/schema/resolvers.automationReadGrant.js';
-import { READ_GRANT_MEMORY_SELECT } from '../automationReadGrant.js';
+import { MANAGED_MEMORY_SELECT, managesGrantMemory } from './memoryManager.js';
 import { LIVE_ORG_MEMBERSHIP } from '../auth/liveOrgMembership.js';
 
 /** #3823: whoever manages the App (the gate the boot-prompt actions' signer faces; the node-specific part is judged where the grant is spent). */
@@ -53,7 +52,7 @@ function valueOf(values: unknown, name: string): unknown {
  *  - form (a), the value is the App's own organization's id: an ADMIN or OWNER of that organization, as a live MEMBER of it (no
  *    platform-role arm: the grant allows only while its giver reads that knowledge, src/lib/grants/readGrant.ts);
  *  - form (b), one or more memory ids: the signer manages EVERY named memory (an Agent's system memory: whoever manages that Agent,
- *    the #2883 rule, `managesReadGrantTarget`). A member who only reads one cannot, and one unmanaged memory refuses the whole grant.
+ *    `managesGrantMemory`). A member who only reads one cannot, and one unmanaged memory refuses the whole grant.
  * Unknown, deleted, unmanaged, empty and mixed values are the one refusal.
  */
 async function requireMemoryReadApprover(ctx: Context, appRef: string, values?: unknown): Promise<void> {
@@ -71,8 +70,25 @@ async function requireMemoryReadApprover(ctx: Context, appRef: string, values?: 
     return;
   }
   for (const id of new Set(ids as string[])) {
-    const memory = await ctx.db.memory.findFirst({ where: { id, deletedAt: null }, select: { ...READ_GRANT_MEMORY_SELECT, urn: true } });
-    if (!memory || !(await managesReadGrantTarget(ctx, memory))) throw authorizationDenied();
+    const memory = await ctx.db.memory.findFirst({ where: { id, deletedAt: null }, select: MANAGED_MEMORY_SELECT });
+    if (!memory || !(await managesGrantMemory(ctx, memory))) throw authorizationDenied();
+  }
+}
+
+/**
+ * #5404 (cor:acl:140:02, Holger 2026-11-27, "Owner of each named memory"): the signer manages EVERY memory the grant names (for a
+ * personal or private memory, that is its owner; an Agent's system memory is never a write target). There is no organization-wide
+ * form, so a value naming the App's organization is refused here as at creation. Unknown, deleted, unmanaged and empty values are the
+ * one refusal.
+ */
+async function requireMemoryWriteApprover(ctx: Context, appRef: string, values?: unknown): Promise<void> {
+  const v = valueOf(values, 'memory');
+  const ids = Array.isArray(v) ? v : [v];
+  if (ids.length === 0 || !ids.every((x): x is string => typeof x === 'string' && x !== '*') || !ctx.userId) throw authorizationDenied();
+  await resolveAppRef(ctx.db, appRef);
+  for (const id of new Set(ids as string[])) {
+    const memory = await ctx.db.memory.findFirst({ where: { id, deletedAt: null }, select: MANAGED_MEMORY_SELECT });
+    if (!memory || !(await managesGrantMemory(ctx, memory))) throw authorizationDenied();
   }
 }
 
@@ -83,6 +99,7 @@ export const ISSUER_RULES: Readonly<Record<IssuerRuleKey, IssuerGate>> = {
   APP_MANAGER: requireAppManager,
   SECRET_READ_CLIENT: requireSecretReadIssuer,
   MEMORY_READ_APPROVER: requireMemoryReadApprover,
+  MEMORY_WRITE_APPROVER: requireMemoryWriteApprover,
 };
 
 /**

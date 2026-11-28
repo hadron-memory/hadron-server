@@ -183,7 +183,9 @@ async function check() {
     assert.equal(await db.nodeRoleRule.count({ where: { configId: id(`${org}:config`), writers: 'ADMIN', locked: true } }), 1);
     // #4624: on a worker stack both script entry flows exist and the App holds exactly one live write grant, on the one
     // prefix the write flow targets. #4753: on the default stack there is no flows memory and no write grant at all.
-    const grants = await db.appMemoryWriteGrant.findMany({ where: { appId: id(`${org}:team`), revokedAt: null } });
+    // #5404: the write grant is a signed `memory.write` grant held by the App (ruling 0083's unsigned rows are retired).
+    const grants = (await db.grant.findMany({ where: { granteeAppId: id(`${org}:team`), action: 'memory.write', revokedAt: null } }))
+      .map((g) => ({ prefix: (g.values as { prefix?: string }).prefix }));
     if (e2eFlowFixturesEnabled()) {
       for (const entry of [E2E_SCRIPT_WRITE_ENTRY, E2E_SCRIPT_REFUSED_ENTRY]) {
         const flow = await db.node.findFirstOrThrow({ where: { memoryId: id(`${org}:flows`), loc: entry } });

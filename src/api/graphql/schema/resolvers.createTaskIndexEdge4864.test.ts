@@ -9,6 +9,7 @@
  * Fixture: an org with an Agent `eng` whose system memory holds the `tasks` index (pointed at by `tasksIndexRef`);
  * `admin` (org ADMIN) writes it, `contrib` (org READER) reads org-visible memory but cannot write it, `writer` (CONTRIBUTOR) writes org-visible memory, `stranger` reads nothing.
  */
+import { activeMemoryWriteGrant } from '../../../test/appGrants5404.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
@@ -280,7 +281,7 @@ describe('an App write grant never reaches the index edge (#4864)', () => {
     // is an edge the write carries, so the grant arm must not answer for it.
     const app = await db.app.create({ data: { name: 'Grant App', urn: 'ti-org:grantapp', organizationId: org.id } });
     await db.appMember.create({ data: { appId: app.id, userId: admin.id, role: 'owner' } });
-    await db.appMemoryWriteGrant.create({ data: { appId: app.id, memoryId: otherMem.id, prefix: 'tasks', grantedBy: admin.id } });
+    await activeMemoryWriteGrant(app.id, otherMem.id, { issuerUserId: admin.id, prefix: 'tasks' }); // #5404: signed memory.write
     const run = () => ({ db, ...runAuthContext({ id: generateId(), appId: app.id, userId: null, organizationId: org.id }) }) as never;
     const door = (loc: string, taskIndex?: { agent: string; trigger: string }) =>
       writeNodeCore({ memoryId: otherMem.id, loc, name: loc, isRunnable: true, content: 'x' } as never, run(), 'create',

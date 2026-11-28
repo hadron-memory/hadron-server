@@ -6,7 +6,7 @@
  * locks and the audit row are decided once, so the two surfaces cannot drift.
  */
 import { z } from 'zod';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { HadronMcpServer as McpServer } from './hadronMcpServer.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { setAssetPublicLink } from '../lib/asset/publicLink.js';
 import { AssetUploadError } from '../controller/operations/beginAssetUpload.js';

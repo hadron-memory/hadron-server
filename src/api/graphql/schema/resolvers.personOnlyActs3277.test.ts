@@ -101,6 +101,8 @@ const SCOPE_REFUSAL = { code: 'FORBIDDEN', message: 'Only whoever manages this A
 const GRANT_REFUSAL = { code: 'APP_GRANT_FORBIDDEN', message: 'Only whoever manages this App can give or revoke a grant.' };
 const NOT_BOUND = { code: 'SESSION_NOT_BOUND', message: 'The session this request names is not one of your open sessions (it may have ended). Nothing was written. Bind a live session, or send no session to act as yourself.' };
 const READ_ONLY = { code: 'FORBIDDEN', message: 'Impersonation sessions are read-only.' };
+const RETIRED_WRITE = { code: 'DOOR_RETIRED', message: 'setAppMemoryWriteGrant is retired: give a signed memory.write grant with createGrant instead.' };
+const RETIRED_READ = { code: 'DOOR_RETIRED', message: 'setAutomationReadGrant is retired: give a signed memory.read grant with createGrant instead.' };
 
 /**
  * The answer each door gives each shape. A worker shape gets the door's own manager refusal (the answer its bound
@@ -112,9 +114,10 @@ const EXPECTED: Record<string, Record<keyof typeof CLASSES, { code: string; mess
   regenerateAppKey: { boundWorker: FORBIDDEN, sessionRowWorker: FORBIDDEN /* RED */, ambiguousActor: FORBIDDEN /* RED */, refusedBinding: FORBIDDEN /* RED */, impersonation: FORBIDDEN, runPrincipal: FORBIDDEN /* RED */, appKey: FORBIDDEN },
   grantAppKeyScope: { boundWorker: SCOPE_REFUSAL, sessionRowWorker: SCOPE_REFUSAL /* RED */, ambiguousActor: SCOPE_REFUSAL /* RED */, refusedBinding: NOT_BOUND, impersonation: READ_ONLY, runPrincipal: SCOPE_REFUSAL /* RED */, appKey: { code: 'APP_KEY_NOT_FOUND', message: 'App key not found.' } },
   grantApp: { boundWorker: GRANT_REFUSAL, sessionRowWorker: GRANT_REFUSAL /* RED */, ambiguousActor: GRANT_REFUSAL /* RED */, refusedBinding: NOT_BOUND, impersonation: READ_ONLY, runPrincipal: GRANT_REFUSAL /* RED */, appKey: { code: 'APP_NOT_FOUND', message: 'App not found.' } },
-  // Already on the person gate on main (both grant doors): regression pins for the whole matrix.
-  setAppMemoryWriteGrant: { boundWorker: FORBIDDEN, sessionRowWorker: FORBIDDEN, ambiguousActor: FORBIDDEN, refusedBinding: FORBIDDEN, impersonation: FORBIDDEN, runPrincipal: FORBIDDEN, appKey: FORBIDDEN },
-  setAutomationReadGrant: { boundWorker: FORBIDDEN, sessionRowWorker: FORBIDDEN, ambiguousActor: FORBIDDEN, refusedBinding: FORBIDDEN, impersonation: FORBIDDEN, runPrincipal: FORBIDDEN, appKey: FORBIDDEN },
+  // #5404: both grant doors are retired and refuse DOOR_RETIRED before any gate, for every shape (they were FORBIDDEN here). The
+  // person-only rule now lives on their replacement, createGrant (`memory.read` / `memory.write`, issuer = a person, cor:acl:140:04).
+  setAppMemoryWriteGrant: { boundWorker: RETIRED_WRITE, sessionRowWorker: RETIRED_WRITE, ambiguousActor: RETIRED_WRITE, refusedBinding: RETIRED_WRITE, impersonation: RETIRED_WRITE, runPrincipal: RETIRED_WRITE, appKey: RETIRED_WRITE },
+  setAutomationReadGrant: { boundWorker: RETIRED_READ, sessionRowWorker: RETIRED_READ, ambiguousActor: RETIRED_READ, refusedBinding: RETIRED_READ, impersonation: RETIRED_READ, runPrincipal: RETIRED_READ, appKey: RETIRED_READ },
   setAutomationTeamSnapshotGrant: { boundWorker: FORBIDDEN, sessionRowWorker: FORBIDDEN, ambiguousActor: FORBIDDEN, refusedBinding: FORBIDDEN, impersonation: FORBIDDEN, runPrincipal: FORBIDDEN, appKey: FORBIDDEN },
 };
 
@@ -149,9 +152,11 @@ describe('#3277 a person who manages the App still succeeds at every door (regre
       expect((await DOORS.grantAppKeyScope(c) as any).id).toBe(f.key.id);
       expect(await db.appKeyScope.count({ where: { appKeyId: f.key.id, revokedAt: null } })).toBe(1);
       expect((await DOORS.grantApp(c) as any).granteeWorkerId).toBe(f.target.id);
-      expect((await DOORS.setAppMemoryWriteGrant(c) as any).prefix).toBe('reports:x');
-      await DOORS.setAutomationReadGrant(c);
-      expect(await db.appAutomationReadGrant.count({ where: { revokedAt: null } })).toBe(1);
+      // #5404: the two retired grant doors refuse even the App's manager (they wrote a row here); nothing is written.
+      expect(await answer(DOORS.setAppMemoryWriteGrant(c))).toEqual(RETIRED_WRITE);
+      expect(await answer(DOORS.setAutomationReadGrant(c))).toEqual(RETIRED_READ);
+      expect(await db.appMemoryWriteGrant.count()).toBe(0);
+      expect(await db.appAutomationReadGrant.count()).toBe(0);
       const snapshotGrant = await DOORS.setAutomationTeamSnapshotGrant(c) as any;
       expect(snapshotGrant).toMatchObject({ appId: f.app.id, triggerKind: 'SCHEDULE', triggerId: f.schedule.id, grantedBy: f.mgr.id, revokedAt: null });
       expect(await db.appAutomationTeamSnapshotGrant.count()).toBe(1);
@@ -197,7 +202,7 @@ describe('#3307 instructed worker remains refused at person-only doors', () => {
   const plain=name==='startImpersonation'?(c:Context)=>M.startImpersonation({}, {orgRef:f.org.id,userRef:(f as any).impTarget.id,reason:'fixture'},c):DOORS[name];
   const got=await answer(CLASSES.sessionRowWorker(call));
   expect(got).toEqual(await answer(CLASSES.sessionRowWorker(plain)));
-  expect(got).toHaveProperty('code',name==='grantApp'?'APP_GRANT_FORBIDDEN':'FORBIDDEN');
+  expect(got).toHaveProperty('code',name==='grantApp'?'APP_GRANT_FORBIDDEN':['setAppMemoryWriteGrant','setAutomationReadGrant'].includes(name)?'DOOR_RETIRED':'FORBIDDEN'); // #5404: two doors retired
   expect({writes:await writes(),events:await db.agentTeamEvent.findMany({where:{appId:f.app.id}}),support:await db.impersonationSession.findMany()}).toEqual(before);
  });
 });

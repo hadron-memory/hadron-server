@@ -232,15 +232,25 @@ describe('#5265 rebuild on items 2, 4 and 9: the bodies main keeps', () => {
   it('a lesser tag behind `<!`, a later line past a blank, and an HTML block are left as main leaves them', () => {
     // [body, the readers that lose it, the same on main]: a line-head `<!<b>`, a raw-text element two lines on or past a blank, `<!` inside
     // an HTML block (a browser's bogus comment is the only reading there), and a lesser tag.
-    // Known losses that main has too (Xan, team chat #152402): the `</textarea>` two lines on is #5323 (escaping it would lose the anchor
-    // in commonmark.js and markdown-it, which keep it on main). The `<xmp>` behind `<div/` (#5324, not the window's) is escaped now: below.
+    // The `</textarea>` two lines on (#5323) and the `<xmp>` behind `<div/` (#5324, not the window's) are escaped now: below.
     for (const [body, lost] of [
-      ['<!<b>\n-\n<!x>~~~', []], ['<!\n\n</textarea>\n~~~', ['marked']], ['<!\n-\n</textarea>\n~~~', ['marked']], ['<x>\n```<!<xmp>', []],
+      ['<!<b>\n-\n<!x>~~~', []], ['<x>\n```<!<xmp>', []],
       // The `</` site's mirror of the `<!` one inside an HTML block (Bradley, LOCAL at 8dd599df).
       ['<x>\n```</<xmp>', []], ['<div>\n</<script>', []],
     ] as Array<[string, string[]]>) {
       expect(escapeUnterminatedHtml(body), body).toBe(body);
       expect(losers(body), body).toEqual(lost);
+    }
+  });
+  it('#5323: the fence under a `</textarea>` two lines after a bare `<!` is escaped (the end tag stays), and no reader loses the anchor', () => {
+    // Escaping the end tag would lose the anchor in commonmark.js and markdown-it (the issue's measurement); the fence marked alone opens is
+    // escaped instead (unterminatedHtml5323.test.ts).
+    for (const body of ['<!\n\n</textarea>\n~~~', '<!\n-\n</textarea>\n~~~']) {
+      expect(losers(body), body).toEqual(['marked']);
+      const out = escapeUnterminatedHtml(body);
+      expect(out, body).toBe(body.replace('~~~', '&#126;&#126;&#126;'));
+      expect(escapeUnterminatedHtml(out), body).toBe(out);
+      expect(losers(out), body).toEqual([]);
     }
   });
   it('#5324: the `<xmp>` behind `<div/` after a bare `<!` line is escaped, and no reader loses the anchor', () => {

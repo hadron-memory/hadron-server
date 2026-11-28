@@ -27,11 +27,11 @@ beforeEach(async () => { await cleanDb(db); await dropTestActions(); });
 afterAll(async () => { await dropTestActions(); });
 
 describe('the platform list', () => {
-  it('#3707 (S1b): the shipped list is exactly the eight seeded actions (#5321 added memory.read), and a repeat of the upsert changes nothing (terms: seed3707.test.ts)', async () => {
-    expect(PLATFORM_ACTIONS.map((a) => a.name).sort()).toEqual(['bootprompt.compile.approve', 'bootprompt.source.edit', 'memory.read', 'schedule.create', 'secret.reveal', 'secret.use', 'webhook.create', 'worker.session.restart']);
+  it('#3707 (S1b): the shipped list is exactly the nine seeded actions (#5321 added memory.read, #5404 memory.write), and a repeat of the upsert changes nothing (terms: seed3707.test.ts)', async () => {
+    expect(PLATFORM_ACTIONS.map((a) => a.name).sort()).toEqual(['bootprompt.compile.approve', 'bootprompt.source.edit', 'memory.read', 'memory.write', 'schedule.create', 'secret.reveal', 'secret.use', 'webhook.create', 'worker.session.restart']);
     await upsertPlatformActions(db);
     const before = await db.$queryRawUnsafe<Array<{ n: number }>>(`SELECT count(*)::int AS n FROM actions`);
-    expect(await upsertPlatformActions(db)).toEqual({ inserted: 0, updated: 0, unchanged: 8 });
+    expect(await upsertPlatformActions(db)).toEqual({ inserted: 0, updated: 0, unchanged: 9 });
     expect(await db.$queryRawUnsafe(`SELECT count(*)::int AS n FROM actions`)).toEqual(before);
   });
 });

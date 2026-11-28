@@ -8,7 +8,7 @@
 import { Client } from 'pg';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../integrations/db/client.js';
-import { cleanDb } from '../../test/helpers.js';
+import { cleanDb, createPriceRowForTest } from '../../test/helpers.js';
 import { mergeUsers } from '../../test/mergeConsent.js';
 import { testRunAgentId } from '../../test/runAgent.js';
 import { generateId } from '../id.js';
@@ -30,7 +30,7 @@ let userT: string;
 let admin: string;
 
 async function mkPrice(effectiveAt: Date, extra: { inRate?: bigint; markupBasisPoints?: number | null; createdBy?: string | null; model?: string } = {}) {
-  return db.aiModelPrice.create({
+  return createPriceRowForTest(db, {
     data: {
       id: generateId(),
       provider: 'anthropic',
@@ -92,7 +92,7 @@ describe('#5021 a unit records its price row', () => {
   });
 
   it('pin 1c: an openai-compatible unit carries no price row even when a row exists for it', async () => {
-    await db.aiModelPrice.create({ data: { id: generateId(), provider: 'openai-compatible', model: BASE.model, tier: 1, inputMicroCentsPerMTok: IN_RATE, outputMicroCentsPerMTok: OUT_RATE, effectiveAt: new Date('2026-01-01T00:00:00Z') } });
+    await createPriceRowForTest(db, { data: { id: generateId(), provider: 'openai-compatible', model: BASE.model, tier: 1, inputMicroCentsPerMTok: IN_RATE, outputMicroCentsPerMTok: OUT_RATE, effectiveAt: new Date('2026-01-01T00:00:00Z') } });
     const event = await recordLlmUsage(db, { ...BASE, provider: 'openai-compatible', billableAccount: { organizationId: orgId }, keyOwnerType: 'HADRON_SERVER' });
     expect((await unitRow(event!.id)).price_row_id).toBeNull();
   });

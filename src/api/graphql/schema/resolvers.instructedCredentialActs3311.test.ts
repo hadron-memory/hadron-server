@@ -39,12 +39,16 @@ const revokes: Record<string, (instruction?: unknown, c?: Context) => Promise<an
   key: (instruction = live, c = bound()) => M.revokeAppKey({}, { id: f.key.id, instruction }, c),
   scope: (instruction = live, c = bound()) => M.revokeAppKeyScope({}, { id: f.key.id, scope: 'attention:deliver', instruction }, c),
   grant: (instruction = live, c = bound()) => M.revokeAppGrant({}, { appRef: f.app.id, workerRef: f.target.id, name: 'TICKER_SUBSCRIBE_WORKERS', instruction }, c),
+};
+// #5404: the two write-grant doors are retired (DOOR_RETIRED before any gate). They left the instructed-door tables above, whose
+// admitted-path cases no longer apply; every shape that table drove is pinned against them in the '#5404' describe below.
+const retired: Record<string, (instruction?: unknown, c?: Context) => Promise<any>> = {
   writeGrant: (instruction = live, c = bound()) => M.revokeAppMemoryWriteGrant({}, { id: f.writeGrant.id, instruction }, c),
+  appMemoryWriteGrants: (instruction = live, c = bound()) => Q.appMemoryWriteGrants({}, { appRef: f.app.id, instruction }, c),
 };
 const lists: Record<string, (instruction?: unknown, c?: Context) => Promise<any>> = {
   appKeys: (instruction = live, c = bound()) => Q.appKeys({}, { appRef: f.app.id, instruction }, c),
   appKeysPage: (instruction = live, c = bound()) => Q.appKeysPage({}, { appRef: f.app.id, instruction }, c),
-  appMemoryWriteGrants: (instruction = live, c = bound()) => Q.appMemoryWriteGrants({}, { appRef: f.app.id, instruction }, c),
 };
 const doors = { ...revokes, ...lists };
 const isList = (door: string) => door in lists;
@@ -132,12 +136,11 @@ describe('#3311 instructed revokes and lists', () => {
     });
   }
 
-  it('revoke doors take effect: the key, scope, grant and write grant end', async () => {
-    for (const door of ['scope', 'grant', 'writeGrant', 'key']) await revokes[door]!();
+  it('revoke doors take effect: the key, scope and grant end (the write grant door is retired, #5404)', async () => {
+    for (const door of ['scope', 'grant', 'key']) await revokes[door]!();
     expect((await db.appKey.findUniqueOrThrow({ where: { id: f.key.id } })).revokedAt).not.toBeNull();
     expect(await db.appKeyScope.count({ where: { appKeyId: f.key.id, revokedAt: null } })).toBe(0);
     expect(await db.appGrant.count({ where: { appId: f.app.id, revokedAt: null } })).toBe(0);
-    expect(await db.appMemoryWriteGrant.count({ where: { appId: f.app.id, revokedAt: null } })).toBe(0);
     expect(await instructionEvents()).toHaveLength(Object.keys(revokes).length);
   });
 
@@ -183,9 +186,10 @@ describe('#3311 instructed revokes and lists', () => {
     });
   }
   for (const door of ['writeGrant', 'appMemoryWriteGrants']) {
-    it(`a user-backed run stays refused at ${door}, as before`, async () => {
+    it(`a user-backed run stays refused at ${door}, as before (now DOOR_RETIRED, #5404)`, async () => {
       const before = await snapshot();
-      const got = await answer(doors[door]!(null, runCtx()));
+      const got = await answer(retired[door]!(null, runCtx()));
+      expect(got.code).toBe('DOOR_RETIRED');
       expect(got.code).not.toBe('RESOLVED');
       expect(got.code).toBeDefined();
       expect(await snapshot()).toEqual(before);
@@ -193,16 +197,14 @@ describe('#3311 instructed revokes and lists', () => {
   }
 
   it('an instructed revoke is attributed to the holder on the rows it ends', async () => {
-    await revokes.grant!(); await revokes.writeGrant!(); await revokes.scope!();
+    await revokes.grant!(); await revokes.scope!();
     expect((await db.appGrant.findFirstOrThrow({ where: { appId: f.app.id } })).revokedBy).toBe(f.holder.id);
-    expect((await db.appMemoryWriteGrant.findUniqueOrThrow({ where: { id: f.writeGrant.id } })).revokedBy).toBe(f.holder.id);
     expect((await db.appKeyScope.findFirstOrThrow({ where: { appKeyId: f.key.id } })).revokedByUserId).toBe(f.holder.id);
   });
 
   it('an admitted instructed list returns the rows', async () => {
     expect((await lists.appKeys!()).map((k: any) => k.id)).toContain(f.key.id);
     expect((await lists.appKeysPage!()).items.map((k: any) => k.id)).toContain(f.key.id);
-    expect((await lists.appMemoryWriteGrants!()).map((g: any) => g.id)).toContain(f.writeGrant.id);
   });
 
   // The session row is fenced through commit: a session-end writer cannot commit between the judgement and the write.
@@ -230,7 +232,8 @@ describe('#3311 instructed revokes and lists', () => {
     await db.appKeyScope.updateMany({ where: { appKeyId: f.key.id }, data: { revokedAt: new Date(), revokedByUserId: f.holder.id } });
     await db.appMemoryWriteGrant.update({ where: { id: f.writeGrant.id }, data: { revokedAt: new Date(), revokedBy: f.holder.id } });
     await db.appGrant.updateMany({ where: { appId: f.app.id }, data: { revokedAt: new Date(), revokedBy: f.holder.id } });
-    for (const door of ['scope', 'grant', 'writeGrant']) await answer(revokes[door]!()); // already ended: nothing changes
+    for (const door of ['scope', 'grant']) await answer(revokes[door]!()); // already ended: nothing changes
+    await answer(retired.writeGrant!()); // retired (#5404): refuses, records nothing
     expect(await instructionEvents()).toHaveLength(0);
     await revokes.key!(); // the first key revoke records one
     expect(await instructionEvents()).toHaveLength(1);
@@ -273,10 +276,39 @@ describe('#3311 instructed revokes and lists', () => {
     expect(await snapshot()).toEqual(before);
   });
 
-  it('the instructed write-grant list shows no grant on a memory the holder may not see', async () => {
+  it('the instructed write-grant list shows no grant on a memory the holder may not see (retired: it shows nothing, #5404)', async () => {
     const priv = await db.memory.create({ data: { name: 'priv', urn: 'cred3311.test:priv', class: 'private', userId: f.other.id, organizationId: f.org.id } as never });
     await db.appMemoryWriteGrant.create({ data: { appId: f.app.id, memoryId: priv.id, prefix: 'p:q', grantedBy: f.other.id } });
-    const rows = await lists.appMemoryWriteGrants();
-    expect(rows).toHaveLength(1);
+    const got = await answer(retired.appMemoryWriteGrants!());
+    expect(got.code).toBe('DOOR_RETIRED');
+    expect(JSON.stringify(got)).not.toContain(priv.id);
   });
+});
+
+describe('#5404 the retired write-grant doors: one refusal for every caller, no instruction record, nothing written', () => {
+  // Restates, for `revokeAppMemoryWriteGrant` and `appMemoryWriteGrants`, every row the '#3311 instructed revokes and lists' table
+  // drove: the admitted instructed holder (owner role and org ADMIN), a direct person, every refused kind and a non-managing holder
+  // now all get DOOR_RETIRED, byte-identical, with no team event and no row change.
+  for (const [door, call] of Object.entries(retired)) {
+    it(`${door}: holder (owner, org ADMIN), direct person, refused shapes and a run answer the same DOOR_RETIRED`, async () => {
+      const before = await snapshot();
+      const base = await answer(call());
+      expect(base.code).toBe('DOOR_RETIRED');
+      const shapes: Array<() => Promise<unknown>> = [
+        () => call(null, ctx()),
+        () => call(null, bound()),
+        () => call(live, bound({ sessionBindingRefused: true })),
+        () => call(live, bound({ clientId: 'run:test', appId: f.app.id })),
+        () => call(live, { db, appId: f.app.id, roles: [] } as Context),
+        () => call(live, bound({ impersonation: { sessionId: generateId(), actorUserId: f.other.id, orgId: f.org.id, expiresAt: new Date('2099-01-01') } } as any)),
+      ];
+      for (const s of shapes) expect(await answer(s())).toEqual(base);
+      await db.appMember.deleteMany({ where: { appId: f.app.id, userId: f.holder.id } });
+      await db.orgMember.update({ where: { organizationId_userId: { organizationId: f.org.id, userId: f.holder.id } }, data: { role: 'ADMIN' } });
+      expect(await answer(call())).toEqual(base);
+      expect(await instructionEvents()).toHaveLength(0);
+      expect((await snapshot()).writeGrants).toEqual(before.writeGrants);
+      expect((await db.appMemoryWriteGrant.findUniqueOrThrow({ where: { id: f.writeGrant.id } })).revokedAt).toBeNull();
+    });
+  }
 });

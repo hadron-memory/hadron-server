@@ -38,6 +38,7 @@ import { resolveRunTools, hadronCreateNode, hadronUpdateNode, hadronReadNode } f
 import { ToolDeniedError } from '../lib/llm/index.js';
 import type { AppRun } from '../generated/prisma/index.js';
 import { splitNodeUrn } from '../lib/urn.js';
+import { activeMemoryWriteGrant } from '../test/appGrants5404.js';
 
 const ORG_URN = 'flow-int-org';
 const MEM_URN = `${ORG_URN}:flowmem`;
@@ -98,10 +99,9 @@ beforeEach(async () => {
   });
   const grantor = await createDbRunConsentPrincipal(db, orgId, appId);
   await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: grantor.userId } }, data: { role: 'ADMIN' } });
-  await db.appMemoryWriteGrant.createMany({ data: ['runs', 'flow', 'tasks', 'notes'].map(prefix => ({
-    appId, memoryId, prefix, grantedBy: grantor.userId,
-    registerNodeUrn: 'hrn:node:example.com:fixture:authority',
-  })) });
+  // #5404: the App's write authority is a signed `memory.write` grant per prefix (ruling 0083's unsigned rows are retired),
+  // signed by the org ADMIN, who manages the memory.
+  for (const prefix of ['runs', 'flow', 'tasks', 'notes']) await activeMemoryWriteGrant(appId, memoryId, { issuerUserId: grantor.userId, prefix });
 
   const classify = await makeNode('flow:classify', {
     content: 'Classify the report about {{topic}}. Score your confidence.',
