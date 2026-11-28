@@ -55,6 +55,10 @@ const MAX_RESTARTS = 32;
 /** #5265 — the scans the last call of escapeUnterminatedHtml ran (one per model per escape), for a pin that bounds the work, not the wall clock. */
 let scansRun = 0;
 /** #5332 — a raw-text element's (or `plaintext`) start: it takes the rest of the page as text once a reader emits it. */
+// #5384: the span between a bare `<![` and its first `>` (exclusive) ends in a raw-text start's name and attributes at a line head, up to three
+// spaces in.
+const BARE_BANG_BRACKET_HIDES_RAW_START =
+  /\n {0,3}<(?:script|style|textarea|title|xmp|iframe|noembed|noframes|noscript|plaintext|template)(?=[\s/]|$)[^<]*$/i;
 const RAW_TEXT_START = /<(script|style|textarea|title|xmp|iframe|noembed|noframes|noscript|plaintext)(?=[\s/>]|$)/i;
 /**
  * #5332 — where a bogus comment (`<!` or `</` with no letter after it, at `at`, running to the `>` at `close`) hides a raw-text start that
@@ -632,6 +636,19 @@ type LineKind = 'blank' | 'code' | 'nonpara' | 'marker' | 'other';
  */
 type ReaderModel = 'commonmark' | 'marked';
 
+/**
+ * Whether the text at `i` is `<!` and a name that no blank or letter follows (so marked takes no declaration there, #5211). Sticky on the whole
+ * text, so a text with no line break costs no search for one (#5476). The regex is shared: `lastIndex` is set before every use and nothing
+ * else reads it.
+ */
+const DECLARATION_NAME = /<![A-Za-z]+(?![A-Za-z\s])/y;
+function declarationWithoutBlankAt(text: string, i: number): boolean {
+  DECLARATION_NAME.lastIndex = i;
+  const found = DECLARATION_NAME.test(text);
+  DECLARATION_NAME.lastIndex = 0;
+  return found;
+}
+
 /** The index of the `<` that opens the first unterminated construct at or after `from`, or -1, as `model` reads the text. */
 function firstUnterminated(text: string, from: number, model: ReaderModel = 'commonmark'): number {
   scansRun += 1;
@@ -943,10 +960,18 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
     }
     // #5211 — marked takes a declaration only when a blank follows its name; any other `<!` and a name is text to it, so what follows is read.
     // At the head of a line that interrupts no paragraph it starts an HTML block in marked too, and is complete there.
-    if (model === 'marked' && /<![A-Za-z]+(?![A-Za-z\s])/y.test(text.slice(i, text.indexOf('\n', i) === -1 ? n : text.indexOf('\n', i) + 1)) && !(startsLine(i) && prevBefore !== 'other' && prevBefore !== 'marker' && !prevDefinition)) { i += 2; continue; }
+    if (model === 'marked' && declarationWithoutBlankAt(text, i) && !(startsLine(i) && prevBefore !== 'other' && prevBefore !== 'marker' && !prevDefinition)) { i += 2; continue; }
     if (text.startsWith('<!', i)) {
       const close = text.indexOf('>', i + 2);
       if (close === -1 || close + 1 > blockLimit(i)) return i;
+      // #5384 — a bare `<![` (no `CDATA[`) starts nothing in Markdown: no HTML block (type 5 needs `<![CDATA[`) and no inline HTML, so the
+      // readers write it as paragraph text and read on. Only inside an HTML block's raw lines does a browser see it raw, as a bogus comment to its
+      // first `>`. Below those lines, when that `>` ends a raw-text start at a line head (a new line, up to three spaces in), the jump would
+      // leave that start as written: the walk reads on after the `<![` instead, so the start is judged as without it. The rule is that narrow on purpose: reading past every bare `<![` exposes later constructs (a `<?` that
+      // interrupts the paragraph, a start four columns into a list item) to escapes that lose the anchor where the jump kept it (fuzz at f27a59aa,
+      // 87 regressing pairs). With no `>` in reach the `<!` is escaped as above: a reader that keeps the line raw (marked after a line-head
+      // `<?>`) would have the bogus comment take what follows.
+      if (i >= rawUntil && text[i + 2] === '[' && BARE_BANG_BRACKET_HIDES_RAW_START.test(text.slice(i + 3, close))) { i += 3; continue; }
       // #5388 QA F2 (at 722ea31f): `<!` and no letter is text to Markdown, so a later line that opens a comment block (type 2, which
       // interrupts a paragraph) is read afresh there, while a browser reading the raw string has that `<!--` inside the bogus comment. When the
       // comment it opens does not end before the bogus comment's `>`, the two readings resume in different places: escape the `<!`.
@@ -1197,8 +1222,13 @@ function fenceRunBefore(text: string, at: number, before: number): boolean {
  * setext underline or an ATX heading), where it starts a type 7 block in CommonMark.
  */
 function markedFenceBehindBogus(text: string, at: number, close: number): number {
-  const ls = text.lastIndexOf('\n', close) + 1;
-  if (ls <= at || !/^ {0,3}<\/(?:script|style|textarea|pre)[ \t]*>$/i.test(text.slice(ls, close + 1))) return -1;
+  // The line break is looked for inside the bogus comment only, backwards from `close` and no further than `at`: a search to the start of a text
+  // with no line break made each comment cost the whole text before it (#5476, a quadratic walk on a long single line).
+  let brk = close;
+  while (brk > at && text[brk] !== '\n') brk -= 1;
+  if (brk === at) return -1;
+  const ls = brk + 1;
+  if (!/^ {0,3}<\/(?:script|style|textarea|pre)[ \t]*>$/i.test(text.slice(ls, close + 1))) return -1;
   const nl = text.indexOf('\n', close);
   const le = nl === -1 ? text.length : nl;
   if (text.slice(close + 1, le).trim() !== '') return -1;
