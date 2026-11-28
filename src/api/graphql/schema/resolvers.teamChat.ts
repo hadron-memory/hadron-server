@@ -74,7 +74,7 @@ import { recordCheckMiss } from '../../../lib/channelReadState.js';
 import {
   TEAM_CHAT_SEARCH_SCAN_CAP, assertSearchQuery, decodeSearchCursor, encodeSearchCursor, searchBinding, searchCallerKey, searchPageSize,
 } from '../../../lib/teamChatSearch.js';
-import { isTeamSpaceRow, teamSpaceAudienceFilter, teamSpaceOwnerFilter } from '../../../lib/auth/teamSpace.js';
+import { appTenantRowFilter, isTeamSpaceRow, teamSpaceAudienceFilter, teamSpaceOwnerFilter } from '../../../lib/auth/teamSpace.js';
 // Spec 049 Phase 4 — the Channel row the team chat became.
 import { DEFAULT_CHANNEL_NAME, ensureChannelWithRoot } from '../../../lib/channels.js';
 import { locateTeamAgent, appNotFound, resolveAppRefConcealed, isAppGateRefusal } from '../../../lib/auth/workerRead.js';
@@ -239,7 +239,7 @@ async function locateTeamChatRoot(ctx: Context, app: AppRow): Promise<ChatRootRo
       // impersonation shortcut. Same narrowing as `resolveChannelTarget`, from
       // the same shared predicate rather than a fourth copy of it.
       memory: {
-        appId,
+        ...appTenantRowFilter({ id: appId, organizationId: app.organizationId }),
         ...teamSpaceAudienceFilter,
         ...teamSpaceOwnerFilter({
           appOwnerUserId: app.ownerUserId,
@@ -853,6 +853,7 @@ async function resolveChannelTarget(ctx: Context, channelRef: string, mode: 'pos
       memory: {
         select: {
           appId: true,
+          organizationId: true,
           class: true,
           deletedAt: true,
           // The discriminators that tell the team space apart from the OTHER
@@ -904,6 +905,7 @@ async function resolveChannelTarget(ctx: Context, channelRef: string, mode: 'pos
     hostApp &&
     isTeamSpaceRow(mem, {
       appOwnerUserId: hostApp.ownerUserId,
+      appOrganizationId: hostApp.organizationId,
       impersonating: !!ctx.impersonation,
     })
       ? hostApp

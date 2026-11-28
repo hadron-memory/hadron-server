@@ -49,6 +49,7 @@ import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../lib/au
 import { userlessRunHoldsMemoryWriteGrant, type WriteDestination } from '../lib/grants/writeGrant.js';
 import { installMemoryAudience, isInstallMemoryRow, readableInstallMemoryIds } from '../lib/auth/installMemory.js';
 import { canManageAgentSystemMemory } from '../lib/auth/managedSystemMemory.js';
+import { appTenantRowFilter, isAppTenantRow } from '../lib/auth/teamSpace.js';
 
 // ---------------------------------------------------------------------------
 // Shared fold algorithm
@@ -307,7 +308,7 @@ async function getAppTeamSpaceAccess(
   // Only the App's identity and ownership are read, so the type is narrowed to
   // those two fields (#1196): `participantTeamSpaceFolds` calls this WITHOUT
   // loading the App's installed agents, which only the agent-derived half needs.
-  app: Pick<AppAccessRow, 'id' | 'ownerUserId'>,
+  app: Pick<AppAccessRow, 'id' | 'ownerUserId' | 'organizationId'>,
   callerUserId: string | null,
   /** The caller may be admitted as an AppMember of a user-owned App (#1764): false under impersonation. */
   memberAdmitted = false,
@@ -329,7 +330,8 @@ async function getAppTeamSpaceAccess(
     // which is exactly why they must not share a definition: over-admitting is
     // right here and wrong there.
     where: {
-      appId: app.id,
+      // hadron-internal#92: the App's tenant too, not its id alone (one shared comparison).
+      ...appTenantRowFilter(app),
       class: 'app',
       deletedAt: null,
       workerOf: { none: {} },
@@ -654,7 +656,7 @@ async function participantTeamSpaceFolds(
     .filter((id) => !alreadyFolded.includes(id));
   if (ids.length === 0) return [];
 
-  const apps = await db.app.findMany({ where: { id: { in: ids } }, select: { id: true, ownerUserId: true } });
+  const apps = await db.app.findMany({ where: { id: { in: ids } }, select: { id: true, ownerUserId: true, organizationId: true } });
   const maps = await Promise.all(apps.map((app) => getAppTeamSpaceAccess(db, app, userId, !principal.impersonation)));
   return apps.map((app, i) => ({ appId: app.id, map: maps[i] }));
 }
@@ -857,15 +859,17 @@ export async function getMemoryAccess(
   if (auth.userId) {
     const participantIds = await participantAppIds(db, auth, { includeMemberships: true });
     if (participantIds.length > 0) {
-      const writable = await db.memory.findMany({
+      const writableRows = await db.memory.findMany({
         where: {
           appId: { in: participantIds }, class: 'app', deletedAt: null,
           workerOf: { none: {} }, userMemoryOfAgentId: null,
           // Any owner here: the App owner's row is a user-owned App's team space, which a participant of that App (its
           // owner or, #1764, a member) writes; any other owner's row is not in this App's audience and is dropped below.
         },
-        select: { id: true, appId: true, ownerUserId: true },
+        // hadron-internal#92: the App's organization rides on the same read (no extra query: the fold's cost is pinned).
+        select: { id: true, appId: true, ownerUserId: true, organizationId: true, app: { select: { organizationId: true } } },
       });
+      const writable = writableRows.filter((r) => r.app !== null && isAppTenantRow(r, r.app));
       // The App owner's row is a user-owned App's team space; a member reaches it by the one shared rule. Rows of an
       // org-owned App (ownerless) and the caller's own rows are as before; any other owner's row is dropped.
       const memberRows = await userOwnedTeamSpaceIdsForMember(db, auth, writable.map((r) => ({
@@ -971,7 +975,7 @@ export async function getWorkerMemoryAccess(
         { app: { organizationId: { in: orgIds } } },
       ],
     },
-    select: { memoryId: true, appId: true, app: { select: { ownerUserId: true } } },
+    select: { memoryId: true, appId: true, app: { select: { ownerUserId: true, organizationId: true } } },
   });
   if (workers.length === 0) return [];
   const memories = await db.memory.findMany({
@@ -979,12 +983,13 @@ export async function getWorkerMemoryAccess(
       id: { in: workers.map((w) => w.memoryId!).filter(Boolean) },
       class: 'app', deletedAt: null, userMemoryOfAgentId: null,
     },
-    select: { id: true, appId: true, ownerUserId: true },
+    select: { id: true, appId: true, ownerUserId: true, organizationId: true },
   });
   const valid = new Map(memories.map((m) => [m.id, m]));
   return workers.filter((w) => {
     const memory = valid.get(w.memoryId!);
-    return !!memory && memory.appId === w.appId && memory.ownerUserId === w.app.ownerUserId;
+    return !!memory && memory.appId === w.appId && memory.ownerUserId === w.app.ownerUserId
+      && isAppTenantRow(memory, w.app);
   }).map((w) => w.memoryId!);
 }
 

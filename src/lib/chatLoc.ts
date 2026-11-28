@@ -46,7 +46,7 @@ import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { isTeamChatLoc } from './teamChatLoc.js';
 import { participantAppIds } from './auth/appParticipation.js';
 import { ancestorLocs } from './nodeSubtreeLock.js';
-import { teamSpaceAudienceFilter } from './auth/teamSpace.js';
+import { appsTenantRowFilter, teamSpaceAudienceFilter } from './auth/teamSpace.js';
 import { NOT_QUESTION_FAMILY_WHERE } from './questions/index.js';
 import { governedRoleWhereClauses } from './governedRole.js';
 import { groupMemberMemoryWhere } from './auth/groupMemberMemory.js';
@@ -240,6 +240,10 @@ export async function chatLocFilter(
   // the drift #1196 exists to remove. `includeMemberships` puts the AppMember
   // arm back, which this caller needs and the access-control fold does not.
   const appIds = await participantAppIds(db, principal, { includeMemberships: true });
+  // hadron-internal#92: each App's rows are matched on its id AND its organization, never the id alone.
+  const tenantApps = appIds.length > 0
+    ? await db.app.findMany({ where: { id: { in: appIds } }, select: { id: true, organizationId: true } })
+    : [];
 
   return {
     ...base,
@@ -257,11 +261,11 @@ export async function chatLocFilter(
       // writes to through this very filter, with no node-memory write gate of
       // its own. Same shared predicate as `resolveChannelTarget` and
       // `locateTeamChatRoot`.
-      ...(appIds.length > 0
+      ...(tenantApps.length > 0
         ? [
             {
               memory: {
-                appId: { in: appIds },
+                ...appsTenantRowFilter(tenantApps),
                 ...teamSpaceAudienceFilter,
                 // Under impersonation `self` is the TARGET, so an owner arm here
                 // would classify a row owned by them as a team space (@copilot

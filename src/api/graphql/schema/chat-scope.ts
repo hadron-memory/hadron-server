@@ -24,6 +24,8 @@ import { Prisma, type PrismaClient } from '../../../generated/prisma/index.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { isGrantedAgentMemoryRole } from '../../../lib/appAgent.js';
 import { agentSlugFromUrn, normalizeUrnForLookup } from '../../../lib/urn.js';
+import { appTenantRowFilter, isAppTenantRow } from '../../../lib/auth/teamSpace.js';
+import { notFoundError } from '../../../lib/refusals.js';
 import {
   agentSlugCandidates,
   memoryCarriesLegacyKeyFor,
@@ -180,16 +182,20 @@ export async function locateAppClassMemory(args: {
   appId: string;
   agentId: string;
   agentUrn: string;
+  /** The App's organization (null for a user-owned App): a row of another tenant is not the App's home (hadron-internal#92). */
+  organizationId: string | null;
   db: PrismaClient;
 }): Promise<string | null> {
-  const { appId, agentId, agentUrn, db } = args;
+  const { appId, agentId, agentUrn, organizationId, db } = args;
   const keyed = await db.memory.findUnique({
     where: { appId_sharedMemoryOfAgentId: { appId, sharedMemoryOfAgentId: agentId } },
-    select: { id: true, deletedAt: true },
+    select: { id: true, deletedAt: true, organizationId: true },
   });
-  if (keyed) return keyed.deletedAt ? null : keyed.id;
+  // A keyed row under another organization is not this App's home: absent here, and provisioning refuses (it cannot mint a
+  // second row under the same key).
+  if (keyed) return keyed.deletedAt || !isAppTenantRow(keyed, { organizationId }) ? null : keyed.id;
   const candidates = await db.memory.findMany({
-    where: { appId, class: 'app', sharedMemoryOfAgentId: null },
+    where: { ...appTenantRowFilter({ id: appId, organizationId }), class: 'app', sharedMemoryOfAgentId: null },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     select: { id: true, urn: true, legacyUrn: true, deletedAt: true },
   });
@@ -296,6 +302,16 @@ export async function findOrCreateAppClassMemory(args: {
     );
   }
 
+  /**
+   * hadron-internal#92: a keyed row under another organization is not this App's home. Nothing is written into it and the
+   * caller gets the answer any unresolvable App gets (no existence oracle); the server logs the ids for the operator.
+   */
+  const ownTenant = <R extends { id: string; organizationId: string | null }>(row: R): R => {
+    if (isAppTenantRow(row, { organizationId })) return row;
+    console.warn(`[chat-scope] app ${appId} agent ${agentId}: keyed home ${row.id} is under another organization; refusing`);
+    throw notFoundError('APP_NOT_FOUND', 'App not found');
+  };
+
   /** Un-delete a tombstoned pairing rather than provisioning a second one. */
   const revive = async (row: { id: string; deletedAt: Date | null }): Promise<string> => {
     if (row.deletedAt) {
@@ -311,9 +327,9 @@ export async function findOrCreateAppClassMemory(args: {
   //    rows by design (see the doc comment).
   const existing = await db.memory.findUnique({
     where: { appId_sharedMemoryOfAgentId: { appId, sharedMemoryOfAgentId: agentId } },
-    select: { id: true, deletedAt: true },
+    select: { id: true, deletedAt: true, organizationId: true },
   });
-  if (existing) return revive(existing);
+  if (existing) return revive(ownTenant(existing));
 
   // 2. Pre-#723 rows carry no column — adopt the one the OLD string key names,
   //    through the SAME matcher the migration and the sweep use
@@ -324,7 +340,7 @@ export async function findOrCreateAppClassMemory(args: {
   //    candidate scan is scoped to this App's unkeyed app-class rows (a
   //    handful). Oldest wins, deterministically.
   const candidates = await db.memory.findMany({
-    where: { appId, class: 'app', sharedMemoryOfAgentId: null },
+    where: { ...appTenantRowFilter({ id: appId, organizationId }), class: 'app', sharedMemoryOfAgentId: null },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     select: { id: true, urn: true, legacyUrn: true, deletedAt: true },
   });
@@ -349,9 +365,9 @@ export async function findOrCreateAppClassMemory(args: {
     if (claimed.count === 1) return revive(legacyRow);
     const winner = await db.memory.findUnique({
       where: { appId_sharedMemoryOfAgentId: { appId, sharedMemoryOfAgentId: agentId } },
-      select: { id: true, deletedAt: true },
+      select: { id: true, deletedAt: true, organizationId: true },
     });
-    if (winner) return revive(winner);
+    if (winner) return revive(ownTenant(winner));
   }
 
   // 3. Mint a FLAT single-atom v2 urn (#697 Stage 3, the site #722 deferred).
@@ -411,9 +427,9 @@ export async function findOrCreateAppClassMemory(args: {
       if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') throw err;
       const race = await db.memory.findUnique({
         where: { appId_sharedMemoryOfAgentId: { appId, sharedMemoryOfAgentId: agentId } },
-        select: { id: true, deletedAt: true },
+        select: { id: true, deletedAt: true, organizationId: true },
       });
-      if (race) return revive(race);
+      if (race) return revive(ownTenant(race));
       // A urn clash with another pairing. Bounded so a genuinely unwinnable
       // clash surfaces as the DB error rather than spinning.
       if (attempt >= MINT_RETRY_LIMIT) throw err;
