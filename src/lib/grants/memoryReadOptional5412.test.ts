@@ -13,6 +13,7 @@ import { PLATFORM_ACTIONS, upsertPlatformActions } from './actions.js';
 import { createPendingGrant, GrantCreateRefusal } from './create.js';
 import { renderGrantSummary, GrantSummaryError } from './summary.js';
 import { dropTestActions, seedWorld, type World } from './grantFixtures3668.js';
+import { summaryFor, type GrantRow } from '../signing/grantCeremony.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
@@ -167,5 +168,32 @@ describe('the signed sentence names every restriction, and nothing for an absent
       { memory: 'm1', automation: generateId() },
     ]) expect(() => render(values)).toThrow(GrantSummaryError);
     expect(() => renderGrantSummary({ action: action(), app, values: { memory: 'm1', automation: S }, refs })).toThrow(GrantSummaryError);
+  });
+});
+
+describe('the signing page resolves the automation behind the server\'s own lookup', () => {
+  const row = (values: Record<string, unknown>): GrantRow => ({
+    id: generateId(), app_id: w.appId, user_id: null, agent_id: null, worker_id: null, grantee_app_id: w.appId, action: 'memory.read',
+    action_values: values, starts_at: null, expires_at: null, max_uses: null, reason: 'r', version: 1, activated_at: null, revoked_at: null,
+    holder_departed_at: null, requested_by_user_id: manager, requested_by_worker_id: null, requested_by_run_id: null,
+  });
+  const sentence = (values: Record<string, unknown>) => db.$transaction((tx) => summaryFor({ db, userId: manager, roles: [] } as never, tx, row(values), 'hrn:app:x.test:a'));
+
+  it('a live schedule or webhook of the App is written by kind and id; no key writes nothing', async () => {
+    const s = await schedule();
+    const h = await webhook();
+    const plain = await sentence({ memory: kb.id });
+    expect(plain).toMatch(/, read only$/);
+    expect(await sentence({ memory: kb.id, automation: s.id })).toBe(`${plain}, and only in the runs of the schedule ${s.id}`);
+    expect(await sentence({ memory: kb.id, automation: h.id })).toBe(`${plain}, and only in the runs of the webhook ${h.id}`);
+  });
+
+  it('a deleted, other-App or missing trigger makes the sentence unsignable (null), never a guess', async () => {
+    const gone = await schedule();
+    await db.agentSchedule.update({ where: { id: gone.id }, data: { deletedAt: new Date() } });
+    const foreign = await webhook(w.app2Id);
+    for (const automation of [gone.id, foreign.id, generateId(), null]) {
+      expect({ automation, s: await sentence({ memory: kb.id, automation }) }).toEqual({ automation, s: null });
+    }
   });
 });
