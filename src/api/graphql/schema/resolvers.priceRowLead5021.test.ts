@@ -12,7 +12,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
-import { clearPriceCache } from '../../../lib/metering/index.js';
+import { clearPriceCache, PRICE_CACHE_TTL_MS } from '../../../lib/metering/index.js';
 
 const server = new ApolloServer<Context>({ typeDefs, resolvers });
 async function gql(query: string, ctx: Partial<Context>, variables?: Record<string, unknown>) {
@@ -22,18 +22,19 @@ async function gql(query: string, ctx: Partial<Context>, variables?: Record<stri
 }
 const SET_PRICE = `mutation($input: SetAiModelPriceInput!) { setAiModelPrice(input: $input) { id effectiveAt } }`;
 const priceInput = { provider: 'anthropic', model: 'claude-lead', inputMicroCentsPerMTok: '30000000', outputMicroCentsPerMTok: '150000000' };
-const LEAD_MS = 60_000;
+const LEAD_MS = PRICE_CACHE_TTL_MS;
 
 let admin: string;
 const adminCtx = (): Partial<Context> => ({ userId: admin, roles: ['ADMIN'] });
 // #5213: the database refuses a past-dated row by ITS clock, so the frozen app clock starts at the real now (a fixed
 // date would put every accepted row in the past).
-const NOW = new Date(Math.floor(Date.now() / 1000) * 1000);
+let NOW = new Date();
 
 beforeEach(async () => {
   await cleanDb(db);
   clearPriceCache();
   admin = (await db.user.create({ data: { id: generateId(), githubId: 50221, githubUsername: 'lead-admin', roles: ['ADMIN'] } })).id;
+  NOW = new Date(Math.floor(Date.now() / 1000) * 1000); // per test: a slow run must not age the frozen clock past the DB's
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(NOW);
 });

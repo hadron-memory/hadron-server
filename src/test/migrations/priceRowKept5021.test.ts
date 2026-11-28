@@ -101,6 +101,7 @@ describe('#5021 migration', () => {
 
 /** #5213: the database refuses a price row dated in the past; the owner role alone may opt out. */
 describe('#5213 past-dated price rows', () => {
+  // `at` is a SQL expression and is interpolated: pass constants only.
   const ins = (at: string) => pg.query(
     `INSERT INTO ai_model_prices (id, provider, model, tier, input_micro_cents_per_mtok, output_micro_cents_per_mtok, effective_at)
      VALUES ($1, 'anthropic', 'claude-b', 1, 7, 9, ${at})`, [generateId()]);
@@ -142,7 +143,9 @@ describe('#5213 past-dated price rows', () => {
 
   it('B4: a role that does not own the table cannot opt out, setting or not; it can insert a future row', async () => {
     await inTx(async () => {
+      // Needs CREATEROLE (the owner/superuser of local dev and CI); the role dies with the rolled-back transaction.
       await pg.query('CREATE ROLE hadron_b4_serve NOLOGIN');
+      await pg.query('GRANT USAGE ON SCHEMA public TO hadron_b4_serve');
       await pg.query('GRANT INSERT, SELECT ON ai_model_prices TO hadron_b4_serve');
       await pg.query('SET LOCAL ROLE hadron_b4_serve');
       await pg.query(`SET LOCAL hadron.allow_past_price_row = 'on'`);
@@ -151,8 +154,16 @@ describe('#5213 past-dated price rows', () => {
     });
   });
 
-  it('B5: an UPDATE and a DELETE stay refused, and the trigger is BEFORE INSERT OR UPDATE OR DELETE', async () => {
+  it('B5: after the INSERT arm, an UPDATE and a DELETE of a kept row are still refused, and the trigger covers all three', async () => {
     const r = await pg.query(`SELECT pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgname = 'ai_model_prices_kept'`);
     expect(r.rows[0].d).toContain('BEFORE INSERT OR DELETE OR UPDATE');
+    await inTx(async () => {
+      await pg.query(`SET LOCAL hadron.allow_past_price_row = 'on'`);
+      await ins(`'2020-01-01'`);
+      await pg.query('SAVEPOINT s');
+      await expect(pg.query(`UPDATE ai_model_prices SET input_micro_cents_per_mtok = 8 WHERE model = 'claude-b'`)).rejects.toMatchObject({ code: '23514' });
+      await pg.query('ROLLBACK TO SAVEPOINT s');
+      await expect(pg.query(`DELETE FROM ai_model_prices WHERE model = 'claude-b'`)).rejects.toMatchObject({ code: '23514' });
+    });
   });
 });
