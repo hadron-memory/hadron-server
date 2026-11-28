@@ -8,6 +8,9 @@ import { isChatSeqUniqueViolation, CHAT_SEQ_CONFLICT_MESSAGE } from '../lib/pris
 import { mcpRequestSessionContext } from './requestSession.js';
 import { liveTxContext, liveReadSnapshotContext } from '../api/graphql/schema/authorizedTx.js';
 import { withReconciledNodeRead } from '../lib/includes/reconciledNodeRead.js';
+import { mcpBranchPrefixesFor, mcpNodeBranchScopes } from './branchRead.js';
+import { branchAdmitsLoc } from '../lib/grants/readGrant.js';
+import { NO_BRANCHES, branchNodeWhereArms, type BranchScopes } from '../lib/grants/branchRead.js';
 import { stampEmbeddingObligation } from '../services/embedding/obligation.js';
 import { assertBootPromptWriteAllowed, assertNoBootPromptRows, isBootPromptRole } from '../lib/bootPrompt.js';
 import { assertBootPromptWriteAllowedOrGranted, spendEditGrantFor, suppliedNonTextFields } from '../lib/grants/bootPromptGrant.js';
@@ -1469,13 +1472,15 @@ async function resolveParentForRead(
   memoryUrn: string | undefined,
   accessibleMemoryIds: string[] | null,
   auth: AuthContext,
+  /** #5412: memories the caller reads only under a branch (the listing restricts to it); never consulted for a bare loc. */
+  branches: BranchScopes = NO_BRANCHES,
 ): Promise<
   | { ok: true; loc: string; memoryId?: string }
   | { ok: false; kind: 'invalid' | 'notFound'; message: string }
 > {
   const missing = () => ({ ok: false as const, kind: 'notFound' as const, message: 'Node not found.' });
   const readable = async (id: string) =>
-    await canReadMemory(db, auth, id, EXPLICIT_REF);
+    branches.has(id) || await canReadMemory(db, auth, id, EXPLICIT_REF);
   try {
     const qualified = parseUrnInput(parentRel).type === 'node';
     if (hasSchemePrefix(parentRel) && !qualified) {
@@ -1797,6 +1802,8 @@ async function loadCurrentReadProjection(
   auth: AuthContext,
   readViaMemoryId: string = authorizedMemoryId,
   mode: 'body' | 'metadata' | 'abstract-raw' | 'abstract-expanded' = 'body',
+  /** #5412: the memory is read only by branch; admitted here by the branch map judged in the transaction, the loc by the caller. */
+  byBranch = false,
 ): Promise<ReadProjectionNode | null> {
   return withReconciledNodeRead(db, nodeId, authorizedMemoryId, async (tx, mayReconcile) => {
     let fresh: Context;
@@ -1808,7 +1815,9 @@ async function loadCurrentReadProjection(
       if (error instanceof GraphQLError && error.extensions.code === 'FORBIDDEN') return false;
       throw error;
     }
-    return canReadMemory(tx as unknown as typeof db, { ...auth, roles: fresh.roles }, readViaMemoryId, EXPLICIT_REF);
+    const txAuth = { ...auth, roles: fresh.roles };
+    if (byBranch) return (await mcpBranchPrefixesFor(tx as unknown as typeof db, txAuth, readViaMemoryId)) !== undefined;
+    return canReadMemory(tx as unknown as typeof db, txAuth, readViaMemoryId, EXPLICIT_REF);
   }, async (tx) => {
     const args = { where: { id: nodeId, deletedAt: null }, include: readProjectionInclude };
     // The batch provenance pass retains only metadata. Its render pass reads
@@ -2141,8 +2150,14 @@ async function renderNodeReadProjection(
     memoryUrnOf?: (memoryId: string) => Promise<string>;
     /** #3659: this node's validation task set; absent means no line. Never set for an inherited read. */
     validationTasks?: ValidationTaskSet;
+    /**
+     * #5412 section 5: the node's memory is read only through a `branch` grant. Nothing outside the node is served: no edges
+     * (Related / Referenced by), no action address, no attribution, validation, approval, mint, signature or feedback records.
+     */
+    branchOnly?: boolean;
   } = {},
 ): Promise<string> {
+  if (opts.branchOnly) return renderBranchOnlyProjection(node, scope, opts);
   // #1885 (cor:dmo:050:14) — a node read through a child's effective system
   // memory is the base tenant's: its content is served, its edges and the
   // people and records behind it are not (resolvers.inheritedNode.ts has the
@@ -2409,6 +2424,55 @@ async function renderNodeReadProjection(
   }
   // scope === 'content' (default) — body is content, else abstract (fallback),
   // else empty (byte-identical pre-spec when content AND abstract are null).
+  const body = hasContent ? node.content! : isFallback ? node.abstract! : '';
+  return meta + '\n\n---\n\n' + body;
+}
+
+/**
+ * #5412 section 5: the projection of a node read only through a `branch` grant. The node's own columns and its address, nothing
+ * else: no Related / Referenced by (edges reach nodes outside the branch), no action address, and none of the records kept about
+ * the memory's revisions and people (authorship, validation, approval, mint, signatures, feedback, created/edited by). The body
+ * matrix (cor:api:020:03) and the abstract markers are the full projection's, so a reader sees the same shape minus those lines.
+ */
+async function renderBranchOnlyProjection(
+  node: ReadProjectionNode,
+  scope: 'content' | 'abstract' | 'all',
+  opts: { locked?: boolean; memoryUrnOf?: (memoryId: string) => Promise<string> },
+): Promise<string> {
+  const memoryUrnOf = opts.memoryUrnOf ?? memoizedMemoryUrnLookup();
+  const { urn, fellBack } = await nodeUrnResult(node.loc, node.memoryId, memoryUrnOf);
+  const portalUrl = fellBack ? null : portalUrlForUrn(urn);
+  const hasContent = !!(node.content && node.content.length > 0);
+  const hasAbstract = !!(node.abstract && node.abstract.length > 0);
+  const isFallback = scope === 'content' && !hasContent && hasAbstract;
+  const includeStaleMarker = (scope === 'abstract' || scope === 'all') && !node.memory.isEncrypted
+    && isAbstractUnverified(node, node.contentPresent === undefined ? undefined : { contentPresent: node.contentPresent });
+  const meta = [
+    `**${node.name}**`,
+    urn,
+    `ID: ${node.id}`,
+    `Revision: ${node.revSeq}`,
+    portalUrl ? `URL: ${portalUrl}` : '',
+    'Read through: a branch of this memory (its links, records and the rest of the memory are not shown)',
+    node.description ? `> ${node.description}` : '',
+    `Type: ${node.nodeType}`,
+    node.role ? `Role: ${node.role}` : '',
+    node.isRunnable ? 'Runnable: true' : '',
+    opts.locked ? 'Locked: encrypted memory — call hadron_unlock_memory to read/write its content (spec 041)' : '',
+    isFallback ? 'Source: abstract-fallback' : '',
+    includeStaleMarker ? 'Source: abstract-stale' : '',
+    node.tags.length ? `Tags: ${node.tags.join(', ')}` : '',
+    node.seq !== null ? `Seq: ${node.seq}` : '',
+    node.properties ? `Properties: ${JSON.stringify(node.properties)}` : '',
+    node.data ? `Data: ${JSON.stringify(node.data)}` : '',
+  ].filter(Boolean).join('\n');
+  if (scope === 'abstract') return hasAbstract ? `${meta}\n\n${node.abstract}` : meta;
+  if (scope === 'all') {
+    const parts: string[] = [meta];
+    if (hasAbstract) parts.push(node.abstract!);
+    if (hasContent) parts.push(`---\n\n${node.content}`);
+    return parts.join('\n\n');
+  }
   const body = hasContent ? node.content! : isFallback ? node.abstract! : '';
   return meta + '\n\n---\n\n' + body;
 }
@@ -4802,6 +4866,10 @@ export function createMcpServerInstance(
 
       const trimmedParentRel = parentRel?.trim();
       const accessibleMemoryIds = await getAccessibleMemoryIds(db, auth);
+      // #5412 section 5: memories read only under a branch pass the pre-gates below; findNodes restricts them to the branch in
+      // its statement (it judges the same grants, from the same key, through the context built below).
+      const branches = await mcpNodeBranchScopes(db, auth);
+      const readableOrBranch = async (id: string) => branches.has(id) || await canReadMemory(db, auth, id, EXPLICIT_REF);
 
       // The canonical point gate confines session-bound keys and admits the sole
       // 0114 B exception (named PUBLIC knowledge). Do not intersect a second,
@@ -4846,7 +4914,7 @@ export function createMcpServerInstance(
         const mem = await resolveMemoryByUrn(memoryUrn);
         if (
           !mem ||
-          !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))
+          !(await readableOrBranch(mem.id))
         ) {
           return textResult(
             `Memory not found or invalid. Use hadron_list_memories to see what is available.`,
@@ -4872,7 +4940,7 @@ export function createMcpServerInstance(
             const mem = await resolveMemoryByUrn(urn);
             if (
               !mem ||
-              !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))
+              !(await readableOrBranch(mem.id))
             ) {
               return {
                 error: `Memory not found or invalid. Use hadron_list_memories to see what is available.`,
@@ -4900,12 +4968,14 @@ export function createMcpServerInstance(
           (
             await db.memory.findMany({ where: { deletedAt: null }, select: { id: true } })
           ).map((m) => m.id);
+        // #5412: and every branch-only memory (restricted to its branch by findNodes), as a broad GraphQL search has them.
+        filterMemoryRefs = [...new Set([...filterMemoryRefs, ...branches.keys()])];
       }
 
       // #2526: the explicit-parent gate is shared with list_nodes; discovery
       // cannot hide a directly readable owner memory before authorization.
       if (trimmedParentRel) {
-        const parent = await resolveParentForRead(trimmedParentRel, memoryUrn, accessibleMemoryIds, auth);
+        const parent = await resolveParentForRead(trimmedParentRel, memoryUrn, accessibleMemoryIds, auth, branches);
         if (!parent.ok) {
           return parent.kind === 'notFound'
             ? textResult(`No nodes found matching "${safeQuery}".`)
@@ -4927,6 +4997,8 @@ export function createMcpServerInstance(
         limiterIdentity: auth.limiterIdentity,
         apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
         appId: auth.appId ?? undefined,
+        // #5412: the key, so findNodes judges the App's read grants (whole and branch) from the same key the pre-gates did.
+        appKeyId: auth.appKeyId ?? undefined,
         sessionId: auth.sessionId ?? undefined,
         roles: auth.roles as Context['roles'],
         organizationId: auth.organizationId ?? undefined,
@@ -5037,7 +5109,7 @@ export function createMcpServerInstance(
           const scoreStr = p.score != null ? `  (score ${p.score.toFixed(3)})` : '';
           const header = `- **${urn}** [chunk ${p.chunkIndex} @ chars ${p.charStart}-${p.charEnd}] — ${name}${scoreStr}`;
           const bodyLines = p.text.split(/\r?\n/).map((l) => `  ${l}`);
-          const asComment = passageComments.get(p.parentNodeId);
+          const asComment = parent && branches.has(parent.memoryId) ? undefined : passageComments.get(p.parentNodeId); // #5412
           const label = asComment
             ? [commentHitLabel(asComment, (await nodeUrnResult(asComment.targetLoc, asComment.targetMemoryId, memoryUrnOf)).urn)]
             : [];
@@ -5157,7 +5229,9 @@ export function createMcpServerInstance(
             ? `- **${urn}** (id: ${n.id}) — ${n.name}  (score ${score.toFixed(3)}${relStr})`
             : `- **${urn}** (id: ${n.id}) — ${n.name}`,
         ];
-        const asComment = commentInfo.get(n.id);
+        // #5412: a hit in a branch-only memory carries nothing from outside it (no comment target, no edges).
+        const hitByBranch = branches.has(n.memoryId);
+        const asComment = hitByBranch ? undefined : commentInfo.get(n.id);
         if (asComment) {
           const target = await nodeUrnResult(asComment.targetLoc, asComment.targetMemoryId, memoryUrnOf);
           parts.push(commentHitLabel(asComment, target.urn));
@@ -5194,7 +5268,7 @@ export function createMcpServerInstance(
         if (n.tags?.length) parts.push(`  Tags: ${n.tags.join(', ')}`);
         // Brief edge rendering — hide edges whose target is soft-deleted
         // (#180 Bug 2); findNodes includes them, so filter here.
-        if (brief) {
+        if (brief && !hitByBranch) {
           // #1893 — an inherited hit's edges come through its child, never raw.
           const edges = hitInheritedFrom
             ? (hitInheritedFrom.via
@@ -5369,6 +5443,8 @@ export function createMcpServerInstance(
       inheritedFrom?: InheritedFrom | null;
       fragment?: string;
       matchedLiteral?: boolean;
+      /** #5412 section 5: the node's memory is read only under these branch prefixes. */
+      branch?: readonly string[];
     },
   ) => {
       // Spec 031 — contentScope-driven response shape. Default 'content'
@@ -5391,13 +5467,15 @@ export function createMcpServerInstance(
       // Reconcile + fetch under one row lock. The first lookup selects the
       // address and authorizes its memory; it must not supply the body after a
       // reconciliation advanced the counter.
-      const current = await loadCurrentReadProjection(node.id, node.memoryId, auth, o.inheritedFrom?.via ?? node.memoryId);
+      const current = await loadCurrentReadProjection(node.id, node.memoryId, auth, o.inheritedFrom?.via ?? node.memoryId, 'body', !!o.branch);
       if (
         !current ||
         current.memoryId !== node.memoryId ||
         current.loc !== node.loc ||
+        // #5412: a branch-only node is judged again, by its memory's branches now and its own current loc.
+        (o.branch && !branchAdmitsLoc(await mcpBranchPrefixesFor(db, auth, current.memoryId), current.loc)) ||
         // An inherited node was admitted through the child's memory above.
-        (!o.inheritedFrom && !(await canReadMemory(db, auth, current.memoryId, EXPLICIT_REF)))
+        (!o.branch && !o.inheritedFrom && !(await canReadMemory(db, auth, current.memoryId, EXPLICIT_REF)))
       ) {
         return refusalResult('Node not found.');
       }
@@ -5413,15 +5491,17 @@ export function createMcpServerInstance(
       // Shared with hadron_get_nodes (batch) so the per-node projection can never
       // drift between the single-read and batch-read surfaces (cor:api:040:01).
       // #2041 — include tags resolve with the caller's own read access; `raw` skips it.
-      const served = lockState === 'locked' || o.raw
+      // #5412: a branch-only node serves its stored text (an include can name any node of the memory).
+      const served = lockState === 'locked' || o.raw || o.branch
         ? current
         : { ...current, content: await resolveNodeContent(scopeCtx(), current, { raw: o.raw }) };
       const projection = await renderNodeReadProjection(served, scope, {
         locked: lockState === 'locked',
         encryptedMemory: lockState !== 'plaintext',
         auth,
+        branchOnly: !!o.branch,
         // The rules are the base memory's, and a report is recorded against the base node.
-        validationTasks: o.inheritedFrom ? undefined : (await validationTaskSetsForNodes(validationReadCtx(), [current.id])).get(current.id),
+        validationTasks: o.inheritedFrom || o.branch ? undefined : (await validationTaskSetsForNodes(validationReadCtx(), [current.id])).get(current.id),
       });
 
       // Record usage event (fire-and-forget), AFTER the projection is in hand:
@@ -5465,7 +5545,7 @@ export function createMcpServerInstance(
       // No notice when the LITERAL row matched: nothing was resolved away, the
       // caller got exactly the loc they named.
       // #2048 (cor:agt:040:13 R19): the warnings that hold for this boot-prompt source now, recomputed on every read.
-      const lint = lockState === 'locked' || !isBootPromptRole(current.role) ? '' : renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), current.id));
+      const lint = lockState === 'locked' || o.branch || !isBootPromptRole(current.role) ? '' : renderLintWarnings(await lintWarningPageForNodeId(scopeCtx(), current.id));
       return textResult(noteFragment(projection, o.matchedLiteral ? undefined : o.fragment) + lint);
   };
 
@@ -5507,9 +5587,41 @@ export function createMcpServerInstance(
         throw error;
       });
       const sourceReadable = !!memory && await canReadMemory(db, auth, memory.id, EXPLICIT_REF);
-      const missing = () => refusalResult(sourceReadable
+      // #5412 section 5: a memory read only through a `branch` grant answers inside the branch; everything else in it answers
+      // exactly like a missing node, and the memory itself is named (the grant names it), so the text is 'Node not found.'.
+      const branch = !sourceReadable && memory ? await mcpBranchPrefixesFor(db, auth, memory.id) : undefined;
+      const missing = () => refusalResult(sourceReadable || branch
         ? 'Node not found.'
         : 'Memory not found.');
+      if (branch && memory) {
+        // No inheritance for a branch-only memory (a branch is the grant giver's memory, never an Agent's base), and every
+        // candidate row is judged by its own loc.
+        const admitted = async (candidate: string) => {
+          const row = await db.node.findFirst({ where: { loc: candidate, memoryId: memory.id, deletedAt: null }, include: readProjectionInclude });
+          return row && branchAdmitsLoc(branch, row.loc) ? row : null;
+        };
+        let hit = await admitted(literalLoc ?? loc);
+        const literal = !!hit && !!literalLoc;
+        if (!hit && literalLoc) hit = await admitted(loc);
+        if (!hit) {
+          // A moved node: the alias names the node; its CURRENT memory decides, whole or by branch.
+          let target: { id: string; memoryId: string; loc: string } | null = null;
+          try {
+            const { id } = await resolveNodeRefForAuth(rawUrn, auth);
+            target = await db.node.findFirst({ where: { id, deletedAt: null }, select: { id: true, memoryId: true, loc: true } });
+          } catch (e) {
+            if (!(e instanceof NodeNotFoundError)) throw e;
+          }
+          if (!target) return missing();
+          if (await canReadMemory(db, auth, target.memoryId, EXPLICIT_REF)) {
+            return serveNodeReadProjection(target, { rawUrn, contentScope, raw, fragment });
+          }
+          const targetBranch = await mcpBranchPrefixesFor(db, auth, target.memoryId);
+          if (!targetBranch || !branchAdmitsLoc(targetBranch, target.loc)) return missing();
+          return serveNodeReadProjection(target, { rawUrn, contentScope, raw, fragment, branch: targetBranch });
+        }
+        return serveNodeReadProjection(hit, { rawUrn, contentScope, raw, fragment, matchedLiteral: literal, branch });
+      }
 
       // The projection's include, named so the two candidate lookups below
       // cannot drift apart.
@@ -5634,14 +5746,36 @@ export function createMcpServerInstance(
       const unavailable: string[] = [];
       let prefixInheritance: Awaited<ReturnType<typeof effectiveScope>> | null = null;
       let prefixReadMemoryId: string | undefined;
+      // #5412 section 5: the memories this caller reads only under a branch, judged once for the call, and the nodes admitted
+      // through one (they render without anything from outside the node, and are judged by branch again at render).
+      const branches = await mcpNodeBranchScopes(db, auth);
+      const branchNodeIds = new Set<string>();
+      const admitsByBranch = (n: { memoryId: string; loc: string }) => branchAdmitsLoc(branches.get(n.memoryId), n.loc);
 
       if (hasPrefix) {
         // ── Prefix subtree (one memory, gated once) ──────────────────────────
         const mem = await resolveMemoryByUrn(memoryUrn!);
-        if (!mem || !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))) {
+        const memBranch = mem ? branches.get(mem.id) : undefined;
+        if (mem && memBranch) {
+          // #5412: a branch-only memory's subtree is the prefix intersected with the branch, in the statement; no inheritance.
+          const rows = await db.node.findMany({
+            where: { AND: [{ memoryId: mem.id, loc: { startsWith: locPrefix! }, deletedAt: null }, ...branchNodeWhereArms(new Map([[mem.id, memBranch]]))] },
+            orderBy: { loc: 'asc' },
+            take: BATCH_READ_MAX_NODES + 1,
+            include: readProjectionInclude,
+            omit: { content: true },
+          });
+          if (rows.length > BATCH_READ_MAX_NODES) {
+            return textResult(
+              `hadron_get_nodes: prefix "${locPrefix}" matches more than the ${BATCH_READ_MAX_NODES}-node cap. Narrow the prefix (or page by sub-prefix); the batch read does not silently truncate.`,
+            );
+          }
+          for (const r of rows) branchNodeIds.add(r.id);
+          ordered.push(...(rows as unknown as Array<ReadProjectionNode & { id: string }>));
+        } else if (!mem || !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))) {
           // Don't leak existence — mirror the single read's phrasing.
           return refusalResult('Memory not found.');
-        }
+        } else {
         prefixReadMemoryId = mem.id;
         // Count cap (cor:api:040:02): take MAX+1 to detect overflow, then fail
         // loud rather than silently returning a truncated subtree.
@@ -5668,6 +5802,7 @@ export function createMcpServerInstance(
           );
         }
         ordered.push(...(rows as unknown as Array<ReadProjectionNode & { id: string }>));
+        }
       } else {
         // ── Explicit set (mixed-memory; per-node gate) ───────────────────────
         // Count cap up front — the caller knows the count, so fail loud before
@@ -5771,7 +5906,8 @@ export function createMcpServerInstance(
             if (error instanceof AmbiguousLegacyUrnError) return null;
             throw error;
           });
-          if (!mem || !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))) {
+          const viaBranch = !!mem && branches.has(mem.id);
+          if (!mem || (!viaBranch && !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF)))) {
             movedFallbacks.push(...group);
             continue;
           }
@@ -5790,6 +5926,8 @@ export function createMcpServerInstance(
             include: projectionInclude, omit: { content: true },
           });
           const rowByLoc = new Map(rows.map((r) => [r.loc, r]));
+          // #5412: a branch-only memory's rows outside the branch are not there for this caller.
+          if (viaBranch) for (const [loc, row] of rowByLoc) if (!admitsByBranch(row)) rowByLoc.delete(loc);
           for (const r of group) {
             const literal = r.literalLoc ? rowByLoc.get(r.literalLoc) : undefined;
             const row = literal ?? rowByLoc.get(r.loc);
@@ -5799,6 +5937,7 @@ export function createMcpServerInstance(
             }
             // A literal match resolved nothing away, so it carries no notice.
             if (literal) fragmentByRef.delete(r.raw);
+            if (viaBranch) branchNodeIds.add(row.id);
             nodeByRef.set(r.raw, row as unknown as ReadProjectionNode & { id: string });
           }
         }
@@ -5842,14 +5981,16 @@ export function createMcpServerInstance(
         const movedProbes = movedIds.length
           ? await db.node.findMany({
               where: { id: { in: movedIds }, deletedAt: null, memory: { deletedAt: null } },
-              select: { id: true, memoryId: true },
+              select: { id: true, memoryId: true, loc: true },
             })
           : [];
         const readableMemory = new Map<string, boolean>();
         await Promise.all([...new Set(movedProbes.map((n) => n.memoryId))].map(async (memoryId) => {
           readableMemory.set(memoryId, await canReadMemory(db, auth, memoryId, EXPLICIT_REF));
         }));
-        const allowedProbes = movedProbes.filter((n) => readableMemory.get(n.memoryId));
+        // #5412: a moved node whose current memory is branch-only counts when its current loc is inside the branch.
+        for (const n of movedProbes) if (!readableMemory.get(n.memoryId) && admitsByBranch(n)) branchNodeIds.add(n.id);
+        const allowedProbes = movedProbes.filter((n) => readableMemory.get(n.memoryId) || branchNodeIds.has(n.id));
         const movedRows = allowedProbes.length
           ? await db.node.findMany({
               where: { OR: allowedProbes.map((n) => ({ id: n.id, memoryId: n.memoryId })), deletedAt: null },
@@ -5869,6 +6010,7 @@ export function createMcpServerInstance(
             continue;
           }
           if (!childReadable.has(r.memoryUrn)) {
+            // A branch-only memory never reads through to a base (canReadMemory is false for it).
             const mem = await resolveMemoryByUrn(r.memoryUrn).catch(() => null);
             childReadable.set(r.memoryUrn, mem && (await canReadMemory(db, auth, mem.id, EXPLICIT_REF)) ? mem.id : null);
           }
@@ -5900,13 +6042,15 @@ export function createMcpServerInstance(
         if (pkRefs.length > 0) {
           const probes = await db.node.findMany({
             where: { id: { in: pkRefs }, deletedAt: null },
-            select: { id: true, memoryId: true },
+            select: { id: true, memoryId: true, loc: true },
           });
           const readable = new Map<string, boolean>();
           for (const memId of new Set(probes.map((p) => p.memoryId))) {
-            readable.set(memId, await canReadMemory(db, auth, memId, EXPLICIT_REF));
+            readable.set(memId, !branches.has(memId) && await canReadMemory(db, auth, memId, EXPLICIT_REF));
           }
-          const allowedIds = probes.filter((p) => readable.get(p.memoryId)).map((p) => p.id);
+          // #5412: a PK in a branch-only memory counts when its loc is inside the branch.
+          for (const p of probes) if (branches.has(p.memoryId) && admitsByBranch(p)) branchNodeIds.add(p.id);
+          const allowedIds = probes.filter((p) => readable.get(p.memoryId) || branchNodeIds.has(p.id)).map((p) => p.id);
           const rowById = new Map(
             (allowedIds.length > 0
               ? await db.node.findMany({
@@ -5962,12 +6106,14 @@ export function createMcpServerInstance(
       for (const selected of ordered) {
         // #1885 — recheck the child through which the inherited row was admitted.
         const inheritedFrom = (selected as { inheritedFrom?: InheritedFrom }).inheritedFrom;
-        const n = await loadCurrentReadProjection(selected.id, selected.memoryId, auth, inheritedFrom?.via ?? prefixReadMemoryId ?? selected.memoryId, 'metadata');
+        const byBranch = branchNodeIds.has(selected.id);
+        const n = await loadCurrentReadProjection(selected.id, selected.memoryId, auth, inheritedFrom?.via ?? prefixReadMemoryId ?? selected.memoryId, 'metadata', byBranch);
         if (
           !n ||
           n.memoryId !== selected.memoryId ||
           n.loc !== selected.loc ||
-          (!inheritedFrom && !(await canReadMemory(db, auth, n.memoryId, EXPLICIT_REF)))
+          (byBranch && !admitsByBranch(n)) ||
+          (!byBranch && !inheritedFrom && !(await canReadMemory(db, auth, n.memoryId, EXPLICIT_REF)))
         ) {
           unavailable.push(echoByNodeId.get(selected.id) ?? selected.id);
           continue;
@@ -5991,27 +6137,29 @@ export function createMcpServerInstance(
       // serialized inside this loop. Prefetch only after reconciliation, so
       // each report is judged against the revision the batch will actually
       // render, and gate each distinct task memory before exposing its URN.
-      const reports = await batchValidationReports(visible);
+      // #5412: a branch-only node takes none of the batch's records (see renderBranchOnlyProjection).
+      const recordable = visible.filter((n) => !branchNodeIds.has(n.id));
+      const reports = await batchValidationReports(recordable);
       const memoryUrnOf = memoizedMemoryUrnLookup();
       // #1632: signatures for the batch in one load; their signers join the
       // one human-name lookup. #1885: never for an inherited node, whose line
       // is blank, so the base's signers are not even looked up.
       const signatures = signingSurfacePolicy().signing
-        ? await loadSignatureStatuses(db, visible
+        ? await loadSignatureStatuses(db, recordable
           .filter((n) => !(n as { inheritedFrom?: InheritedFrom }).inheritedFrom)
           .map((n) => n.id))
         : new Map<string, NodeSignatureStatusView>();
       const signerIds = [...signatures.values()].flatMap((st) => st.signatures.map((sig) => sig.signerId));
       const [taskRefs, humanNames, feedback, actionUrns] = await Promise.all([
-        batchReadableTaskRefs(visible, reports, auth, memoryUrnOf),
-        batchHumanNames(visible, signerIds),
-        openThreadCounts(db, visible.map((n) => n.id)),
-        batchActionUrns(visible),
+        batchReadableTaskRefs(recordable, reports, auth, memoryUrnOf),
+        batchHumanNames(recordable, signerIds),
+        openThreadCounts(db, recordable.map((n) => n.id)),
+        batchActionUrns(recordable),
       ]);
       const batchProvenance = { reports, taskRefs, humanNames, feedback, signatures, actionUrns };
       const batchReadCtx = scopeCtx(); // one memo for the whole call (#2041)
       const validationTaskSets = await validationTaskSetsForNodes(validationReadCtx(),
-        visible.filter((n) => !(n as { inheritedFrom?: InheritedFrom }).inheritedFrom).map((n) => n.id));
+        recordable.filter((n) => !(n as { inheritedFrom?: InheritedFrom }).inheritedFrom).map((n) => n.id));
       for (const metadata of visible) {
         if (truncated) {
           omitted.push(await nodeUrn(metadata.loc, metadata.memoryId, memoryUrnOf));
@@ -6020,9 +6168,11 @@ export function createMcpServerInstance(
         const inheritedFrom = (metadata as { inheritedFrom?: InheritedFrom }).inheritedFrom;
         const via = inheritedFrom?.via ?? prefixReadMemoryId ?? metadata.memoryId;
         const mode = scope === 'abstract' ? (raw ? 'abstract-raw' : 'abstract-expanded') : 'body';
-        const n = await loadCurrentReadProjection(metadata.id, metadata.memoryId, auth, via, mode);
+        const byBranch = branchNodeIds.has(metadata.id);
+        const n = await loadCurrentReadProjection(metadata.id, metadata.memoryId, auth, via, mode, byBranch);
         if (!n || n.memoryId !== metadata.memoryId || n.loc !== metadata.loc
-          || (!inheritedFrom && !(await canReadMemory(db, auth, n.memoryId, EXPLICIT_REF)))
+          || (byBranch && !admitsByBranch(n))
+          || (!byBranch && !inheritedFrom && !(await canReadMemory(db, auth, n.memoryId, EXPLICIT_REF)))
           || (inheritedFrom && !(inheritedFrom.via
             ? await stillInherited(db, inheritedFrom, n)
             : prefixInheritance !== null && (await retainEffective(db, [n], prefixInheritance)).length === 1))) {
@@ -6036,7 +6186,7 @@ export function createMcpServerInstance(
         const provenance = n.revSeq === metadata.revSeq ? batchProvenance : undefined;
         const lockState = mcpDecryptOrMark(n); // spec 041 — same posture as hadron_get_node
         let served = n;
-        if (lockState !== 'locked' && !raw) {
+        if (lockState !== 'locked' && !raw && !byBranch) {
           try {
             served = { ...n, content: await resolveNodeContent(batchReadCtx, n, { raw }) };
           } catch (e) {
@@ -6052,6 +6202,7 @@ export function createMcpServerInstance(
           auth,
           batch: provenance,
           memoryUrnOf,
+          branchOnly: byBranch,
           // Gated on this copy, as the single read is: the map is keyed by node id, and an inherited
           // copy carries the base node's id (BLIND 6704825426).
           validationTasks: inheritedFrom ? undefined : validationTaskSets.get(n.id),
@@ -6261,12 +6412,14 @@ export function createMcpServerInstance(
 
       const memoryIds = await getAccessibleMemoryIds(db, auth);
       const maxDepth = depth ?? 1;
+      // #5412 section 5: a memory named here that the caller reads only under a branch lists that branch alone.
+      const branches = await mcpNodeBranchScopes(db, auth);
 
       // Resolve the parent prefix
       let prefix: string;
       let memoryId: string | undefined;
       if (trimmedParentRel) {
-        const parent = await resolveParentForRead(trimmedParentRel, memoryUrn, memoryIds, auth);
+        const parent = await resolveParentForRead(trimmedParentRel, memoryUrn, memoryIds, auth, branches);
         if (!parent.ok) return refusalResult(parent.message);
         prefix = parent.loc;
         memoryId = parent.memoryId;
@@ -6290,7 +6443,7 @@ export function createMcpServerInstance(
           }
           // #188 (Gemini): canReadMemory gate — same shape as the
           // hadron_find_nodes memoryUrn branch.
-          if (!(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))) {
+          if (!branches.has(mem.id) && !(await canReadMemory(db, auth, mem.id, EXPLICIT_REF))) {
             return textResult(
               `Memory not found or invalid. Use hadron_list_memories to see what is available.`,
             );
@@ -6298,6 +6451,7 @@ export function createMcpServerInstance(
           memoryId = mem.id;
         }
       }
+      const branchPrefixes = memoryId ? branches.get(memoryId) : undefined;
 
       // #180 Bug 2: tombstoned nodes are not part of the live tree, so
       // they shouldn't show up in browse output. (Their absence also
@@ -6332,7 +6486,8 @@ export function createMcpServerInstance(
       // memory: an Agent's system memory gains its bases' inherited nodes,
       // without their overridden nodes or boot prompts. They are listed in the
       // child's tree, under their own URNs, marked (realMemoryId below).
-      const inheritance = memoryId ? await effectiveScope(db, [memoryId]) : null;
+      if (branchPrefixes) where.AND = branchNodeWhereArms(new Map([[memoryId!, branchPrefixes]]));
+      const inheritance = memoryId && !branchPrefixes ? await effectiveScope(db, [memoryId]) : null;
       if (inheritance && inheritance.memoryIds.length > 1) {
         where.memoryId = { in: inheritance.memoryIds };
         if (inheritance.excludeNodeIds.length > 0) where.id = { notIn: inheritance.excludeNodeIds };
@@ -6445,6 +6600,8 @@ export function createMcpServerInstance(
           const pd = depthRelative(cur);
           if (pd <= 0) break;
           if (!isWithinScope(cur)) break;
+          // #5412: never above a branch root (the caller cannot see whether such an ancestor exists).
+          if (branchPrefixes && !branchAdmitsLoc(branchPrefixes, cur)) break;
           if (pd > maxDepth) continue; // ancestor out of window; keep walking up
           const pk = dedupKey(n.memoryId, cur);
           if (visibleByKey.has(pk)) break;

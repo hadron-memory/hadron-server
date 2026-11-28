@@ -33,6 +33,12 @@ export interface SummaryInput {
   values: Readonly<Record<string, unknown>>;
   /** Each stored `node-ref` value resolved to its node's canonical URN. */
   refs: Readonly<Record<string, { urn: string }>>;
+  /**
+   * #5412: each stored `automation-ref` value resolved to its kind, by the caller's lookup of the App's live triggers. A schedule or
+   * webhook has no canonical URN, so the sentence writes its kind and its stored, server-minted id, never its name (the requester wrote
+   * the name; ruling 0258).
+   */
+  automations?: Readonly<Record<string, 'schedule' | 'webhook'>>;
 }
 
 // A name may carry hyphens: an action's parameter names are its spec's own words (`auto-delete`, cor:acl:140:09), and a parameter the
@@ -120,6 +126,24 @@ function memoryRefWords(name: string, value: unknown, entries: unknown[], refs: 
   return `${written.length === 1 ? 'the memory' : 'the memories'} ${written.join(', ')}`;
 }
 
+/**
+ * #5412 (cor:acl:140:09, the absent-key form; cor:acl:140:02, every parameter is named): an OPTIONAL parameter's placeholder writes
+ * nothing when its key is absent (the grant then reads, and its sentence reads, exactly as one without the parameter), and a clause when
+ * it is present, so the signer reads every restriction the signature covers. Only a single string value can be written; anything else
+ * refuses the whole sentence.
+ */
+function optionalClause(name: string, type: string, value: unknown, input: SummaryInput): string {
+  if (Array.isArray(value) || typeof value !== 'string') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a value of a type the summary cannot write`);
+  if (value === '*') throw new GrantSummaryError('WILDCARD', `summary placeholder {${name}} has a wildcard or structured value`);
+  if (type === 'loc-prefix') return `, only the loc ${value} and below it`;
+  if (type === 'automation-ref') {
+    const kind = input.automations && Object.prototype.hasOwnProperty.call(input.automations, value) ? input.automations[value] : undefined;
+    if (kind !== 'schedule' && kind !== 'webhook') throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no resolved automation`);
+    return `, and only in the runs of the ${kind} ${value}`;
+  }
+  throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a parameter type the summary cannot write`);
+}
+
 export function renderGrantSummary(input: SummaryInput, fmt: SummaryFormatters = SUMMARY_FORMATTERS): string {
   const { action, app, values, refs } = input;
   const names = summaryPlaceholders(action.summaryTemplate);
@@ -131,6 +155,13 @@ export function renderGrantSummary(input: SummaryInput, fmt: SummaryFormatters =
     if (name === 'app') { resolved.set(name, fmt.app(app?.urn)); continue; }
     const param = params.get(name);
     if (!param) throw new GrantSummaryError('UNKNOWN_PLACEHOLDER', `summary placeholder {${name}} is not a parameter of the action`);
+    if (param.optional === true) {
+      // An absent key is the only absence: a present null, "" or anything else is refused below, never written as nothing.
+      const present = Object.prototype.hasOwnProperty.call(values, name);
+      if (present && (values[name] === undefined || values[name] === null || values[name] === '')) throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no value`);
+      resolved.set(name, present ? optionalClause(name, param.type, values[name], input) : '');
+      continue;
+    }
     const value = values[name];
     if (value === undefined || value === null || value === '') throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no value`);
     // A list (an action that names several things, such as the boot prompts of a batch grant) is written as each entry's URN, in

@@ -32,6 +32,7 @@ import { compileNodeWhere, compileNodePropertySort } from './nodeWhere.js';
 import { regexSearchTimeoutMs } from './regexTimeout.js';
 import { UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES } from './defaultNodeTypes.js';
 import { PARENT_LOC_SQL } from '../childLoc.js';
+import { branchSqlClause } from '../grants/branchRead.js';
 
 /** Ordered parameter accumulator — appends a value and returns its `$n` placeholder. */
 function paramBuilder(seed: unknown[] = []) {
@@ -43,6 +44,9 @@ function paramBuilder(seed: unknown[] = []) {
 function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string): string {
   const parts: string[] = [];
   const flt = f ?? {};
+  // #5412 section 5: the branch arm first, so every leg (lexical, regex, browse, counts, vector) carries it.
+  const branch = branchSqlClause(flt.branches, bind);
+  if (branch) parts.push(branch);
   if (flt.tombstoneMemoryIds !== undefined) {
     parts.push(`(deleted_at IS NULL OR (node_type <> 'comment' AND memory_id = ANY(${bind(flt.tombstoneMemoryIds)}::text[])))`);
   }

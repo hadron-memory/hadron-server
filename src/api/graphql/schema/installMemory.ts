@@ -530,7 +530,7 @@ export interface InstallConcealmentDrift {
  * silently under-report — an unseen field is an unclassified one, which is the
  * drift this classification exists to catch (#5147 review).
  */
-function nodeFieldNamesFromSdl(sdl: string): string[] {
+export function nodeFieldNamesFromSdl(sdl: string): string[] {
   const doc = parse(sdl);
   const names = new Set<string>();
   for (const def of doc.definitions) {

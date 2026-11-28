@@ -8497,6 +8497,8 @@ export const typeDefs = `#graphql
     type: String!
     "True when a wildcard value is refused for this parameter."
     refusesWildcard: Boolean!
+    "hadron-server#5412 (hrn:node:hadronmemory.com:specs:cor:acl:140:09): true when a grant may leave this parameter's key out of its values. A missing key is the parameter's absence (it restricts nothing); a present key always holds a value, never null or an empty string."
+    optional: Boolean!
   }
 
   """
@@ -8509,7 +8511,7 @@ export const typeDefs = `#graphql
     source: String!
     "The tool that performs it, if any."
     tool: String
-    "The parameters a grant of this action must supply."
+    "The parameters a grant of this action supplies: every one not marked optional, and an optional one only when it restricts the grant."
     parameters: [GrantActionParameter!]!
     "The enforcement level the action DECLARES: what the platform promises, not an active guarantee. It says nothing about whether a gate enforces it today (schedule.create and webhook.create are not enforced until hadron-server#3483; the boot-prompt actions are checked where the grant is spent)."
     enforcement: String!
@@ -14179,7 +14181,7 @@ export const typeDefs = `#graphql
     "#5001 (hrn:node:hadronmemory.com:specs:cor:acl:140:07) — withdraw an open grant signing selection; its open items end with it. Only the requester account, among those who may read every grant in it. Refusals: FORBIDDEN while impersonating, SIGNING_REQUEST_NOT_FOUND (unknown and unreadable alike), SIGNING_REQUEST_NOT_REQUESTER, SIGNING_REQUEST_ENDED (extensions.state)."
     withdrawGrantSigningSelection(id: ID!): GrantSigningSelection!
     """
-    #3690 PR 2 (hrn:node:hadronmemory.com:specs:cor:acl:140:05) — ask for a grant. A bound worker session may call it, in its own App, for itself or its role agent (installed in the App). #3711: a PERSON who manages the App may call it too, naming the App in input.appRef, for a worker of the App or an agent installed in it; the row records that person, never a worker. Either way the row is born pending and allows nothing until it is signed (#3649). Returns the grant as grant(ref:) reads it (a manager reads it as appGrants does). Refusals, each before any write and none naming a submitted value: GRANT_REQUESTER_NOT_WORKER, GRANT_NOT_MANAGER (a person arm caller who does not manage the App, and an unknown App: the same answer), GRANT_HOLDER_NOT_ALLOWED (any other holder, or an agent not installed here), GRANT_ACTION_UNKNOWN, GRANT_VALUES_INVALID (a value that does not match the action's declared parameters, or an undeclared key, or a list above 100 entries per parameter, or a node-typed value that does not name a node the requester can read: a missing, deleted, unreadable and malformed id are the same answer, hrn:node:hadronmemory.com:specs:cor:acl:140:07), GRANT_TERMS_INVALID (including a reason above 2,000 Unicode code points; hrn:node:hadronmemory.com:specs:cor:acl:140:01). These write-path limits never prevent rebuilding an existing grant's signature terms. Over MCP only the person arm exists (hadron_create_grant, ruling 0255 item 21). Present only where signing is switched on (PASSKEY_SIGNING_ENABLED).
+    #3690 PR 2 (hrn:node:hadronmemory.com:specs:cor:acl:140:05) — ask for a grant. A bound worker session may call it, in its own App, for itself or its role agent (installed in the App). #3711: a PERSON who manages the App may call it too, naming the App in input.appRef, for a worker of the App or an agent installed in it; the row records that person, never a worker. Either way the row is born pending and allows nothing until it is signed (#3649). Returns the grant as grant(ref:) reads it (a manager reads it as appGrants does). Refusals, each before any write and none naming a submitted value: GRANT_REQUESTER_NOT_WORKER, GRANT_NOT_MANAGER (a person arm caller who does not manage the App, and an unknown App: the same answer), GRANT_HOLDER_NOT_ALLOWED (any other holder, or an agent not installed here), GRANT_ACTION_UNKNOWN, GRANT_VALUES_INVALID (a value that does not match the action's declared parameters, or an undeclared key, or a list above 100 entries per parameter, or a node-typed value that does not name a node the requester can read: a missing, deleted, unreadable and malformed id are the same answer, hrn:node:hadronmemory.com:specs:cor:acl:140:07), GRANT_TERMS_INVALID (including a reason above 2,000 Unicode code points; hrn:node:hadronmemory.com:specs:cor:acl:140:01). These write-path limits never prevent rebuilding an existing grant's signature terms. Over MCP only the person arm exists (hadron_create_grant, ruling 0255 item 21). Present only where signing is switched on (PASSKEY_SIGNING_ENABLED). A memory.read grant with a branch (hadron-server#5412) is narrower than its words in one way: a memory its holder reaches only through branch grants is readable only by point read, listing and search (node(ref) and findNodes; hadron_get_node, hadron_get_nodes, hadron_list_nodes and hadron_find_nodes), and only inside the branch; every other surface (edges, comments, revisions, exports, assets, the memory record, graph view, sync) treats it as unreadable, and memory lists do not show it, so its holder finds it only by reference.
     """
     createGrant(input: CreateGrantInput!): Grant!
     """

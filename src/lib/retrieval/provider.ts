@@ -40,6 +40,12 @@ export interface NodeSqlFilter {
   /** #3494: open-root existence; synthetic inherited summaries are zero. */
   hasOpenThreads?: boolean | null;
   syntheticCommentMemoryIds?: string[];
+  /**
+   * #5412 section 5: memories the caller reads only through `branch` grants, each with its loc prefixes. A row in one of them
+   * must sit inside a prefix (`branchSqlClause`, applied in the statement before ranking, paging, totals and the vector limit);
+   * rows in other memories are untouched. Their ids are also in the statement's memory scope.
+   */
+  branches?: ReadonlyArray<{ memoryId: string; prefixes: readonly string[] }>;
   nodeType?: string | null;
   /** #3113 — an explicit, already validated list (`checkNodeTypesFilter`): `node_type = ANY(list)`. Never set together with `nodeType`. */
   nodeTypes?: string[] | null;
