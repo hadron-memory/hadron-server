@@ -4,7 +4,6 @@ import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { assertNoGenericMessageSeqWrite } from '../../../lib/legacyMessageSeq.js';
 import { stampEmbeddingObligation } from '../../../services/embedding/obligation.js';
 // nodeMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
-import { currentActor } from '../../../lib/requestActor.js';
 import { edgeDisplayOrder } from '../../../lib/edgeOrder.js';
 import { foreignEdgeMemoryIds } from '../../../lib/foreignEdgeMemories.js';
 import { assertBootPromptWriteAllowed, assertNoBootPromptRows, inCompileScope, isCompiledBootPrompt } from '../../../lib/bootPrompt.js';
