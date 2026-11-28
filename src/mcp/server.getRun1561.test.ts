@@ -13,6 +13,8 @@ import { generateId } from '../lib/id.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { testRunAgentId } from '../test/runAgent.js';
+import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
+import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 
 let org: { id: string; urn: string };
 let reader: { id: string };
@@ -183,5 +185,66 @@ describe('#1565 review — spend is reported against the initial budget (Codex-w
     expect(await getRun(reader.id, spent.id)).toContain('Spent: 420 tokens of 100000 · 3 actions of 50');
     const legacy = await run({ tokensSpent: null, actionsSpent: null, budgetTokensInitial: 100000, budgetActionsInitial: 50 });
     expect(await getRun(reader.id, legacy.id)).toContain('Spent: unknown tokens of 100000 · unknown actions of 50');
+  });
+});
+
+/**
+ * #5077 F3a-2 (Jill's blind P2 on #5441): `hadron_get_run` and `hadron_run_task` now pass the session's impersonation to
+ * the GraphQL gates they delegate to. Before, MCP dropped it, so an impersonated MCP session was judged as the target
+ * user unbounded, wider than GraphQL judges the same session. On an organization's run the change only removes that
+ * drift: each case answers on MCP exactly as GraphQL does with the same principal. Red with the passthrough removed.
+ */
+describe('#5077 an impersonated MCP session on an organization run answers as GraphQL does', () => {
+  let otherOrg: { id: string };
+  let member: { id: string };
+  let orgAdmin: { id: string };
+  const imp = (orgId: string) => ({ sessionId: generateId(), actorUserId: generateId(), orgId, expiresAt: new Date(Date.now() + 3_600_000) });
+  const mcpAs = (userId: string, impersonation?: ReturnType<typeof imp>) =>
+    createTestableMcpServer({ userId, roles: ['READER'], clientId: `user:${userId}`, ...(impersonation ? { impersonation } : {}) } as AuthContext);
+  const gqlCtx = (userId: string, impersonation?: ReturnType<typeof imp>) =>
+    ({ db, userId, roles: ['READER'], clientId: `user:${userId}`, ...(impersonation ? { impersonation } : {}) }) as unknown as Context;
+  const gqlRead = (userId: string, ref: string, impersonation?: ReturnType<typeof imp>) =>
+    (resolvers.Query as Record<string, (...a: unknown[]) => Promise<unknown>>).appRun({}, { ref }, gqlCtx(userId, impersonation));
+
+  beforeEach(async () => {
+    const t = `${Date.now()}-${Math.floor(Math.random() * 100_000)}`;
+    otherOrg = await db.organization.create({ data: { id: generateId(), name: 'gr-i', urn: `gr-i-${t}` } });
+    member = await db.user.create({ data: { id: generateId(), githubId: 15616, githubUsername: `gr-im-${t}`, handle: `gr-im-${t}` } });
+    orgAdmin = await db.user.create({ data: { id: generateId(), githubId: 15617, githubUsername: `gr-ia-${t}`, handle: `gr-ia-${t}` } });
+    await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'member' } });
+    await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: orgAdmin.id, role: 'ADMIN' } });
+  });
+
+  it('a member reading the run they started: readable as themself, not found under impersonation, on both surfaces', async () => {
+    const r = await run({ createdBy: member.id });
+    expect(await getRun(member.id, r.id)).toContain(`Run ${r.id}`);
+    expect(await gqlRead(member.id, r.id)).toMatchObject({ id: r.id });
+    expect(await mcpAs(member.id, imp(org.id)).callToolText('hadron_get_run', { ref: r.id })).toBe('Run not found.');
+    expect(await gqlRead(member.id, r.id, imp(org.id))).toBeNull();
+  });
+
+  it('an org READER under impersonation reads inside the session\'s organization and nowhere else, on both surfaces', async () => {
+    const r = await run();
+    expect(await mcpAs(reader.id, imp(org.id)).callToolText('hadron_get_run', { ref: r.id })).toContain(`Run ${r.id}`);
+    expect(await gqlRead(reader.id, r.id, imp(org.id))).toMatchObject({ id: r.id });
+    expect(await mcpAs(reader.id, imp(otherOrg.id)).callToolText('hadron_get_run', { ref: r.id })).toBe('Run not found.');
+    expect(await gqlRead(reader.id, r.id, imp(otherOrg.id))).toBeNull();
+  });
+
+  it('launch: an org ADMIN impersonated into another organization starts no run on either surface; as themself, MCP starts one', async () => {
+    const agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'Runner', urn: `${org.urn}:runner`, visibility: 'ORGANIZATION' } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    await serveAgentBootPrompt(db, agent.id, 'Test boot prompt.');
+    const memory = await db.memory.create({ data: { id: generateId(), name: 'flows', urn: `${org.urn}:flows`, class: 'knowledge', organizationId: org.id, visibility: 'ORGANIZATION' } as never });
+    await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'check', name: 'Check', isRunnable: true, nodeType: 'task', content: 'Say ok.' } });
+    const input = { appRef: app.id, entryNodeUrn: `hrn:node:${org.urn}:flows:check` };
+    const M = resolvers.Mutation as Record<string, (...a: unknown[]) => Promise<unknown>>;
+    const gqlErr = await M.triggerAppRun({}, { input }, gqlCtx(orgAdmin.id, imp(otherOrg.id))).catch((e: unknown) => e) as { extensions?: { code?: string } };
+    expect(gqlErr.extensions?.code).toBe('FORBIDDEN');
+    const text = await mcpAs(orgAdmin.id, imp(otherOrg.id)).callToolText('hadron_run_task', { urn: input.entryNodeUrn, appRef: app.id });
+    expect(text).toBe('Could not start run: Forbidden');
+    expect(await db.appRun.count()).toBe(0);
+    expect(await mcpAs(orgAdmin.id).callToolText('hadron_run_task', { urn: input.entryNodeUrn, appRef: app.id })).toMatch(/^Run started/);
+    expect(await db.appRun.count()).toBe(1);
   });
 });
