@@ -1,8 +1,7 @@
 /** #3386: narrowing trigger filters, authority-first on both call paths. */
 import { beforeAll, afterAll, beforeEach, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
-import { Client } from '@modelcontextprotocol/client';
-import { InMemoryTransport } from '@modelcontextprotocol/client';
+import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { McpServer } from '@modelcontextprotocol/server';
 import { withPositionalTool } from '../../../mcp/hadronMcpServer.js';
 import { db } from '../../../integrations/db/client.js';

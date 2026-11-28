@@ -122,6 +122,8 @@ import {
   lockEdgeEndpointMemories,
   lockLiveEdgeEndpoints,
 } from '../lib/edgeEndpointLock.js';
+// @modelcontextprotocol/node is pinned at 2.1.2 beside client and server at 2.4.0 on purpose: it is released on its own
+// version line, 2.1.2 is its newest release (#5474), and its peer range (@modelcontextprotocol/server ^2.4.0) accepts 2.4.0.
 import { NodeStreamableHTTPServerTransport as StreamableHTTPServerTransport, toNodeHandler } from '@modelcontextprotocol/node';
 import { z } from 'zod';
 import type { Request, Response } from 'express';
