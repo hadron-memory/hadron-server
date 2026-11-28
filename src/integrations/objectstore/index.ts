@@ -12,7 +12,7 @@
 //   src/integrations/objectstore/        this scaffold — the seam
 //   src/integrations/objectstore/s3/     the S3-API implementation
 //                                         (AWS SDK; serves Hetzner in
-//                                         production, MinIO in dev, and
+//                                         production, SeaweedFS in dev and QA (#5167), and
 //                                         R2 or any S3-compatible store
 //                                         via ASSET_STORAGE_* config)
 //
