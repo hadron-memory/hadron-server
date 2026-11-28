@@ -2,13 +2,16 @@
  * #2484 — the database half of the App write grant contract
  * (prisma/app-memory-write-grant-invariants.sql), tested at the database rather than through the doors: the shape
  * CHECK, the one-live-row index, the terminal-revoke trigger on app_memory_write_grants and the append-only trigger
- * on app_memory_write_grant_events. Plus the two pure predicates the gate is built from.
+ * on app_memory_write_grant_events.
+ *
+ * #5404: nothing reads or writes these tables any more (their rows are deleted at deploy; the models drop in the removal
+ * follow-up). The invariants stay pinned while the tables exist. The pure predicates moved with the gate to
+ * src/lib/grants/writeGrant.ts and are pinned in src/lib/grants/writeGrantTarget5404.test.ts.
  */
 import { readFileSync, readdirSync } from 'fs';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
-import { grantCoversLoc, isUserlessRunPrincipal, grantTargetRefusal } from './appWriteGrant.js';
 
 let app: { id: string };
 let memory: { id: string };
@@ -88,75 +91,5 @@ describe('app-memory-write-grant-invariants.sql', () => {
     for (const data of [{ action: 'EDIT' }, { prefix: '' }, { actorUserId: '' }, { grantId: '' }, { memoryId: '' }]) {
       await violation(db.appMemoryWriteGrantEvent.create({ data: { appId: app.id, memoryId: memory.id, grantId: 'g', prefix: 'p', action: 'GRANT', actorUserId: 'user-a', ...data } }), /violates check constraint/);
     }
-  });
-});
-
-describe('grantCoversLoc', () => {
-  it.each([
-    ['reports:team-progress', 'reports:team-progress', true],
-    ['reports:team-progress', 'reports:team-progress:2026', true],
-    ['reports:team-progress', 'reports:team-progress:2026:deep', true],
-    ['reports:team-progress', 'reports:team-progressX', false],
-    ['reports:team-progress', 'reports:team-progressX:child', false],
-    ['reports:team-progress', 'reports:team-progres', false],
-    ['reports:team-progress', 'reports', false],
-    ['reports:team-progress', 'x:reports:team-progress', false],
-    ['a_b', 'axb', false],
-    ['a_b', 'a_b:c', true],
-  ])('prefix %s vs loc %s -> %s', (prefix, loc, covered) => {
-    expect(grantCoversLoc(prefix, loc)).toBe(covered);
-  });
-});
-
-describe('isUserlessRunPrincipal', () => {
-  it.each([
-    [{ clientId: 'run:r1', appId: 'a' }, true],
-    [{ clientId: 'run:r1', appId: 'a', userId: 'u' }, false],
-    [{ clientId: 'run:r1' }, false],
-    [{ clientId: 'run:r1', appId: 'a', sessionId: 's' }, false],
-    [{ clientId: 'run:r1', appId: 'a', impersonation: { adminUserId: 'x' } }, false],
-    [{ clientId: 'appkey:k', appId: 'a' }, false],
-    [{ clientId: 'user:u', appId: 'a', userId: 'u' }, false],
-    [{ appId: 'a' }, false],
-  ] as const)('%j -> %s', (auth, expected) => {
-    expect(isUserlessRunPrincipal(auth as never)).toBe(expected);
-  });
-});
-
-describe('grantTargetRefusal', () => {
-  const app = { id: 'app1', organizationId: 'org1', ownerUserId: null };
-  const mem = (over: Record<string, unknown> = {}) => ({
-    id: 'm', class: 'knowledge', userId: null, organizationId: 'org1', appId: null, ownerUserId: null,
-    isEncrypted: false, isInstallMemory: false, userMemoryOfAgentId: null, workerOf: [], ...over,
-  }) as never;
-  it('refuses encrypted and install memories for every class', () => {
-    for (const c of ['knowledge', 'personal', 'private', 'app', 'system']) {
-      expect(grantTargetRefusal(app, mem({ class: c, isEncrypted: true, userId: 'u', appId: 'app1' }))).toBe('encrypted');
-    }
-    expect(grantTargetRefusal(app, mem({ isInstallMemory: true }))).toBe('install-memory');
-  });
-  it('a shared memory must be held by the App\'s own org or be its team space', () => {
-    expect(grantTargetRefusal(app, mem())).toBeNull();
-    expect(grantTargetRefusal(app, mem({ organizationId: 'org2' }))).toBe('tenancy');
-    expect(grantTargetRefusal(app, mem({ organizationId: null, ownerUserId: 'u' }))).toBe('tenancy');
-    expect(grantTargetRefusal(app, mem({ class: 'app', appId: 'app1' }))).toBeNull();
-    expect(grantTargetRefusal(app, mem({ class: 'app', appId: 'app2' }))).toBe('tenancy');
-    expect(grantTargetRefusal(app, mem({ class: 'app', appId: 'app1', workerOf: [{ id: 'w' }] }))).toBe('tenancy');
-    expect(grantTargetRefusal(app, mem({ class: 'app', appId: 'app1', userMemoryOfAgentId: 'ag' }))).toBe('tenancy');
-    // another App's team space in the same org is not this App's
-    expect(grantTargetRefusal(app, mem({ class: 'app', appId: 'app2', organizationId: 'org1' }))).toBe('tenancy');
-    // a user-owned App has no org: only its own team space qualifies
-    const userApp = { id: 'app1', organizationId: null, ownerUserId: 'u' };
-    expect(grantTargetRefusal(userApp, mem({ organizationId: null }))).toBe('tenancy');
-    expect(grantTargetRefusal(userApp, mem({ class: 'app', appId: 'app1', organizationId: null }))).toBeNull();
-  });
-  it('#2710: a class=system memory is never a target, even one the App\'s own org holds', () => {
-    expect(grantTargetRefusal(app, mem({ class: 'system' }))).toBe('system');
-    expect(grantTargetRefusal({ id: 'app1', organizationId: null, ownerUserId: 'u' }, mem({ class: 'system', organizationId: null }))).toBe('system');
-  });
-  it('a personal or private memory needs an owner', () => {
-    expect(grantTargetRefusal(app, mem({ class: 'personal', userId: 'u', organizationId: null }))).toBeNull();
-    expect(grantTargetRefusal(app, mem({ class: 'private', userId: 'u', organizationId: 'org2' }))).toBeNull();
-    expect(grantTargetRefusal(app, mem({ class: 'private', userId: null }))).toBe('no-owner');
   });
 });

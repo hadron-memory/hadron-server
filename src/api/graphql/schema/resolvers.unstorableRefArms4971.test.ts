@@ -120,12 +120,8 @@ const ROWS = (): Row[] => [
   { door: 'node(ref:) [nodeRef arm, KEEP]', call: (r, c) => Q.node({}, { ref: r }, c), who: memberCtx,
     bad: (u) => `hrn:node:${memory.urn}:no${u}pe`, miss: `hrn:node:${memory.urn}:nope`, table: 'node',
     keep: { malformed: 'hrn:node:nope' } },
-  { door: 'setAppMemoryWriteGrant(registerNodeUrn) [register URN arm]',
-    call: (r, c) => M.setAppMemoryWriteGrant({}, { appRef: app.urn, memoryRef: memory.urn, prefix: 'pin', registerNodeUrn: r }, c), who: adminCtx,
-    bad: (u) => `hrn:node:${memory.urn}:no${u}pe`, miss: 'not-a-node-urn', table: 'appMemoryWriteGrant',
-    // The miss is refused by parseRegisterUrn before any lookup, so the control is the converse: a well-formed node
-    // URN passes the parse and the door SUCCEEDS (the guard rejects only what the parse would otherwise admit).
-    accepted: `hrn:node:${memory.urn}:nope` },
+  // #5404: the `setAppMemoryWriteGrant(registerNodeUrn)` row is gone: the door is retired and refuses DOOR_RETIRED before it reads
+  // any argument, so it has no register URN arm to guard. Its unstorable-ref answer is pinned below instead.
   // Section 2: the guards that already exist on agentRef / userRef had no pin of their own.
   { door: 'attendeeRegister(agentRef, appRef) [agentRef guard]', call: (r, c) => Q.attendeeRegister({}, { agentRef: r, appRef: app.urn }, c), who: memberCtx,
     bad: (u) => `hrn:agent:${org.urn}:no${u}pe`, miss: `hrn:agent:${org.urn}:nope`, table: 'agent' },
@@ -153,7 +149,7 @@ describe('#4971 resolveNodeRef: other callers get the typed refusal, never a dri
   });
 });
 
-const ROWS_INDEX = [0, 1, 2, 3, 4, 5, 6]; // one index per ROWS() entry; the door name is in every failure message
+const ROWS_INDEX = [0, 1, 2, 3, 4, 5]; // one index per ROWS() entry; the door name is in every failure message
 
 describe('#4971 unstorable ref arms: NUL and lone surrogates answer exactly like a ref naming nothing', () => {
   it('premise: the bare worker and node resolvers reach the database with an unstorable ref today', async () => {
@@ -192,4 +188,15 @@ describe('#4971 unstorable ref arms: NUL and lone surrogates answer exactly like
       expect(a.ok, `${r.door}: the fault must reject the door`).toBe(false);
     });
   }
+});
+
+describe('#5404 the retired setAppMemoryWriteGrant answers one refusal for every register URN, unstorable included', () => {
+  it('NUL, lone surrogates, a miss and a well-formed URN all answer DOOR_RETIRED, never a driver fault, and write no row', async () => {
+    const call = (r: string) => answer(M.setAppMemoryWriteGrant({}, { appRef: app.urn, memoryRef: memory.urn, prefix: 'pin', registerNodeUrn: r }, adminCtx()));
+    const refs = [...BAD.map((u) => `hrn:node:${memory.urn}:no${u}pe`), 'not-a-node-urn', `hrn:node:${memory.urn}:nope`];
+    const answers = await Promise.all(refs.map(call));
+    for (const a of answers) expect(a).toEqual(answers[answers.length - 1]);
+    expect(answers[0]).toMatchObject({ ok: false, code: 'DOOR_RETIRED' });
+    expect(await db.appMemoryWriteGrant.count()).toBe(0);
+  });
 });

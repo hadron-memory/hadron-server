@@ -247,18 +247,24 @@ describe('#4461 — every other site answers the same', () => {
     );
     expectOneAnswer(err, 'loc', 'invalid-charset');
   });
-  it('setAppMemoryWriteGrant (prefix): was BAD_USER_INPUT with the echo in the text', async () => {
+  // #5404: both grant doors are retired and refuse DOOR_RETIRED before reading any argument, so a bad prefix is never parsed and
+  // never echoed. (`memory.write`'s prefix is judged by createGrant as GRANT_VALUES_INVALID, with no echo of the value.)
+  function expectRetiredNoEcho(err: { message: string; extensions?: Record<string, unknown> }) {
+    expect(err.extensions?.code).toBe('DOOR_RETIRED');
+    expect(JSON.stringify(err)).not.toContain(MARK);
+  }
+  it('setAppMemoryWriteGrant (prefix): was BAD_USER_INPUT with the echo in the text; retired (#5404), no echo', async () => {
     const err = await graphqlError(
       `mutation($a: String!, $m: String!, $p: String!) { setAppMemoryWriteGrant(appRef: $a, memoryRef: $m, prefix: $p) { id } }`,
       { a: 'nope', m: memoryId, p: BAD },
     );
-    expectOneAnswer(err, 'prefix', 'invalid-charset');
+    expectRetiredNoEcho(err);
   });
-  it('setAutomationReadGrant (prefix): was BAD_USER_INPUT with the echo in the text', async () => {
+  it('setAutomationReadGrant (prefix): was BAD_USER_INPUT with the echo in the text; retired (#5404), no echo', async () => {
     const err = await graphqlError(
       `mutation($a: String!, $k: String!, $i: ID!, $m: String!, $p: String) { setAutomationReadGrant(appRef: $a, triggerKind: $k, triggerId: $i, memoryRef: $m, prefix: $p) { id } }`,
       { a: 'nope', k: 'SCHEDULE', i: generateId(), m: memoryId, p: BAD },
     );
-    expectOneAnswer(err, 'prefix', 'invalid-charset');
+    expectRetiredNoEcho(err);
   });
 });

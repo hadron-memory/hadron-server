@@ -1,7 +1,7 @@
 /**
  * #1329 — one answer to "may this run read this node", used by the run's read
  * tool and by an attestation refusal, so a refusal can never disagree with what
- * the run can load: not narrower (#2883's prefix grant, #3306's PUBLIC knowledge)
+ * the run can load: not narrower (a `memory.read` grant, #3306's PUBLIC knowledge)
  * and not wider (the shared memory gate admits memories a run's own read refuses).
  * It asks about one node and grants nothing.
  */
@@ -11,12 +11,17 @@ import { canReadMemory } from '../../mcp/access-control.js';
 import type { AuthContext } from '../../middleware/auth.js';
 import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../auth/publicKnowledgeRead.js';
 import { attestedAuthoring, type AuthoredWith, type AuthoringContext } from '../authoringAttestation.js';
-import { runHoldsReadGrant } from '../automationReadGrant.js';
+import { grantReadReachFor } from '../grants/readGrant.js';
 import { isOwnedBy, requireOwnerRefOf } from '../owner.js';
 
 type RunRef = Pick<AppRun, 'id' | 'organizationId' | 'ownerUserId'>;
 
-/** Runs are unavailable on encrypted memories. In the run's org: the shared gate, then its grant. Elsewhere: PUBLIC knowledge for a run with no user, or its grant. */
+/**
+ * Runs are unavailable on encrypted memories. In the run's org: the shared gate, then its App's read grant. Elsewhere: PUBLIC knowledge
+ * for a run with no user, or its App's read grant. The grant is a signed `memory.read` grant (#5404, cor:acl:140:02, the one judge
+ * `grantReadReachFor`), which reaches a userless run only; the per-automation read grant of #2883 is gone, so a run carrying a user id
+ * reads only what the shared gate gives it.
+ */
 export async function runReadsNode(
   db: PrismaClient | Prisma.TransactionClient,
   principal: Context,
@@ -36,8 +41,8 @@ export async function runReadsNode(
   } else if (readsPublicKnowledgeWithoutUser(auth) && (await publicKnowledgeAmong(client, [memoryId])).has(memoryId)) {
     return true;
   }
-  // #2883: the automation's read grant, consulted here only, after the gate above refused.
-  return runHoldsReadGrant(client, auth, run.id, memoryId, loc);
+  // #5404: the App's `memory.read` grant, after the gates above refused (a whole memory: the grant has no branch until #5412).
+  return (await grantReadReachFor(client, auth, [memoryId])).has(memoryId);
 }
 
 /** The authoring context of a write a run makes. */

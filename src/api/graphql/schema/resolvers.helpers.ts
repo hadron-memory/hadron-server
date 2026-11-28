@@ -1,4 +1,6 @@
 import { registerOwnRightReader } from '../../../lib/appMemoryLinks.js';
+import { registerWriteGrantGiverCheck } from '../../../lib/grants/writeGrant.js';
+import { MANAGED_MEMORY_SELECT, managesGrantMemory } from '../../../lib/grants/memoryManager.js';
 import { grantReadReachFor } from '../../../lib/grants/readGrant.js';
 import { currentAgentOrgMember } from '../../../lib/auth/personalOrgAgentInstall.js';
 import { requireOrgRole, isAppParticipant } from '../../../lib/auth/appParticipantRead.js';
@@ -90,7 +92,7 @@ import {
   AmbiguousLegacyUrnError,
 } from '../../../lib/entityRef/errors.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
-import type { WriteDestination } from '../../../lib/appWriteGrant.js';
+import type { WriteDestination } from '../../../lib/grants/writeGrant.js';
 import { assertLinkAllowedForPublicAgent, isExcludedFromCoveredSet } from '../../../lib/agentPublicCongruence.js';
 import type { ImpersonationContext } from '../../../lib/auth/impersonation.js';
 import { isReadOnlyImpersonation } from '../impersonationReadOnlyPlugin.js';
@@ -802,6 +804,12 @@ export function memoryIdsHeldIndependently(ctx: Context, onlyMemoryId?: string):
 
 // #5185: the link judge (src/lib/appMemoryLinks.ts) asks this question for each attacher; registered here so it imports no resolver.
 registerOwnRightReader(holdsContentReadIndependently as never);
+// #5404: the `memory.write` judge (src/lib/grants/writeGrant.ts) asks whether a grant's giver still manages the memory, by the same
+// rule its signer faced (`managesGrantMemory`); registered here for the same reason.
+registerWriteGrantGiverCheck(async (db, giver, memoryId) => {
+  const memory = await db.memory.findFirst({ where: { id: memoryId, deletedAt: null }, select: MANAGED_MEMORY_SELECT });
+  return memory !== null && managesGrantMemory({ db, userId: giver.id, roles: giver.roles } as Context, memory);
+});
 
 /**
  * The same-App attach (#1357; Holger's ruling, 2026-09-26): an appropriately

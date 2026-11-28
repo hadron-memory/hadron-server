@@ -6,6 +6,7 @@
  * option off the door replaces the whole bag, as before. The option lives on the task door's own argument, never on
  * the shared `UpdateNodeInput`, so no other door gains a merge mode.
  */
+import { activeMemoryWriteGrant, revokeGrantRow } from '../../../test/appGrants5404.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
 import { db } from '../../../integrations/db/client.js';
@@ -334,7 +335,7 @@ describe('a userless App run under a prefix-scoped write grant (#4599 LOCAL P2)'
     const org = await db.organization.findFirstOrThrow({ where: { urn: 'tm-org' } });
     const app = await db.app.create({ data: { id: generateId(), name: 'Run App', urn: 'tm-org:app', organizationId: org.id } as never });
     const mem = await db.memory.create({ data: { id: generateId(), name: 'rep', urn: 'tm-org:rep', class: 'knowledge', visibility: 'ORGANIZATION', organizationId: org.id } as never });
-    const grant = await db.appMemoryWriteGrant.create({ data: { appId: app.id, memoryId: mem.id, prefix: PREFIX, grantedBy: adminId } });
+    const grant = await activeMemoryWriteGrant(app.id, mem.id, { issuerUserId: adminId, prefix: PREFIX }); // #5404: signed memory.write
     const mk = (loc: string) => M.createTaskNode({}, { input: { memoryRef: mem.id, loc, name: loc, isRunnable: true, properties: { keep: 1 } } }, admin());
     const inside = await mk(`${PREFIX}:t1`);
     const outside = await mk('other:t2');
@@ -356,7 +357,7 @@ describe('a userless App run under a prefix-scoped write grant (#4599 LOCAL P2)'
     const plainOutside = await upd(outside.id, false);
     expect(plainOutside).toMatch(/^refused:/);
     expect(await upd(outside.id, true)).toBe(plainOutside);
-    await db.appMemoryWriteGrant.update({ where: { id: grant.id }, data: { revokedAt: new Date(), revokedBy: adminId } });
+    await revokeGrantRow(grant, adminId);
     const plainRevoked = await upd(inside.id, false);
     expect(plainRevoked).toMatch(/^refused:/);
     expect(await upd(inside.id, true)).toBe(plainRevoked);
