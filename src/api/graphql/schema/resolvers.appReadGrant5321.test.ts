@@ -98,10 +98,15 @@ beforeEach(async () => {
 });
 
 describe('the action is seeded (cor:acl:140:02)', () => {
-  it('memory.read exists with one wildcard-refusing parameter that takes a list, enforced by the server; there is no knowledge.read', async () => {
+  // #5412 added the two optional parameters (`branch`, `automation`); `memory` stays the one required one and the one that takes a list.
+  it('memory.read exists with one required wildcard-refusing parameter that takes a list, enforced by the server; there is no knowledge.read', async () => {
     const rows = await db.action.findMany({ where: { name: { in: ['memory.read', 'knowledge.read'] } }, orderBy: { name: 'asc' } });
     expect(rows.map((r) => ({ name: r.name, enforcement: r.enforcement, tool: r.tool, parameters: r.parameters }))).toEqual([
-      { name: 'memory.read', enforcement: 'SERVER', tool: null, parameters: [{ name: 'memory', type: 'memory-ref', refusesWildcard: true }] },
+      { name: 'memory.read', enforcement: 'SERVER', tool: null, parameters: [
+        { name: 'memory', type: 'memory-ref', refusesWildcard: true },
+        { name: 'branch', type: 'loc-prefix', refusesWildcard: true, optional: true },
+        { name: 'automation', type: 'automation-ref', refusesWildcard: true, optional: true },
+      ] },
     ]);
     expect(PLATFORM_ACTIONS.map((a) => a.name)).toContain('memory.read');
     expect(PLATFORM_ACTIONS.map((a) => a.name)).not.toContain('knowledge.read');

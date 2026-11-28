@@ -57,13 +57,17 @@ async function post(key: string | null, session: string | null, query: string, v
   });
   return res.json();
 }
-const FIELDS = 'name source tool enforcement issuerRule parameters { name type refusesWildcard }';
+const FIELDS = 'name source tool enforcement issuerRule parameters { name type refusesWildcard optional }';
 const LIST = `query($a:String!,$l:Int,$o:Int){grantActions(appRef:$a,limit:$l,offset:$o){total items{${FIELDS}}}}`;
 const ONE = `query($a:String!,$r:ID!){action(appRef:$a,ref:$r){${FIELDS}}}`;
 const EMPTY = { grantActions: { total: 0, items: [] } };
 const expected = () => [...PLATFORM_ACTIONS]
   .sort((a, b) => (a.name < b.name ? -1 : 1))
-  .map((a) => ({ name: a.name, source: a.source, tool: a.tool, enforcement: a.enforcement, issuerRule: a.issuerRule, parameters: a.parameters }));
+  .map((a) => ({
+    name: a.name, source: a.source, tool: a.tool, enforcement: a.enforcement, issuerRule: a.issuerRule,
+    // #5412: `optional` is stored only when true; the field answers false for every other parameter.
+    parameters: a.parameters.map((p) => ({ name: p.name, type: p.type, refusesWildcard: p.refusesWildcard, optional: p.optional === true })),
+  }));
 
 /** Run one operation through the resolver with a hand-built context (the callers a request cannot reach). */
 async function viaResolver(contextValue: Context, query: string, variables: Record<string, unknown>): Promise<any> {
