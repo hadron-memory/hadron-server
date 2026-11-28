@@ -36,9 +36,10 @@ ALTER TABLE "node_revisions" ADD COLUMN IF NOT EXISTS "approved_rev_no" INTEGER;
 
 -- Approval hash v1 (src/lib/approvalHash.ts, hrn:node:hadronmemory.com:specs:cor:dmo:120:01), byte for byte: a version
 -- line, then title, abstract and content, each `<name> null` or `<name> <UTF-8 byte length>`, a newline, the value and a
--- newline; CRLF and a lone CR become LF first. Session-local, dropped below.
+-- newline; CRLF and a lone CR become LF first. Session-local, dropped below; its search path is pinned like every
+-- function a migration makes (#5096), though it names nothing outside pg_catalog.
 CREATE OR REPLACE FUNCTION pg_temp.approval_hash_5481(p_title text, p_abstract text, p_content text) RETURNS text
-LANGUAGE sql IMMUTABLE AS $fn$
+LANGUAGE sql IMMUTABLE SET search_path = public, pg_temp AS $fn$
   SELECT encode(sha256(convert_to(
     'hadron-approval-v1' || E'\n'
     || (SELECT CASE WHEN v IS NULL THEN 'title null' || E'\n'

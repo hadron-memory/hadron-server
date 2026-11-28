@@ -290,7 +290,9 @@ describe('#5481 the re-anchoring step', () => {
     expect(await db.node.findMany({ orderBy: { id: 'asc' } })).toEqual(once.nodes);
     expect(notices.join('\n')).toContain('re-anchored 0 history row(s) and 0 live node(s)');
     expect(await everything()).toEqual(counts);
-    expect(migration).not.toMatch(/RAISE\s+EXCEPTION|DELETE\s+FROM|TRUNCATE/i);
+    // No statement of it can refuse on data or remove a row (comments aside).
+    const statements = migration.split('\n').filter((l) => !l.trim().startsWith('--')).join('\n');
+    expect(statements).not.toMatch(/RAISE\s+EXCEPTION|DELETE\s+FROM|TRUNCATE|DROP\s+(?!TABLE\s+(IF\s+EXISTS\s+)?approval_5481_|FUNCTION\s+pg_temp\.)/i);
   });
 });
 
