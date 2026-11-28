@@ -15,6 +15,7 @@ import { generateId } from '../../../lib/id.js';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
 import { getAccessibleMemoryIds, memoryAccessFilter, nodeBranchScopes } from './resolvers.helpers.js';
+import { BRANCH_GUARDED_FIELDS, branchGuardedValue } from './branchNodeFields.js';
 import type { AuthContext } from '../../../middleware/auth.js';
 import { upsertPlatformActions } from '../../../lib/grants/actions.js';
 import { DB_NOW, raw, insertGrantUnguarded, type World } from '../../../lib/grants/grantFixtures3668.js';
@@ -213,4 +214,19 @@ describe('condition 6: a branch is a loc prefix on a `:` boundary, and `_` / `%`
     expect(locs(await gql(FIND, { mem: [m2.id] }))).toEqual([]);
     expect((await nodeBranchScopes(keyCtx())).has(m2.id)).toBe(false);
   });
+});
+
+describe('condition 2 (issuecomment-7238581276): one pin per guarded Node field', () => {
+  // Each guarded field, resolved through the SERVED Node resolver map with the branch-only caller's context, answers its empty value;
+  // the same row read by a whole-memory grantee goes to the field's own resolver (a different answer for the fields the fixture fills).
+  for (const field of BRANCH_GUARDED_FIELDS) {
+    it(field, async () => {
+      const { inside } = await branchWorld();
+      const row = await db.node.findUniqueOrThrow({ where: { id: inside.api.id } });
+      const N = (resolvers as unknown as { Node: Record<string, (p: unknown, a: unknown, c: unknown, i: unknown) => unknown> }).Node;
+      const args = field === 'signingRequestsPage' ? {} : undefined;
+      const got = await N[field]!(row, args, keyCtx(), { fieldName: field, path: { key: field } });
+      expect(got).toEqual(branchGuardedValue(field, row, args));
+    });
+  }
 });

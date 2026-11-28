@@ -56,6 +56,11 @@ const GUARDED: Record<string, (parent: any, args?: any) => unknown> = {
 /** The guarded fields, for the drift pin. */
 export const BRANCH_GUARDED_FIELDS: readonly string[] = Object.keys(GUARDED);
 
+/** What a branch-only node answers for a guarded field (the per-field pins compare the served resolver against it). */
+export function branchGuardedValue(field: string, parent: unknown, args?: unknown): unknown {
+  return GUARDED[field]!(parent, args);
+}
+
 /** Node fields a branch-only node serves as usual, each with the reason: its own stored columns, or derived from them alone. */
 export const BRANCH_OWN_FIELDS: Readonly<Record<string, string>> = {
   id: 'the row', memoryId: 'the row (the memory the grant names)', loc: 'the row (inside the branch)', deletedAt: 'the row (always null: tombstones are not served)',
