@@ -399,8 +399,8 @@ export async function cloneMemoryGraphInTx(
   const counterIdMap = Object.fromEntries(counterRoots.filter(c=>idMap.has(c.chatRootNodeId))
     .map(c=>[c.chatRootNodeId,idMap.get(c.chatRootNodeId)!]));
   // Copy the timestamp in SQL: finite PostgreSQL years need not fit in JS Date/Prisma DateTime.
-  if(counterRoots.length) await tx.$executeRaw`INSERT INTO chat_root_counters(chat_root_node_id,message_count,last_message_at,updated_at)
-    SELECT mapped.value,c.message_count,c.last_message_at,CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
+  if(counterRoots.length) await tx.$executeRaw`INSERT INTO chat_root_counters(chat_root_node_id,message_count,last_message_at,updated_at,agent_id)
+    SELECT mapped.value,c.message_count,c.last_message_at,CURRENT_TIMESTAMP AT TIME ZONE 'UTC',c.agent_id
     FROM chat_root_counters c JOIN jsonb_each_text(${JSON.stringify(counterIdMap)}::jsonb) mapped ON mapped.key=c.chat_root_node_id`;
 
   // #3501: encrypted sources already refuse above. Plaintext operational state follows the cloned root id.

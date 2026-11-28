@@ -357,6 +357,15 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // pure key holding the new App-key scope `grant:read` (ADDITIVE: the closed scope list gains it; a client that validates scopes against the
 // old list cannot give it). A person, an impersonation, a session-bound key and a run carrying a user id gain nothing. #5398's own-memory
 // read (0.53.0) is neither an attachment nor a grant and is unchanged. (0.53.0 is #5398 and 0.54.0 is #5394, both merged first.)
+// 0.56.0 — BREAKING (behaviour) + ADDITIVE, #5027 (cor:acl:030:01, R1-R4, Holger 2026-11-27): a chat lives in a memory the caller
+// names. ADDITIVE: `startChat(memoryRef:)` (an id or URN of an app, group, personal or private memory of the Agent's App that the caller
+// can read and write as themselves); `Agent.defaultChatHome` (APP_SHARED, PERSONAL or PRIVATE, set through `updateAgent` by whoever
+// manages the Agent) decides when memoryRef is omitted; `Chat.homeMemoryClass` and `Chat.homeMemoryUrn` (the `hrn:mem:` form, as
+// `Memory.urn`) on every chat read. `Chat.scope` is kept and deprecated, now a label derived from the home's class. BREAKING: a home
+// that fails any step, including a caller with no AppMember row in the home's App (a group MemoryMember outside the App), is refused
+// with the one `CHAT_HOME_INVALID` and writes nothing; only the person themselves creates a missing personal or private default home
+// (an App key, a run or a worker session is refused). A start with neither memoryRef nor a default behaves as before.
+// (0.54.0 is #5407 and 0.55.0 is #5411, both merged first.)
 // 0.57.0 — BREAKING (output nullability) + ADDITIVE (#5077 F3a-2, cor:dmo:050:12): `AppRun.organizationId` is now `ID` (null for a
 // run of an App a person owns) and `AppRun.ownerUserId: ID` is new (exactly one of the two is set). A client that reads
 // organizationId as non-null must key on this version. With PERSONAL_APP_RUNS_ENABLED=true the manual door (triggerAppRun,
@@ -364,8 +373,8 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // anyone else; the owner and an owner-role member read (appRun, latestAppRun, resolveUrn, hadron_get_run) and cancel that App's
 // runs; a platform admin cancels one with its content withheld. MCP `hadron_get_run` and `hadron_run_task` now pass the session's
 // impersonation to those gates, as GraphQL always did: an impersonated MCP session is bounded on an organization's run too (its
-// one organization, no own-run arm), where MCP used to judge it as the target user. (0.55.0 is #5411, merged first; 0.56.0 is
-// #5391, held ahead of this.)
+// one organization, no own-run arm), where MCP used to judge it as the target user. (0.55.0 is #5411 and 0.56.0 is #5391,
+// both merged first.)
 export const HADRON_SERVER_VERSION = '0.57.0';
 
 /**
