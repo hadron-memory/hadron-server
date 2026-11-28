@@ -125,12 +125,12 @@ describe('#5077 acceptance 1 and 11: launch with the switch on, refusal with it 
     expect(await db.appRun.count()).toBe(0);
   });
 
-  it('the manual door is unchanged in F3a-1: triggerAppRun on a person\'s App answers main\'s text and code, switch on', async () => {
+  it('F3a-2 opens the manual door: with the switch on the owner\'s triggerAppRun on a person\'s App launches', async () => {
+    // Was "the manual door is unchanged in F3a-1"; the full door table is pinned in resolvers.appRun.personalDoor5077.test.ts.
     const a = await person('pa5077');
-    const err = await resolvers.Mutation.triggerAppRun({}, { input: { appRef: a.app.id, entryNodeUrn: a.entryUrn } } as never,
-      { db, userId: a.user.id, roles: [] } as unknown as Context).catch((e: unknown) => e) as { message: string; extensions: { code: string } };
-    expect(err.message).toBe('Manual runs are not supported for user-owned Apps yet.');
-    expect(err.extensions.code).toBe('BAD_USER_INPUT');
+    const run = await resolvers.Mutation.triggerAppRun({}, { input: { appRef: a.app.id, entryNodeUrn: a.entryUrn } } as never,
+      { db, userId: a.user.id, roles: [] } as unknown as Context) as { organizationId: string | null; ownerUserId: string | null };
+    expect(run).toMatchObject({ organizationId: null, ownerUserId: a.user.id });
   });
 });
 
@@ -455,40 +455,39 @@ describe('#5077 acceptance 10: the database', () => {
   });
 });
 
-describe('#5077 F3a-1 interim: reads and cancel of a person\'s run fail closed until F3a-2', () => {
+describe('#5077 F3a-2 (replaces the F3a-1 interim): reads and cancel of a person\'s run', () => {
   it('a platform admin reads nothing: appRun(ref:) null, latestAppRun not found, resolveUrn null', async () => {
     const a = await person('pa5077');
     const run = await mintFor(a);
     const admin = { db, userId: (await db.user.create({ data: { handle: 'adm5077' } })).id, roles: ['ADMIN'] } as unknown as Context;
     expect(await resolvers.Query.appRun({}, { ref: run.id }, admin)).toBeNull();
     await expect(resolvers.Query.latestAppRun({}, { appRef: a.app.id }, admin)).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });
-    // Rook SEC10 P3-1 on #5420: without resolveUrn's null-organization guard, isOrgMember admits a platform admin.
+    // Rook SEC10 P3-1 on #5420: without resolveUrn's null-organization branch, isOrgMember admits a platform admin.
     expect(await resolvers.Query.resolveUrn({}, { urn: composeAppRunUrn('pa5077:app', run.id) }, admin)).toBeNull();
   });
 
-  it('nobody else reads one either: the owner (a run on their behalf, one they started), the App key and MCP get nothing', async () => {
-    // Byron SECOND P2-1 / Belinda BLIND P2-1 on #5420: main's own-run arm and App-key arm would admit a person's run, and the
-    // owner passes latestAppRun's App gate; AppRun.organizationId is ID! until F3a-2. The null check precedes every arm.
+  it('the owner reads every run of their App (on their behalf, one they started, latest), the App key its run, MCP too', async () => {
+    // Byron SECOND P2-1 / Belinda BLIND P2-1 on #5420 asked for the null-organization branch first; F3a-2 keeps it first and
+    // gives it the ruled arms (cor:dmo:050:12).
     const a = await person('pa5077');
     const owner = { db, userId: a.user.id, roles: [] } as unknown as Context;
     const onBehalf = await mintFor(a, { userId: a.user.id });
     const started = await mintFor(a, { createdBy: a.user.id });
-    expect(await hasAppRelationship(db, a.app.id, a.user.id)).toBe(true); // the own arm's precondition holds
-    expect(await resolvers.Query.appRun({}, { ref: onBehalf.id }, owner)).toBeNull();
-    expect(await resolvers.Query.appRun({}, { ref: started.id }, owner)).toBeNull();
-    expect(await resolvers.Query.latestAppRun({}, { appRef: a.app.id }, owner)).toBeNull();
+    expect(await resolvers.Query.appRun({}, { ref: onBehalf.id }, owner)).toMatchObject({ id: onBehalf.id });
+    expect(await resolvers.Query.appRun({}, { ref: started.id }, owner)).toMatchObject({ id: started.id });
+    expect(await resolvers.Query.latestAppRun({}, { appRef: a.app.id }, owner)).toMatchObject({ id: started.id });
     const appKey = { db, appId: a.app.id, roles: [] } as unknown as Context;
-    expect(await resolvers.Query.appRun({}, { ref: started.id }, appKey)).toBeNull();
+    expect(await resolvers.Query.appRun({}, { ref: started.id }, appKey)).toMatchObject({ id: started.id });
     const text = await createTestableMcpServer({ userId: a.user.id, roles: ['READER'], clientId: `user:${a.user.id}` } as AuthContext)
       .callToolText('hadron_get_run', { ref: onBehalf.id });
-    expect(text).toBe('Run not found.');
+    expect(text).toContain(onBehalf.id);
   });
 
-  it('nobody cancels a person\'s run in F3a-1, the owner included (the owner\'s arm is F3a-2)', async () => {
+  it('the owner cancels a person\'s run', async () => {
     const a = await person('pa5077');
     const run = await mintFor(a, { userId: a.user.id });
-    await expect(resolvers.Mutation.cancelAppRun({}, { ref: run.id }, { db, userId: a.user.id, roles: [] } as unknown as Context)).rejects.toThrow();
-    expect((await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).status).toBe('PENDING');
+    await expect(resolvers.Mutation.cancelAppRun({}, { ref: run.id }, { db, userId: a.user.id, roles: [] } as unknown as Context))
+      .resolves.toMatchObject({ id: run.id, status: 'CANCELLED' });
   });
 });
 
