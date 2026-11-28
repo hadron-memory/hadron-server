@@ -56,7 +56,8 @@ describe('LIST_PAGE_ARGS_FIELDS cannot drift from the resolvers (#4390 blind P2-
     //  resolvers.webPoll.ts 2: loadWebPolls (validate + window), shared by Query.webPollsPage and Query.webPolls.
     //  resolvers.signing.ts 1: signingRequestsWindow, shared by Node.signingRequestsPage and Node.signingRequests.
     //  installMemory.ts 1, resolvers.inheritedNode.ts 1: the Node.signingRequestsPage twins (same type and field name).
-    expect(sites).toEqual({ 'installMemory.ts': 1, 'resolvers.inheritedNode.ts': 1, 'resolvers.signing.ts': 1, 'resolvers.webPoll.ts': 2 });
+    //  branchNodeFields.ts 1 (#5412): the branch-only twin of Node.signingRequestsPage (an empty page, validated the same way).
+    expect(sites).toEqual({ 'branchNodeFields.ts': 1, 'installMemory.ts': 1, 'resolvers.inheritedNode.ts': 1, 'resolvers.signing.ts': 1, 'resolvers.webPoll.ts': 2 });
   });
 });
 

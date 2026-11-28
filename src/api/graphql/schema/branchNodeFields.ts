@@ -83,9 +83,10 @@ export function withBranchNodeGuard<T extends Record<string, any>>(node: T): T {
   const out: Record<string, FieldResolver> = { ...node };
   for (const [field, empty] of Object.entries(GUARDED)) {
     const original: FieldResolver = node[field] ?? ((parent) => parent?.[field]);
-    out[field] = async (parent, args, ctx: Context, info) => {
-      if (parent?.memoryId && ctx && (await isBranchOnlyMemory(ctx, parent.memoryId))) return empty(parent, args);
-      return original(parent, args, ctx, info);
+    out[field] = (parent, args, ctx: Context, info) => {
+      // No caller context (a direct call) or no memory on the row: the original resolver, synchronously as it answers.
+      if (!parent?.memoryId || !ctx?.db) return original(parent, args, ctx, info);
+      return isBranchOnlyMemory(ctx, parent.memoryId).then((branchOnly) => (branchOnly ? empty(parent, args) : original(parent, args, ctx, info)));
     };
   }
   return out as T;
