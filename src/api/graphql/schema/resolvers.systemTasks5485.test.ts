@@ -101,6 +101,16 @@ describe('#5485 the ranked list finds system tasks, embeddings off and on', () =
   });
 });
 
+describe('#5485 a system task still runs', () => {
+  it('runTask and hadron_run_task render it, with the node it requires', async () => {
+    const urn = `hrn:node:${org.urn}:bot-system:tasks:deploy`;
+    const viaGraphql = await (resolvers.Mutation as any).runTask({}, { nodeRef: urn }, ctx());
+    expect(viaGraphql).toContain('deploy body');
+    const viaMcp = await mcp().callToolText('hadron_run_task', { urn });
+    expect(viaMcp).toContain('deploy body');
+  });
+});
+
 describe('#5485 agentInstructions lists them', () => {
   it('nearest (embeddings off: keyword only, no score reaches the floor) carries the system task', async () => {
     const res = await Q.agentInstructions({}, { agentRef: agentId, phrase: 'deployment' }, ctx());
