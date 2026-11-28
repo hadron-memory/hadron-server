@@ -126,6 +126,7 @@ import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { INDEXED_MEMORY_WHERE } from '../../../lib/embedding/indexing.js';
 import { edgeDisplayOrder, edgeRunOrder } from '../../../lib/edgeOrder.js';
 import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../../../lib/auth/publicKnowledgeRead.js';
+import { canReadAppRun } from './resolvers.appRun.js';
 
 /**
  * #3113 — the validated `filter.nodeTypes` list (or null), refused as
@@ -1064,11 +1065,15 @@ export const nodeQueries = {
           }
           const run = await ctx.db.appRun.findUnique({
             where: { id },
-            select: { organizationId: true },
+            select: { appId: true, organizationId: true, userId: true, createdBy: true, triggerKind: true },
           });
           if (!run) return null;
-          // #5077 (F3a-1): a run of an App a person owns resolves to nothing until F3a-2 gives it the run read gate.
-          if (run.organizationId === null) return null;
+          // #5077 (F3a-2; cor:dmo:050:12): a run of an App a person owns resolves behind the run read gate `appRun(ref:)`
+          // answers by (its manager, the App's own key, a user for their own run), with no organization to name.
+          if (run.organizationId === null) {
+            if (!(await canReadAppRun(ctx, run))) return null;
+            return { kind: 'apprun', id, organizationId: null, ...(fragment ? { fragment } : {}) };
+          }
           // Same READER-of-the-org gate the appRun(ref:) query enforces.
           if (!(await isOrgMember(run.organizationId))) return null;
           return {

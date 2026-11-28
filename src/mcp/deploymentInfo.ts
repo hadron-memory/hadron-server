@@ -366,7 +366,16 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // with the one `CHAT_HOME_INVALID` and writes nothing; only the person themselves creates a missing personal or private default home
 // (an App key, a run or a worker session is refused). A start with neither memoryRef nor a default behaves as before.
 // (0.54.0 is #5407 and 0.55.0 is #5411, both merged first.)
-// 0.57.0 — BREAKING (behaviour; SDL deprecations, no removal) (#5404, cor:acl:140:02, cor:agt:010:01): the two UNSIGNED App grants end.
+// 0.57.0 — BREAKING (output nullability) + ADDITIVE (#5077 F3a-2, cor:dmo:050:12): `AppRun.organizationId` is now `ID` (null for a
+// run of an App a person owns) and `AppRun.ownerUserId: ID` is new (exactly one of the two is set). A client that reads
+// organizationId as non-null must key on this version. With PERSONAL_APP_RUNS_ENABLED=true the manual door (triggerAppRun,
+// runTask(appRef:), importNode(taskRef:)) launches on a person's App for its key or its owner / owner-role member, FORBIDDEN for
+// anyone else; the owner and an owner-role member read (appRun, latestAppRun, resolveUrn, hadron_get_run) and cancel that App's
+// runs; a platform admin cancels one with its content withheld. MCP `hadron_get_run` and `hadron_run_task` now pass the session's
+// impersonation to those gates, as GraphQL always did: an impersonated MCP session is bounded on an organization's run too (its
+// one organization, no own-run arm), where MCP used to judge it as the target user. (0.55.0 is #5411 and 0.56.0 is #5391,
+// both merged first.)
+// 0.58.0 — BREAKING (behaviour; SDL deprecations, no removal) (#5404, cor:acl:140:02, cor:agt:010:01): the two UNSIGNED App grants end.
 // (1) Ruling 0083's App write grant (#2484) and #2883's per-automation read grant authorize nothing, and the migration deletes their rows and
 // event rows at deploy (no carry, no re-sign): a userless run that wrote or read through one is refused until the memory's owner signs the
 // replacement. (2) New grant action `memory.write` (ADDITIVE, through `createGrant` and the signing ceremony): an App's userless runs create
@@ -377,8 +386,8 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // `hadron_*_automation_read_grant` tools refuse every call with `DOOR_RETIRED` (`extensions.replacement` names `memory.read` or
 // `memory.write`); they are deprecated in the SDL and removed once a CLI release carrying hadron-cli#3319 ships.
 // `AutomationApproval.readGrants` is always empty (deprecated). (4) A run carrying a user id no longer reads through #2883's grant: a
-// user-backed run reads only what its user reads. (0.56.0 is #5391, merged first.)
-export const HADRON_SERVER_VERSION = '0.57.0';
+// user-backed run reads only what its user reads. (0.56.0 is #5391 and 0.57.0 is #5441, both merged first.)
+export const HADRON_SERVER_VERSION = '0.58.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

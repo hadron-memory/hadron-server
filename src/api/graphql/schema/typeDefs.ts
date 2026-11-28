@@ -7912,7 +7912,10 @@ export const typeDefs = `#graphql
     id: ID!
     "Computed grammar-v2 URN hrn:apprun:<root>:<app>:<run-id> (#696). Null for the rare multi-segment App URN the flat shape cannot express."
     urn: String
-    organizationId: ID!
+    "The organization that owns the run's App, copied at mint; null when a person owns the App (#5077, hrn:node:hadronmemory.com:specs:cor:dmo:050:12). Exactly one of organizationId and ownerUserId is set."
+    organizationId: ID
+    "The person who owns the run's App, copied at mint; null when an organization owns it (#5077, hrn:node:hadronmemory.com:specs:cor:dmo:050:12)."
+    ownerUserId: ID
     appId: ID!
     agentId: ID
     "On-behalf-of user (cor:agt:010:01). Null = pure App service identity."
@@ -9367,6 +9370,8 @@ export const typeDefs = `#graphql
   aiconf (#3857) the org that owns it or
   its App or Agent (null for a server-owned config or a user-owned App or
   Agent) — both are the extra ids those resources' canonical routes require.
+  An app run of an App a person owns (#5077) has no organization: its
+  \`organizationId\` is null.
   """
   type UrnResolution {
     kind:           String!
@@ -12756,8 +12761,14 @@ export const typeDefs = `#graphql
     hrn:apprun:<root>:<app>:<run-id> URN (#696). Readable by a platform admin,
     a READER of the run's organization, the run's own App key, or a user with a
     live App relationship for a run on their behalf or a MANUAL run they
-    started. A run the caller may not read returns null, exactly like a
-    missing one (#1577: no existence oracle).
+    started. A run of an App a person owns (organizationId null, #5077,
+    hrn:node:hadronmemory.com:specs:cor:dmo:050:12) is read by whoever manages
+    that App as themself (its owner
+    or an owner-role member), by the App's own key or a run of that App with no
+    user, and by a user for their own run as above; never by a platform admin,
+    an impersonated session or a run carrying a user id. A run the caller may
+    not read returns null, exactly like a missing one (#1577: no existence
+    oracle).
     """
     appRun(ref: ID!): AppRun
     "The latest run of an App resolved to a concrete run (#696) — 'current/latest/previous' are queries, never magic run-ids in URN space (cor:urn:010:02). previous: true returns the run before the latest."
@@ -14420,6 +14431,15 @@ export const typeDefs = `#graphql
     'ref' is the run's id or its hrn:apprun URN (renamed from 'id', #4141).
     A ref that cannot name a run is BAD_USER_INPUT; an unknown run answers
     NOT_FOUND "Run not found."; a non-admin keeps FORBIDDEN.
+    A run of an App a person owns (#5077,
+    hrn:node:hadronmemory.com:specs:cor:dmo:050:12) is cancelled by
+    whoever manages that App as themself (its owner or an owner-role member),
+    with the full run returned, and by a platform admin, who gets the run with
+    its content withheld: identity, owner, status, timestamps, budgets and
+    spend are kept, every other field is null and entryNodeUrn is the empty
+    string. Anyone who may read the run but not cancel it (the App's own key,
+    a member for their own run) gets FORBIDDEN; anyone who may not read it
+    gets NOT_FOUND, as for a missing run.
     """
     cancelAppRun(ref: ID!): AppRun!
 
