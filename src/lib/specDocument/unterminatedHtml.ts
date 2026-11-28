@@ -632,6 +632,19 @@ type LineKind = 'blank' | 'code' | 'nonpara' | 'marker' | 'other';
  */
 type ReaderModel = 'commonmark' | 'marked';
 
+/**
+ * Whether the text at `i` is `<!` and a name that no blank or letter follows (so marked takes no declaration there, #5211). Sticky on the whole
+ * text, so a text with no line break costs no search for one (#5476). The regex is shared: `lastIndex` is set before every use and nothing
+ * else reads it.
+ */
+const DECLARATION_NAME = /<![A-Za-z]+(?![A-Za-z\s])/y;
+function declarationWithoutBlankAt(text: string, i: number): boolean {
+  DECLARATION_NAME.lastIndex = i;
+  const found = DECLARATION_NAME.test(text);
+  DECLARATION_NAME.lastIndex = 0;
+  return found;
+}
+
 /** The index of the `<` that opens the first unterminated construct at or after `from`, or -1, as `model` reads the text. */
 function firstUnterminated(text: string, from: number, model: ReaderModel = 'commonmark'): number {
   scansRun += 1;
@@ -943,7 +956,7 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
     }
     // #5211 — marked takes a declaration only when a blank follows its name; any other `<!` and a name is text to it, so what follows is read.
     // At the head of a line that interrupts no paragraph it starts an HTML block in marked too, and is complete there.
-    if (model === 'marked' && /<![A-Za-z]+(?![A-Za-z\s])/y.test(text.slice(i, text.indexOf('\n', i) === -1 ? n : text.indexOf('\n', i) + 1)) && !(startsLine(i) && prevBefore !== 'other' && prevBefore !== 'marker' && !prevDefinition)) { i += 2; continue; }
+    if (model === 'marked' && declarationWithoutBlankAt(text, i) && !(startsLine(i) && prevBefore !== 'other' && prevBefore !== 'marker' && !prevDefinition)) { i += 2; continue; }
     if (text.startsWith('<!', i)) {
       const close = text.indexOf('>', i + 2);
       if (close === -1 || close + 1 > blockLimit(i)) return i;
@@ -1197,8 +1210,13 @@ function fenceRunBefore(text: string, at: number, before: number): boolean {
  * setext underline or an ATX heading), where it starts a type 7 block in CommonMark.
  */
 function markedFenceBehindBogus(text: string, at: number, close: number): number {
-  const ls = text.lastIndexOf('\n', close) + 1;
-  if (ls <= at || !/^ {0,3}<\/(?:script|style|textarea|pre)[ \t]*>$/i.test(text.slice(ls, close + 1))) return -1;
+  // The line break is looked for inside the bogus comment only, backwards from `close` and no further than `at`: a search to the start of a text
+  // with no line break made each comment cost the whole text before it (#5476, a quadratic walk on a long single line).
+  let brk = close;
+  while (brk > at && text[brk] !== '\n') brk -= 1;
+  if (brk === at) return -1;
+  const ls = brk + 1;
+  if (!/^ {0,3}<\/(?:script|style|textarea|pre)[ \t]*>$/i.test(text.slice(ls, close + 1))) return -1;
   const nl = text.indexOf('\n', close);
   const le = nl === -1 ? text.length : nl;
   if (text.slice(close + 1, le).trim() !== '') return -1;
