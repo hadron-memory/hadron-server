@@ -42,9 +42,16 @@ beforeEach(async () => {
 afterEach(() => { vi.restoreAllMocks(); resetEmbeddingClientForTests(); });
 
 describe('#435 the raw length bound, at the findNodes entry', () => {
-  it.each(['keyword', 'regex', 'vector', 'hybrid'])('%s: 513 characters is BAD_USER_INPUT, 512 is not', async (mode) => {
+  it.each(['keyword', 'vector', 'hybrid'])('%s: 513 characters is BAD_USER_INPUT, 512 is not', async (mode) => {
     expect(await code(findNodes({ query: long(513), mode, filter: { memoryRefs: [graph.id] } }))).toBe('BAD_USER_INPUT');
     expect(await code(findNodes({ query: long(512), mode, filter: { memoryRefs: [graph.id] } }))).toBeUndefined();
+  });
+
+  // #5486: regex has a tighter cap of its own (200), inside this bound; the 512 bound still refuses first above it.
+  it('regex: 513 characters is BAD_USER_INPUT, and so is anything over the 200-character regex cap; 200 is not', async () => {
+    expect(await code(findNodes({ query: long(513), mode: 'regex', filter: { memoryRefs: [graph.id] } }))).toBe('BAD_USER_INPUT');
+    expect(await code(findNodes({ query: long(201), mode: 'regex', filter: { memoryRefs: [graph.id] } }))).toBe('BAD_USER_INPUT');
+    expect(await code(findNodes({ query: long(200), mode: 'regex', filter: { memoryRefs: [graph.id] } }))).toBeUndefined();
   });
 
   it('is raised before the embed call, and nothing is truncated (a 600-character query whose first 512 would match is refused)', async () => {

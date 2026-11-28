@@ -15,6 +15,7 @@ import type { AddressInfo } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbAgentSubscription } from '../test/helpers.js';
+import { REGEX_SEARCH_CLASS } from '../lib/rateLimit/index.js';
 import { generateId } from '../lib/id.js';
 import { APP_KEY_PREFIX, USER_API_KEY_PREFIX, hashAppKey, hashUserApiKey } from '../middleware/auth.js';
 import { closeServerIfStarted, createServerOnCleanDb } from '../test/startServerFixture.js';
@@ -344,6 +345,8 @@ const leaks = (out: string, sent: string, t: Target) => [
 async function probe(d: Door, c: Caller, t: Target, w: World) {
   const real = globalThis.fetch;
   let sent = '';
+  // #5486: this matrix probes disclosure, not the regex throttle (10 a minute per caller), which one caller's many probes would trip.
+  await db.rateLimitBucket.deleteMany({ where: { fieldClass: REGEX_SEARCH_CLASS } });
   const spy = vi.spyOn(globalThis, 'fetch').mockImplementation((u, i) => { sent += String(i?.body ?? ''); return real(u, i); });
   try {
     const out = await d.run(c, t, w);
