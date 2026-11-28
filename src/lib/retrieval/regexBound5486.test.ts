@@ -19,7 +19,7 @@ const untilRoom = () => new Promise<void>((r) => setTimeout(r, rateWindowWaitMs(
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
 describe('#5486 SEC10 P2-1: a leading option that selects the basic or extended syntax is refused', () => {
-  it.each([String.raw`(?b)\(a\)[\]\1`, String.raw`(?bi)\(a\)[\]\1`, '(?e)a', '(?ie)a', '(?x)(a)#[\n\\1]', '(?ix)(a)#[\n\\1]', '***:(?x)(a)#[\n\\1]', '(?x)a b', '***:(?b)a', '(?i)(?b)a'])('refuses %s', (p) => {
+  it.each([String.raw`(?b)\(a\)[\]\1`, String.raw`(?bi)\(a\)[\]\1`, '(?e)a', '(?ie)a', '(?x)(a)#[\n\\1]', '(?ix)(a)#[\n\\1]', '***:(?x)(a)#[\n\\1]', '(?x)a#[b\n(a)\\1', '(?x)a b', '***:(?b)a', '(?i)(?b)a'])('refuses %s', (p) => {
     expect(selectsNonAreSyntax(p)).toBe(true);
     expect(() => assertRegexPatternAllowed(p)).toThrow(/basic, extended or expanded/);
   });
