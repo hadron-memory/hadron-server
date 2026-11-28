@@ -45,6 +45,10 @@ LANGUAGE plpgsql AS $capture$
 DECLARE
   v_branch text;
 BEGIN
+  -- #5469: a node that goes owes no file write. Drop its WRITE debt (every branch) first, so the sweep can never apply a
+  -- WRITE after this REMOVE; the REMOVE below is the only debt that survives. Not gated on eligibility: a row for a
+  -- memory that stopped being mirrored is just as dead, and a cascade from a deleted memory removes it anyway.
+  DELETE FROM git_mirror_obligations WHERE memory_id = OLD.memory_id AND node_id = OLD.id AND kind = 'WRITE';
   SELECT COALESCE(write_branch, 'hadron-updates') INTO v_branch
   FROM memories
   WHERE id = OLD.memory_id AND source IS NOT NULL AND NOT is_encrypted
@@ -94,3 +98,78 @@ DROP TRIGGER IF EXISTS git_mirror_node_remove_restore ON nodes;
 CREATE TRIGGER git_mirror_node_remove_restore AFTER UPDATE OF deleted_at ON nodes
   FOR EACH ROW WHEN (OLD.deleted_at IS NOT NULL AND NEW.deleted_at IS NULL)
   EXECUTE FUNCTION hadron_git_mirror_cancel_node_removal();
+
+-- #5469 (the rest of #430; Holger 2026-11-16, option a): a node WRITE owes the repository its file. The ordinary mirror is a
+-- fire-and-forget call after the write commits, so a process that dies between the commit and the attempt left no row for
+-- the sweep to retry. This trigger records the debt in the writer's own transaction, as a PENDING WRITE obligation the
+-- existing sweep applies (it reads the node fresh), and a successful ordinary mirror settles it (settleMirrorObligations
+-- deletes rows whose attempt_seq is below the attempt's).
+--
+-- Fires on INSERT, and on UPDATE of exactly the columns the mirrored file carries (FrontmatterNodeFields plus the body, as
+-- writeNodeToGit serializes them); a WHEN requires one of them to differ, so an update of only embedding, token, revision,
+-- approval, mint or updated_* columns captures nothing (the hot path: the function body never runs for them). A live
+-- node only (a deleted one owes the REMOVE capture above), and never a root (loc ''): its file is the memory's README.
+-- Edges are in the frontmatter but live in `edges`, so an edges-only change is NOT captured here (a stated limit).
+--
+-- Eligibility is the REMOVE capture's, in one primary-key lookup on memories: Git-sourced, unencrypted, org-owned, live
+-- memory with no {client} template branch. A memory deleted ahead of its nodes owes nothing, which keeps a memory delete
+-- and a write inside the same transaction from aborting on the obligations foreign key (cor:api:190:02: a dying
+-- repository never fails the database write). The capture never raises for a condition it can see; it only inserts.
+--
+-- The row's key is (memory_id, node_id, 'WRITE', '', branch), so repeated writes of one node collapse to one row. On a
+-- conflict the row is re-fenced rather than left alone: attempt_seq takes a new nextval, so an attempt that numbered itself
+-- before this write (and so may have read the node before it) cannot delete the row, and an EXHAUSTED row (which the sweep
+-- no longer selects) is re-armed to PENDING with one attempt, because the new write would otherwise be lost. A FAILED or
+-- NOT_CLONED row keeps its state, attempts and backoff clock. The number comes from the sequence, never a clock
+-- (findings:mirror-retry-throw-must-retain-attempt-fence). A known limit (cor:int:010:01): a sync that runs before the
+-- sweep can still replace the write, as with an owed removal.
+CREATE OR REPLACE FUNCTION hadron_git_mirror_capture_node_write() RETURNS trigger
+LANGUAGE plpgsql AS $capture_write$
+DECLARE
+  v_branch text;
+BEGIN
+  SELECT COALESCE(write_branch, 'hadron-updates') INTO v_branch
+  FROM memories
+  WHERE id = NEW.memory_id AND source IS NOT NULL AND NOT is_encrypted
+    AND organization_id IS NOT NULL AND deleted_at IS NULL
+    AND position('{client}' in COALESCE(write_branch, 'hadron-updates')) = 0;
+  IF NOT FOUND THEN
+    RETURN NULL;
+  END IF;
+  INSERT INTO git_mirror_obligations
+    (memory_id, node_id, kind, remove_loc, branch, state, error_class, attempts, attempt_seq, last_attempt_at)
+  VALUES
+    (NEW.memory_id, NEW.id, 'WRITE', '', v_branch, 'PENDING', 'PENDING', 1,
+     nextval('git_mirror_attempt_seq'), (now() AT TIME ZONE 'UTC'))
+  ON CONFLICT (memory_id, node_id, kind, remove_loc, branch) DO UPDATE SET
+    attempt_seq = EXCLUDED.attempt_seq,
+    state = CASE WHEN git_mirror_obligations.state::text = 'EXHAUSTED' THEN 'PENDING'::git_mirror_obligation_state
+                 ELSE git_mirror_obligations.state END,
+    error_class = CASE WHEN git_mirror_obligations.state::text = 'EXHAUSTED' THEN 'PENDING' ELSE git_mirror_obligations.error_class END,
+    attempts = CASE WHEN git_mirror_obligations.state::text = 'EXHAUSTED' THEN 1 ELSE git_mirror_obligations.attempts END,
+    last_attempt_at = CASE WHEN git_mirror_obligations.state::text = 'EXHAUSTED' THEN EXCLUDED.last_attempt_at
+                           ELSE git_mirror_obligations.last_attempt_at END;
+  RETURN NULL;
+END
+$capture_write$;
+
+DROP TRIGGER IF EXISTS git_mirror_node_write_insert ON nodes;
+CREATE TRIGGER git_mirror_node_write_insert AFTER INSERT ON nodes
+  FOR EACH ROW WHEN (NEW.deleted_at IS NULL AND NEW.loc <> '')
+  EXECUTE FUNCTION hadron_git_mirror_capture_node_write();
+
+DROP TRIGGER IF EXISTS git_mirror_node_write_update ON nodes;
+CREATE TRIGGER git_mirror_node_write_update AFTER UPDATE OF
+  name, alias, loc, node_type, object_type, description, abstract, abstract_origin_hash, content, content_hash, tags, seq,
+  data, properties, role, is_runnable, is_placeholder, authorship_kind, authored_by_task, authored_by_revision ON nodes
+  FOR EACH ROW WHEN (NEW.deleted_at IS NULL AND NEW.loc <> '' AND (
+    OLD.name IS DISTINCT FROM NEW.name OR OLD.alias IS DISTINCT FROM NEW.alias OR OLD.loc IS DISTINCT FROM NEW.loc OR
+    OLD.node_type IS DISTINCT FROM NEW.node_type OR OLD.object_type IS DISTINCT FROM NEW.object_type OR
+    OLD.description IS DISTINCT FROM NEW.description OR OLD.abstract IS DISTINCT FROM NEW.abstract OR
+    OLD.abstract_origin_hash IS DISTINCT FROM NEW.abstract_origin_hash OR OLD.content IS DISTINCT FROM NEW.content OR
+    OLD.content_hash IS DISTINCT FROM NEW.content_hash OR OLD.tags IS DISTINCT FROM NEW.tags OR OLD.seq IS DISTINCT FROM NEW.seq OR
+    OLD.data IS DISTINCT FROM NEW.data OR OLD.properties IS DISTINCT FROM NEW.properties OR OLD.role IS DISTINCT FROM NEW.role OR
+    OLD.is_runnable IS DISTINCT FROM NEW.is_runnable OR OLD.is_placeholder IS DISTINCT FROM NEW.is_placeholder OR
+    OLD.authorship_kind IS DISTINCT FROM NEW.authorship_kind OR OLD.authored_by_task IS DISTINCT FROM NEW.authored_by_task OR
+    OLD.authored_by_revision IS DISTINCT FROM NEW.authored_by_revision))
+  EXECUTE FUNCTION hadron_git_mirror_capture_node_write();
