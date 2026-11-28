@@ -73,7 +73,7 @@ export function branchRestrictionWhere(branches: BranchScopes): Record<string, u
  * The node-scope `where` for a surface that reads whole memories `whole` plus the branch memories: `{ memoryId: { in: whole } }`
  * when there is no branch, else an `OR` of that arm and the branch arms.
  */
-export function nodeScopeWhere(whole: readonly string[], branches: BranchScopes): Record<string, unknown> {
+export function branchAwareScopeWhere(whole: readonly string[], branches: BranchScopes): Record<string, unknown> {
   const arms = branchNodeWhereArms(branches);
   if (arms.length === 0) return { memoryId: { in: [...whole] } };
   return { OR: [{ memoryId: { in: [...whole] } }, ...arms] };

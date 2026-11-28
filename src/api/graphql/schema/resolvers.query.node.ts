@@ -75,7 +75,7 @@ import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 import { resolveGrantRef } from '../../../lib/entityRef/grantRef.js';
 import { getGrantForWorker } from '../../../lib/grants/read.js';
 import { branchAdmitsLoc } from '../../../lib/grants/readGrant.js';
-import { nodeScopeWhere, branchesWithin, branchSqlRows, branchRestrictionWhere, NO_BRANCHES, type BranchScopes } from '../../../lib/grants/branchRead.js';
+import { branchAwareScopeWhere, branchesWithin, branchSqlRows, branchRestrictionWhere, NO_BRANCHES, type BranchScopes } from '../../../lib/grants/branchRead.js';
 import { resolveGrantReader } from './resolvers.grant.js';
 import { requireWorkerProfileAccess } from './resolvers.worker.js';
 import { withReadableTask } from './resolvers.agentTask.js';
@@ -1465,7 +1465,7 @@ export const nodeQueries = {
       // soft-deleted rows so node(ref:) matches resolveUrn.
       const candidates = await ctx.db.node.findMany({
         // loc-scope-ok: deliberately cross-memory — scoped to the caller's readable set by ...access, then fails loud with AMBIGUOUS_NODE_LOC on >1 (#335)
-        where: { loc: value, ...nodeScopeWhere(accessIdsOf(access), branches), deletedAt: null },
+        where: { loc: value, ...branchAwareScopeWhere(accessIdsOf(access), branches), deletedAt: null },
         include,
       });
       if (candidates.length === 0) return null;
