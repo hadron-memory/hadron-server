@@ -712,9 +712,15 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
-      "name": "chk_nodes_compiled_boot_prompt_role",
+      "name": "chk_nodes_compiled_boot_prompt_kind",
       "kind": "check-constraint",
       "file": "boot-prompt-invariants.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
+      "name": "chk_nodes_task_role_runnable",
+      "kind": "check-constraint",
+      "file": "task-role-family.sql",
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
@@ -2153,6 +2159,12 @@
     },
     {
       "name": "nodes_memory_segment_key_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
+    },
+    {
+      "name": "nodes_memory_segment_key_with_system_idx",
       "kind": "index",
       "file": "post-push.sql",
       "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."

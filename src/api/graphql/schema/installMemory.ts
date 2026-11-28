@@ -487,7 +487,7 @@ export const INSTALL_REVIEWED_NO_LOAD_FIELDS: Readonly<Record<string, string>> =
   tags: 'carried as [] on the concealed parent; deserializeTags is pure over it',
   specLint: 'content is undefined on the sparse parent, so the resolver nulls before linting (resolvers.types.ts Node.specLint)',
   content: 'the stored text is absent from the concealed parent, so resolveNodeContent returns it before any include/template/access machinery can run',
-  lintWarnings: 'role is absent from the concealed parent, so lintSourceWarnings returns [] with no query; the compiled branch needs nodeType compiled-boot-prompt, which a generic write door refuses and a compile never returns (its write projection is discarded for a full re-read), so no concealed write response carries one',
+  lintWarnings: 'role is absent from the concealed parent, so lintSourceWarnings returns [] with no query; the compiled branch needs the role prompt.boot.compiled too, which a generic write door refuses and a compile never returns (its write projection is discarded for a full re-read), so no concealed write response carries one',
 };
 
 /**

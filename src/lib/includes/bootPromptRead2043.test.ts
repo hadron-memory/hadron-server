@@ -12,7 +12,7 @@ import { generateId } from '../id.js';
 import { typeDefs } from '../../api/graphql/schema/typeDefs.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from '../../mcp/server.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE } from '../bootPrompt.js';
+import { BOOT_PROMPT_COMPILED_ROLE, BOOT_PROMPT_NODE_TYPE } from '../bootPrompt.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -69,7 +69,7 @@ describe('a direct read of a boot-prompt node (cor:dmo:150:08)', () => {
   });
 
   it('the compiled node reads literal too', async () => {
-    await mk('compiled', `${PLATFORM} ${LEGACY}`, { role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE });
+    await mk('compiled', `${PLATFORM} ${LEGACY}`, { role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE });
     expect(await read('compiled')).toBe(`${PLATFORM} ${LEGACY}`);
   });
 

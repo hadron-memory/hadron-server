@@ -223,9 +223,9 @@ describe('governed kinds and the role input (#4864)', () => {
     expect(await totals()).toEqual(before);
   });
 
-  it('the MCP door takes no role: a stray one is dropped and the node carries none', async () => {
+  it('the MCP door takes no role: a stray one is dropped and the node carries the role task the door writes (#5485)', async () => {
     await mcp(admin, 'hadron_create_task', { urn: nodeUrn(sysMem, 'tasks:deploy'), name: 'Deploy', content: 'steps', agent: agent.id, trigger: 'when deploying', role: 'role-task' });
-    expect((await nodesAt('tasks:deploy'))[0].role).toBeNull();
+    expect((await nodesAt('tasks:deploy'))[0].role).toBe('task');
   });
 });
 

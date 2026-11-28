@@ -8,7 +8,7 @@ import { currentActor } from '../../../lib/requestActor.js';
 import { edgeDisplayOrder } from '../../../lib/edgeOrder.js';
 import { foreignEdgeMemoryIds } from '../../../lib/foreignEdgeMemories.js';
 import { assertBootPromptWriteAllowedOrGranted, spendEditGrantFor, graphqlEditFacts, withUpdateNodeDoor } from '../../../lib/grants/bootPromptGrant.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertBootPromptWriteAllowed, assertNoBootPromptRows, inCompileScope, isBootPromptRole } from '../../../lib/bootPrompt.js';
+import { assertBootPromptWriteAllowed, assertNoBootPromptRows, inCompileScope, isBootPromptItselfRole, isCompiledBootPrompt } from '../../../lib/bootPrompt.js';
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentError, commentGovernedError } from '../../../lib/comments/index.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, restoreThreadsOfTargets, softDeleteThreadsOfTargets } from '../../../lib/comments/lifecycle.js';
 import { questionContainedError, isQuestionFamilyRole, refuseQuestionFamily, refuseUnderQuestionLog } from '../../../lib/questions/index.js';
@@ -41,6 +41,7 @@ import { resolveTaskIndexEdge, withClaudeSkillExport, type TaskIndexInput, type 
 import { assertEdgeSourceWritersById, assertRoleWritersForNodes, assertRoleWritersForWrite, lockEdgeUnderSourceWriters, roleWritersRefusal } from '../../../lib/nodeRoleWriters.js';
 import { assertPlaceholderKeepsSpecRole, placeholderFillPatch } from '../../../lib/specCorpus.js';
 import { carryGovernedSignals } from '../../../lib/governedSignals.js';
+import { taskDoorRole } from '../../../lib/instructionRoles.js';
 import { computeContentHash } from '../../../lib/contentHash.js';
 import { decryptReadableRevisions } from '../../../lib/nodeRevisionRead.js';
 import {
@@ -673,6 +674,14 @@ async function writeNodeCoreRaw(
       // tombstoned probe keeps its NODE_NOT_FOUND below.
       if (mode === 'update' && !opts?.targetNodeId && existing && !existing.deletedAt) {
         opts = { ...opts, targetNodeId: existing.id };
+      }
+
+      // #5485 (Ask 1) — the task doors give a runnable node the role `task` when it has none, and a task retired
+      // through its door leaves no task-family role behind (the database refuses one on a row that is not runnable).
+      // Before the governed gate, so that gate and every later check judge the role that will be written.
+      if (opts?.ownsKind === 'task') {
+        const role = taskDoorRole(mode === 'update' ? 'update' : 'create', existing, input);
+        if (role !== undefined) input = { ...input, role };
       }
 
       // #1201 — the GOVERNED-KIND gate, on the RESULTING STATE.
@@ -3287,7 +3296,8 @@ export const nodeMutations = {
         // #1606 — a comment is governed too (cor:dmo:110:04): skipped, reported as governed.
         if (governedKindsOf({ role: row.role, isRunnable: row.isRunnable }).length > 0 || row.nodeType === COMMENT_NODE_TYPE
           // #2043 — compiled boot prompts are written only by a compile; a worker session also skips sources.
-          || row.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE || (isBootPromptRole(row.role) && currentActor().workerId != null)) {
+          // #5453 — compiled by role; the worker-session skip reaches a boot prompt itself, never a rule (PR A).
+          || isCompiledBootPrompt(row) || (isBootPromptItselfRole(row.role) && currentActor().workerId != null)) {
           skipCounts.governed += 1;
           continue;
         }

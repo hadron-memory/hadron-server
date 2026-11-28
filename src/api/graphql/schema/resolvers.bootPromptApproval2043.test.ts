@@ -20,7 +20,7 @@ import { runAsActor } from '../../../lib/requestActor.js';
 import { runAuthContext } from '../../../lib/auth/runPrincipal.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
+import { BOOT_PROMPT_COMPILED_ROLE, BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
 import { bootPromptApprovalGate } from '../../../lib/bootPromptApproval.js';
 import { resolvers } from './resolvers.js';
 import type { Context } from './resolvers.helpers.js';
@@ -132,7 +132,7 @@ describe('#2043 S6 — the manager approves a placed boot prompt, as themselves'
   it('a compiled node in the Agent system memory takes the same gate', async () => {
     const f = await fixture();
     const node = await withCompileWrite(() => db.node.create({
-      data: { id: generateId(), memoryId: f.agentMem.id, loc: 'boot:compiled', name: 'Compiled', content: 'c', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
+      data: { id: generateId(), memoryId: f.agentMem.id, loc: 'boot:compiled', name: 'Compiled', content: 'c', role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE },
     }));
     expect(await codeOf(approve(node.id, ctxOf(f.admin.id)))).toBe('NO_ERROR');
   });
@@ -267,10 +267,11 @@ describe('#2043 S6 — an outside approval ends when its node enters the placed 
     expect(await db.nodeRevision.count({ where: { nodeId, approvalHash: { not: null } } })).toBe(0);
   };
 
-  it('the migration carries prisma/boot-prompt-approval-invariants.sql verbatim', () => {
+  it('the definition-node-roles migration carries prisma/boot-prompt-approval-invariants.sql verbatim', () => {
     const root = fileURLToPath(new URL('../../../../prisma/', import.meta.url));
     const guard = readFileSync(join(root, 'boot-prompt-approval-invariants.sql'), 'utf8');
-    const migration = readFileSync(join(root, 'migrations/20261022010100_boot_prompt_approval_entry/migration.sql'), 'utf8');
+    // #5453: the invariants were re-keyed to the boot-prompt kinds, and that migration carries the new text (last).
+    const migration = readFileSync(join(root, 'migrations/20261128010000_definition_node_roles/migration.sql'), 'utf8');
     expect(migration.endsWith(guard)).toBe(true);
   });
 

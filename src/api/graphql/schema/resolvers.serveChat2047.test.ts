@@ -8,7 +8,7 @@ import { db } from '../../../integrations/db/client.js';
 import { chatNodeByLocOrThrow, cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
+import { BOOT_PROMPT_COMPILED_ROLE, BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
 import { sha256Hex, type CompiledProvenance } from '../../../lib/bootCompile/provenance.js';
 import { resolvers, type Context } from './resolvers.js';
 import { recordChatServedIfChanged, serveChatPrompt } from './resolvers.mutation.chat.js';
@@ -30,7 +30,7 @@ async function approve(nodeId: string) {
   await db.node.update({ where: { id: nodeId }, data: { approvedRevNo: n.revSeq, approvedAt: new Date(), approvedByInfo: 't', approvalHash: computeApprovalHash({ title: n.name, abstract: n.abstract, content: n.content }) } });
 }
 async function compiled(content: string) {
-  const node = await withCompileWrite(() => db.node.create({ data: { id: generateId(), memoryId: systemMemoryId, loc: 'boot:compiled', name: 'compiled', content, role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE } }));
+  const node = await withCompileWrite(() => db.node.create({ data: { id: generateId(), memoryId: systemMemoryId, loc: 'boot:compiled', name: 'compiled', content, role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE } }));
   await db.compiledPromptRevision.create({ data: { compiledNodeId: node.id, compiledRevNo: 1, contentHash: sha256Hex(content), targetKind: 'AGENT', targetAgentId: agent.id, provenance: provenance() as never, occurrenceCount: 1 } });
   await approve(node.id);
   await db.agent.update({ where: { id: agent.id }, data: { bootPromptNodeId: node.id, bootPromptUrn: `u:${node.id}` } });

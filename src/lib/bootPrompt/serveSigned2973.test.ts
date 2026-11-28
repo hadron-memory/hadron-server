@@ -16,7 +16,7 @@ import { insertSoftPasskey, softPasskey } from '../../test/softPasskey.js';
 import { generateId } from '../id.js';
 import { computeApprovalHash } from '../approvalHash.js';
 import { NEWEST_APPROVED_REVISION_SCAN_BATCHES, NEWEST_APPROVED_REVISION_SCAN_CAP } from '../nodeApproval.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../bootPrompt.js';
+import { BOOT_PROMPT_COMPILED_ROLE, BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../bootPrompt.js';
 import { sha256Hex, type CompiledProvenance } from '../bootCompile/provenance.js';
 import { signaturePayloadBytes, SIGNATURE_PAYLOAD_V3 } from '../signing/payload.js';
 import { clearSignatureVerifyCache } from '../signing/verify.js';
@@ -74,7 +74,7 @@ const prov = (hash: string): CompiledProvenance => ({
 /** A compiled node at revision 1 holding `content`, with its compile row. Approved when `approve`. */
 async function compiled(content: string, approve = true) {
   const node = await withCompileWrite(() => db.node.create({
-    data: { id: generateId(), memoryId, loc: `boot:${generateId().slice(0, 6)}`, name: 'compiled', content, role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
+    data: { id: generateId(), memoryId, loc: `boot:${generateId().slice(0, 6)}`, name: 'compiled', content, role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE },
   }));
   await db.compiledPromptRevision.create({
     data: { compiledNodeId: node.id, compiledRevNo: 1, contentHash: sha256Hex(content), targetKind: 'AGENT', targetAgentId: agentId, provenance: prov(sha256Hex('src')) as never, occurrenceCount: 1 },

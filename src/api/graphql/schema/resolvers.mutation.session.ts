@@ -134,7 +134,8 @@ import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE } from '../../../lib/bootPrompt.js';
+import { isTaskRole, modernTaskKind } from '../../../lib/instructionRoles.js';
+import { COMPILED_BOOT_PROMPT_WHERE, NOT_COMPILED_BOOT_PROMPT_WHERE, isCompiledBootPrompt, modernBootPromptKind } from '../../../lib/bootPrompt.js';
 import { effortFromToken, fillEmptyAppliedRunSettings, isEffortLevel, recordRunSettings, type EffortLevel } from '../../../lib/agentTasks/runSettings.js';
 import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
 import { forbiddenError, notFoundError } from '../../../lib/refusals.js';
@@ -2821,11 +2822,12 @@ export const sessionMutations = {
           // each one as it is. It is not tombstoned here (a retired compiled node would refuse every bind,
           // cor:agt:040:10), not written below, and a snapshot's copy of one is ignored.
           //
-          // #4313: every statement of this step leaves compiled rows out BY TYPE, in its own WHERE. It used to leave
+          // #4313: every statement of this step leaves compiled rows out BY ROLE (#5453; by type before), in its own WHERE. It used to leave
           // them out by ids from an earlier read. Before S2 coordinated restore and compile, a compile between
           // those reads could be tombstoned or lose its edges. Direct writes outside the memory-key protocol can
           // still interleave, so no statement here depends on an earlier snapshot of compiled rows.
-          const notCompiled = { nodeType: { not: COMPILED_BOOT_PROMPT_NODE_TYPE } };
+          // NULL-safe: most rows have no role, and a bare `role <> …` would leave every one of them out too.
+          const notCompiled = { AND: [NOT_COMPILED_BOOT_PROMPT_WHERE] };
           const live = await tx.node.findMany({
             where: { memoryId: sysMemId, deletedAt: null, ...notCompiled, NOT: { loc: { startsWith: 'revisions' } } },
             select: { id: true, loc: true },
@@ -2854,12 +2856,14 @@ export const sessionMutations = {
           // The compiled rows as they are NOW, after the tombstone step: `compiled` holds every loc one sits at,
           // retired ones included, plus the locs the snapshot holds one at. None of them is written below.
           const compiledRows = await tx.node.findMany({
-            where: { memoryId: sysMemId, nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
+            where: { memoryId: sysMemId, ...COMPILED_BOOT_PROMPT_WHERE },
             select: { id: true, loc: true },
           });
+          // #5453: a snapshot's copy is compiled by its role, or, in a snapshot published before the migration, by
+          // the retired node type (`modernBootPromptKind` reads both as today's compiled role).
           const compiled = new Set([
             ...compiledRows.map((n) => n.loc),
-            ...snapshot.nodes.filter((n) => n.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE).map((n) => n.loc as string),
+            ...snapshot.nodes.filter((n) => isCompiledBootPrompt(modernBootPromptKind({ nodeType: n.nodeType as string | null | undefined, role: n.role as string | null | undefined }))).map((n) => n.loc as string),
           ]);
 
           // Restore nodes from snapshot (upsert to handle soft-deleted rows
@@ -2876,9 +2880,17 @@ export const sessionMutations = {
           for (const n of restoreOrder) {
             const loc = n.loc as string;
             let clearRestoredAuthorship = false;
+            // #5453: a snapshot published before the migration holds a source as `info` / `boot-prompt` and a rule as
+            // `info` / `boot-prompt-rule`. Restoring writes today's kind, never the old type or the bare role back.
+            // #5485: and before the task role family a task was typed `task` with the role `role-task`, a process `info`: an
+            // Agent system memory is a system placement, so both come back `system`, with today's role.
+            const kind = modernTaskKind(
+              modernBootPromptKind({ nodeType: (n.nodeType as string) ?? 'system', role: (n.role as string | null | undefined) ?? null }),
+              { systemPlacement: true },
+            );
             const nodeData = {
               name: n.name as string,
-              nodeType: (n.nodeType as string) ?? 'system',
+              nodeType: kind.nodeType,
               description: (n.description as string) ?? null,
               content: (n.content as string) ?? null,
               data: (n.data ?? null) as InputJsonValue,
@@ -2904,7 +2916,7 @@ export const sessionMutations = {
               }
               // #4313: a compile wrote a compiled prompt at this address after the compiled rows were read above.
               // The row is locked now, and it is the compile's: leave it as it is.
-              if (current.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE) {
+              if (isCompiledBootPrompt(current)) {
                 // Known as a compiled address from here on: an edge TO it is still restored (the id is in the
                 // map), and a snapshot edge FROM this address is the ordinary node's, not the compiled prompt's.
                 compiled.add(loc);
@@ -2930,7 +2942,9 @@ export const sessionMutations = {
             const upserted = await tx.node.upsert({
               where: { loc_memoryId: { loc, memoryId: sysMemId } },
               // #4244: a row made anew takes the snapshot's role; over an existing row the live role stays.
-              create: { id: generateId(), memoryId: sysMemId, loc, ...nodeData, role: (n.role as string | null | undefined) ?? null },
+              // #5485: a task role is only on a runnable row (chk_nodes_task_role_runnable), and a snapshot carries no
+              // `isRunnable`: a node made anew with a task role was a task, so it is made runnable.
+              create: { id: generateId(), memoryId: sysMemId, loc, ...nodeData, role: kind.role, ...(isTaskRole(kind.role) ? { isRunnable: true } : {}) },
               update: {
                 ...nodeData,
                 ...(clearRestoredAuthorship ? clearNodeAuthorship() : {}),

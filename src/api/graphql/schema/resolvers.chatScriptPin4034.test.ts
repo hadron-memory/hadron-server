@@ -191,7 +191,7 @@ describe('#4034 a pinned chat reads its script from the pinned revision', () => 
       condition: { '==': [1, 1] }, priority: 4,
     });
     const revLoc = (await resolvers.Mutation.createRevision({}, { agentRef: agent.id }, adminCtx())).revisionLoc;
-    // The served boot prompt fixture is a compiled node a restore cannot rewrite (chk_nodes_compiled_boot_prompt_role);
+    // The served boot prompt fixture is a compiled node a restore cannot rewrite (only a compile writes one, #4244);
     // it is not part of what this pin is about, so the revision under test leaves it out.
     const revNode = await db.node.findFirstOrThrow({ where: { memoryId: systemMemory.id, loc: revLoc } });
     const revData = revNode.data as any;

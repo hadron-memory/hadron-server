@@ -191,7 +191,7 @@ describe('#2458 changeWorkerAgent: refusals change nothing', () => {
     expect(libAgent.systemMemoryId && newRow.systemMemoryId).toBeTruthy();
     const included = await db.node.create({ data: { id: generateId(), memoryId: libAgent.systemMemoryId!, loc: 'policies:shared', name: 'p', content: 'lib text' } });
     const source = await db.node.create({ data: { id: generateId(), memoryId: newRow.systemMemoryId!, loc: 'boot:source', name: 'src', content: 'src', role: 'boot-prompt' } });
-    const compiled = await db.node.create({ data: { id: generateId(), memoryId: newRow.systemMemoryId!, loc: 'boot:compiled', name: 'c', content: 'compiled', role: 'boot-prompt', nodeType: 'compiled-boot-prompt' } });
+    const compiled = await db.node.create({ data: { id: generateId(), memoryId: newRow.systemMemoryId!, loc: 'boot:compiled', name: 'c', content: 'compiled', role: 'prompt.boot.compiled', nodeType: 'system' } });
     const occ = (order: number, nodeId: string, kind: string, parent: number | null, depth: number) =>
       ({ order, depth, parent, kind, nodeId, revNo: 1, hash: sha256Hex(nodeId), selection: { rev: null, approved: false, signed: false } });
     await db.compiledPromptRevision.create({ data: {

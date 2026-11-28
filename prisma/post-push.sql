@@ -542,6 +542,14 @@ CREATE INDEX IF NOT EXISTS nodes_memory_segment_key_eligible_idx
   ON nodes (memory_id, ((replace(loc, ':', chr(1))) COLLATE "C"))
   WHERE deleted_at IS NULL AND node_type <> ALL(ARRAY['system','chat-message','comment']) AND loc <> '';
 
+-- #5452: its twin for a segments read that asked for system nodes (includeSystemNodes): system rows in, chat-message
+-- and comment rows still out. Same definition as migration 20261127234000_nodes_segment_key_with_system_index, which
+-- builds it CONCURRENTLY for production (keep in lockstep; pinned). The WHERE clause is
+-- segmentEligibleSql(undefined, { includeSystemNodes: true }) in src/lib/memoryLocSegments.ts.
+CREATE INDEX IF NOT EXISTS nodes_memory_segment_key_with_system_idx
+  ON nodes (memory_id, ((replace(loc, ':', chr(1))) COLLATE "C"))
+  WHERE deleted_at IS NULL AND node_type <> ALL(ARRAY['chat-message','comment']) AND loc <> '';
+
 -- ── #719 structured/faceted query: value-cast guard functions + JSONB GIN ────
 -- Mirrors prisma/migrations/20260718120000_where_query_helpers/migration.sql
 -- (keep in lockstep). The `where` predicate compiler (src/lib/retrieval/
@@ -768,11 +776,20 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #1606 / #1607 — comment-node invariants. One source, shared verbatim with
 -- migration 20261005200000_comment_nodes (pinned by src/lib/comments/invariantsSql.test.ts).
 \ir comment-invariants.sql
+-- #5453 — the definition-node data step, then the CHECK it makes room for. One source each, both copied verbatim
+-- into migration 20261128010000_definition_node_roles (pinned by src/lib/definitionNodeRolesMigration5453.test.ts).
+-- A database that was pushed before #5453 still holds rows of the retired compiled type; the CHECK would refuse them.
+\ir definition-node-roles-backfill.sql
 \ir boot-prompt-invariants.sql
 \ir boot-prompt-pointer-invariants.sql
 \ir derived-install-prompt-pointer-invariants.sql
 \ir compiled-prompt-revision-invariants.sql
 \ir boot-prompt-approval-invariants.sql
+
+-- #5485 — the task role family, the stage 1 retype of tasks and processes, and the CHECK that keeps a task role
+-- on a runnable row. One source, copied verbatim into migration 20261128020000_task_role_family (pinned by
+-- src/lib/taskRoleFamilyMigration5485.test.ts). After the boot-prompt invariants.
+\ir task-role-family.sql
 
 -- #1655: compiled automation versions.
 \ir automation-invariants.sql

@@ -9,7 +9,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
+import { BOOT_PROMPT_COMPILED_ROLE, BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
 import { sha256Hex, type CompiledProvenance } from '../../../lib/bootCompile/provenance.js';
 import { computeSigningPreviewRows, mintSigningPreviewToken, requireFreshSigningPreview, signingPreviewDigest, dbNowMs } from '../../../lib/bootPrompt/signingSwitch.js';
 
@@ -37,7 +37,7 @@ async function install(i: number) {
   const agentId = (await db.agent.create({ data: { id: generateId(), name: `a${i}`, urn: `${org.urn}:a${i}-${generateId().slice(0, 4)}`, organizationId: org.id, systemMemoryId: memoryId } })).id as string;
   await db.appAgent.create({ data: { appId: app.id, agentId } as never });
   const content = `prompt ${i}`;
-  const node = await withCompileWrite(() => db.node.create({ data: { id: generateId(), memoryId, loc: `boot:${generateId()}`, name: 'compiled', content, role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE } }));
+  const node = await withCompileWrite(() => db.node.create({ data: { id: generateId(), memoryId, loc: `boot:${generateId()}`, name: 'compiled', content, role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE } }));
   await db.compiledPromptRevision.create({ data: { compiledNodeId: node.id, compiledRevNo: 1, contentHash: sha256Hex(content), targetKind: 'AGENT', targetAgentId: agentId, provenance: prov() as never, occurrenceCount: 1 } });
   const n = await db.node.findUniqueOrThrow({ where: { id: node.id } });
   await db.node.update({ where: { id: node.id }, data: { approvedRevNo: n.revSeq, approvedAt: new Date(), approvedByInfo: 't', approvalHash: computeApprovalHash({ title: n.name, abstract: n.abstract, content: n.content }) } });

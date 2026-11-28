@@ -24,8 +24,8 @@ import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../generated/prisma/index.js';
 import { managesAgent, managesApp } from '../auth/appManagement.js';
 import {
-  COMPILED_BOOT_PROMPT_NODE_TYPE, assertBootPromptWriteAllowed, boundWorkerId, bootPromptWorkerSessionError,
-  inCompileScope, isBootPromptRole,
+  assertBootPromptWriteAllowed, boundWorkerId, bootPromptWorkerSessionError,
+  inCompileScope, isBootPromptSourceRole,
 } from '../bootPrompt.js';
 import { coverableAction, findCoveringGrants, spendGrant } from './cover.js';
 
@@ -182,7 +182,7 @@ export async function hasBatchGrant(q: Q, workerId: string, node: BootPromptNode
   return (await findBatchGrant(q, workerId, node, lock)) !== null;
 }
 
-type Prior = { id: string; memoryId: string; loc: string; nodeType?: string | null; role?: string | null };
+type Prior = { id: string; memoryId: string; loc: string; nodeType?: string | null; role: string | null };
 /** `otherFields`: the names of the fields the write SUPPLIES besides its text (and the identifiers that locate the node). */
 type Next = {
   nodeType?: string | null; role?: string | null; otherFields: readonly string[];
@@ -216,7 +216,7 @@ export function suppliedNonTextFields(input: Record<string, unknown>): string[] 
  * not compiled), and the write leaves its role and node type as they are. Anything else is refused as before.
  */
 export function isGrantableEdit(prior: Prior | null | undefined, next: Next): boolean {
-  if (!prior || !isBootPromptRole(prior.role) || prior.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE) return false;
+  if (!prior || !isBootPromptSourceRole(prior.role)) return false;
   if (next.role !== undefined && next.role !== prior.role) return false;
   if (next.nodeType !== undefined && next.nodeType !== prior.nodeType) return false;
   // Text in place only (V46): a name, properties, tags, data, edges or any other field supplied alongside is a different edit.
@@ -242,7 +242,7 @@ export async function assertBootPromptWriteAllowedOrGranted(q: Q, prior: Prior |
  */
 export async function spendEditGrantFor(tx: Q, current: Prior | null | undefined, next: Next): Promise<void> {
   const workerId = boundWorkerId();
-  if (!workerId || inCompileScope() || !current || !isBootPromptRole(current.role) || current.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE) return;
+  if (!workerId || inCompileScope() || !current || !isBootPromptSourceRole(current.role)) return;
   if (!isGrantableEdit(current, next) || !(await spendEditGrant(tx, workerId, current))) throw bootPromptWorkerSessionError('update');
 }
 

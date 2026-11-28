@@ -43,6 +43,11 @@ export interface NodeSqlFilter {
   nodeType?: string | null;
   /** #3113 — an explicit, already validated list (`checkNodeTypesFilter`): `node_type = ANY(list)`. Never set together with `nodeType`. */
   nodeTypes?: string[] | null;
+  /**
+   * #5452 (cor:api:090:02) — `true` lifts `system` from the node-type default (`defaultExcludedNodeTypes`).
+   * Read only when neither `nodeType` nor `nodeTypes` is set: an explicit type filter decides alone.
+   */
+  includeSystemNodes?: boolean | null;
   /** #725 — collection discriminator facet (which domain object; e.g. "competitor"). */
   objectType?: string | null;
   isRunnable?: boolean | null;

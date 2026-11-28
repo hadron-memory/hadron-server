@@ -14,7 +14,7 @@ import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentO
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { hasBatchGrant } from '../../../lib/grants/bootPromptGrant.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
+import { BOOT_PROMPT_COMPILED_ROLE, BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
 import type { Context } from './resolvers.helpers.js';
 import { compileBootPrompt } from './compileBootPrompt.js';
 import { resolvers } from './resolvers.js';
@@ -41,7 +41,7 @@ const M = resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => P
 const source = (memoryId: string, loc: string, content = 'You are {{worker.name}}.') =>
   db.node.create({ data: { id: generateId(), memoryId, loc, name: loc, content, role: 'boot-prompt' } });
 const compiled = (memoryId: string, loc: string) => withCompileWrite(() => db.node.create({
-  data: { id: generateId(), memoryId, loc, name: 'Compiled', content: 'old', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
+  data: { id: generateId(), memoryId, loc, name: 'Compiled', content: 'old', role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE },
 }));
 const grant = (nodes: string | string[], over: Record<string, unknown> = {}) => insertGrantUnguarded({ appId, userId: admin.id } as unknown as World, {
   user_id: null, worker_id: workerId, action: BATCH, action_values: { compiledNode: nodes }, activated_at: raw(DB_NOW),
@@ -85,6 +85,19 @@ describe('compile under a batch grant', () => {
     const before = await snapshot();
     expect(await codeOf(asWorker(() => M.compileWorkerBootPrompt(null, { workerRef: workerId }, ctx())))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
     expect(await snapshot()).toEqual(before);
+  });
+
+  // #5453: "compiled" is the role now. A grant that names a node at the compiled address which is NOT compiled (a
+  // source by role, type system) admits no compile: the refusal is the batch one, before anything is assembled, and
+  // not the CONFLICT the write step would raise later.
+  it('#5453: a grant naming a node at the compiled address that is not compiled by role admits no compile', async () => {
+    await source(installId, `boot:workers:${workerId}:source`, 'v1');
+    const squat = await db.node.create({ data: { id: generateId(), memoryId: installId, loc: `boot:workers:${workerId}:compiled`, name: 'Squat', content: 'old', nodeType: BOOT_PROMPT_NODE_TYPE, role: 'prompt.boot.source' } });
+    await grant(squat.id);
+    const before = await snapshot();
+    expect(await codeOf(asWorker(() => M.compileWorkerBootPrompt(null, { workerRef: workerId }, ctx())))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+    expect(await snapshot()).toEqual(before);
+    expect((await db.node.findUniqueOrThrow({ where: { id: squat.id } })).content).toBe('old');
   });
 
   it('a grant naming the worker\'s compiled node: a new revision, many times, no pointer change, the worker recorded', async () => {
@@ -250,7 +263,7 @@ describe('the batch gate before and inside the transaction (Riana F2/F4, Anne F4
     const loc = `boot:workers:${workerId}:compiled`;
     const swap = async (tx: any) => {
       await tx.node.delete({ where: { id: c.id } });
-      await withCompileWrite(() => tx.node.create({ data: { id: generateId(), memoryId: installId, loc, name: 'Compiled', content: 'swapped', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE } }));
+      await withCompileWrite(() => tx.node.create({ data: { id: generateId(), memoryId: installId, loc, name: 'Compiled', content: 'swapped', role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE } }));
     };
     const code = await codeOf(asWorker(() => compileBootPrompt(ctx(), { kind: 'WORKER', workerId }, { seams: { beforeAssemble: swap } } as never)));
     expect(code).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');

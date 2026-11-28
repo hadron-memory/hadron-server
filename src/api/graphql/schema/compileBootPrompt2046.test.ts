@@ -62,7 +62,7 @@ describe('#2046 S9-4 — compileBootPrompt', () => {
     const r = await compileBootPrompt(ctxOf(f.admin.id), agentTarget(f));
     expect(r).toMatchObject({ loc: 'boot:compiled', revNo: 1, pointerSet: true, memoryId: f.agentMem.id, contentHash: sha256Hex('You are {{worker.name}}.') });
     const node = await db.node.findUniqueOrThrow({ where: { id: r.nodeId } });
-    expect(node).toMatchObject({ content: 'You are {{worker.name}}.', nodeType: 'compiled-boot-prompt', role: 'boot-prompt' });
+    expect(node).toMatchObject({ content: 'You are {{worker.name}}.', nodeType: 'system', role: 'prompt.boot.compiled' });
     expect((await readCompiledRevision(db, r.nodeId, 1))!.provenance.occurrences[0]).toMatchObject({ nodeId: src.id, revNo: src.revSeq });
     expect((await db.compiledPromptRevision.findUniqueOrThrow({ where: { compiledNodeId_compiledRevNo: { compiledNodeId: r.nodeId, compiledRevNo: 1 } } })).compiledBy).toBe(f.admin.id);
     const edge = await db.edge.findFirstOrThrow({ where: { sourceId: r.nodeId, name: 'compiled-from' } });
@@ -345,7 +345,7 @@ describe('#2046 S9-4 — compileBootPrompt', () => {
     const r = await compileBootPrompt(ctxOf(f.admin.id), agentTarget(f));
     const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<unknown>>;
     expect(await codeOf(M.updateNode!(null, { input: { ref: r.nodeId, content: 'forged' } }, ctxOf(f.admin.id)))).toBe('BOOT_PROMPT_COMPILED_WRITE');
-    expect(await codeOf(M.createNode!(null, { input: { memoryRef: f.agentMem.id, loc: 'boot:other', name: 'x', content: 'y', role: 'boot-prompt', nodeType: 'compiled-boot-prompt' } }, ctxOf(f.admin.id)))).toBe('BOOT_PROMPT_COMPILED_WRITE');
+    expect(await codeOf(M.createNode!(null, { input: { memoryRef: f.agentMem.id, loc: 'boot:other', name: 'x', content: 'y', role: 'prompt.boot.compiled', nodeType: 'system' } }, ctxOf(f.admin.id)))).toBe('BOOT_PROMPT_COMPILED_WRITE');
     expect((await db.node.findUniqueOrThrow({ where: { id: r.nodeId } })).content).toBe('x');
   });
 

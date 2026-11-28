@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../bootPrompt.js';
+import { BOOT_PROMPT_COMPILED_ROLE, BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../bootPrompt.js';
 import { CompiledRevisionIntegrityError, readCompiledRevision, sha256Hex, type CompiledProvenance } from './provenance.js';
 
 let agentId: string;
@@ -28,7 +28,7 @@ const provenance = (sourceId: string, revNo: number, text: string): CompiledProv
   occurrences: [{ order: 0, depth: 0, parent: null, kind: 'source', nodeId: sourceId, revNo, hash: sha256Hex(text), selection: { rev: null, approved: true, signed: true } }],
 });
 const compiledNode = (content: string) => withCompileWrite(() => db.node.create({
-  data: { id: generateId(), memoryId, loc: 'boot:compiled', name: 'Compiled', content, role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
+  data: { id: generateId(), memoryId, loc: 'boot:compiled', name: 'Compiled', content, role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE },
 }));
 const record = (nodeId: string, revNo: number, content: string, sourceRev = revNo) =>
   db.compiledPromptRevision.create({

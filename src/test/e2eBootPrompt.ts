@@ -10,7 +10,7 @@
  */
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { computeApprovalHash } from '../lib/approvalHash.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../lib/bootPrompt.js';
+import { BOOT_PROMPT_COMPILED_ROLE, BOOT_PROMPT_NODE_TYPE, BOOT_PROMPT_SOURCE_ROLE, withCompileWrite } from '../lib/bootPrompt.js';
 import { sha256Hex, type CompiledProvenance } from '../lib/bootCompile/provenance.js';
 import { ensureInstallRegisterRows } from '../lib/registerInstall.js';
 import { listAppInstallations } from '../lib/appInstallations.js';
@@ -43,11 +43,11 @@ export async function seedE2eBootPrompt(db: PrismaClient, input: E2eBootPromptIn
   const memory = await db.memory.findUniqueOrThrow({ where: { id: input.memoryId }, select: { urn: true } });
   const source = await db.node.create({ data: {
     id: input.idFor('source'), memoryId: input.memoryId, loc: `boot:${input.slot}:source`, name: `${input.slot} boot source`,
-    content, role: 'boot-prompt', tags: ['e2e'],
+    content, role: BOOT_PROMPT_SOURCE_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE, tags: ['e2e'],
   } });
   const compiled = await withCompileWrite(() => db.node.create({ data: {
     id: input.idFor('compiled'), memoryId: input.memoryId, loc: `boot:${input.slot}:compiled`, name: `${input.slot} boot prompt`,
-    content, role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE, tags: ['e2e'],
+    content, role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE, tags: ['e2e'],
   } }));
   const provenance: CompiledProvenance = {
     version: 1,

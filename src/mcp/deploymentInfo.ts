@@ -387,7 +387,37 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // `memory.write`); they are deprecated in the SDL and removed once a CLI release carrying hadron-cli#3319 ships.
 // `AutomationApproval.readGrants` is always empty (deprecated). (4) A run carrying a user id no longer reads through #2883's grant: a
 // user-backed run reads only what its user reads. (0.56.0 is #5391 and 0.57.0 is #5441, both merged first.)
-export const HADRON_SERVER_VERSION = '0.58.0';
+// 0.59.0 — ADDITIVE (#5452, cor:api:090:02, cor:api:090:05): an explicit way to read `system` nodes. New optional
+// `NodeFilter.includeSystemNodes: Boolean` on `findNodes`, the same argument on `Query.memoryLocSegments`, and the same parameter on
+// MCP `hadron_find_nodes` (and on `hadron_list_nodes`, where it is accepted and changes nothing: that tree never hid system nodes).
+// `true` lifts `system`, and only `system`, from the default node-type exclusion; `chat-message`, comments, the memory-class SYSTEM
+// default, access, soft-deleted rows and inheritance are untouched, and an explicit `nodeType` / `nodeTypes` decides alone. No default
+// changes: `false`, `null` and omitted are the answers of 0.56.0. `appNodes` / `appNodesPage` refuse either boolean with BAD_USER_INPUT
+// (a new refusal on a new field only). A client keys on this version before sending the field: an older server refuses an unknown
+// input field over GraphQL and silently drops an unknown MCP argument (hadron-portal#2695, hadron-cli#3328). (0.56.0 is #5027,
+// merged first; the open #5441 and #5447 both claim 0.57.0, so one of them takes 0.58.0.)
+// 0.60.0 — BREAKING (stored values and behaviour, no SDL change) (#5453 PR A, Holger 2026-11-27 and the renames of 2026-11-28, decision record sections 16 and 17; the Proposed lines of cor:dmo:020:04,
+// cor:agt:040:05, :06, :12, :18): every node that defines an Agent is node type `system`, and its ROLE names the kind. A compiled boot
+// prompt is `system` / `prompt.boot.compiled` (the node type `compiled-boot-prompt` is retired: no row holds it and the database refuses
+// it), a source `prompt.boot.source`, an included rule `prompt.boot.rule` (was `boot-prompt-rule`), and a chatbot's conversation, stage
+// and prompt-template nodes carry `chatbot.conversation`, `chatbot.stage`, `chatbot.prompt`. One migration retypes the existing rows. A
+// client that found a compiled prompt by `nodeType: "compiled-boot-prompt"`, or a rule by the role `boot-prompt-rule`, now finds nothing:
+// filter by role (`prompt.boot.compiled`, or the family `prompt.boot`). The retyped nodes are `system`, so an unqualified listing hides
+// them; ask for them with #5452's `includeSystemNodes` (0.59.0). A rule is in the boot-prompt family: only whoever manages its Agent or
+// App approves it, link lint applies to it, and a direct read shows its platform variables as written. Who may WRITE is unchanged: a
+// worker session still writes a rule and is still refused a source (worker sessions writing sources and compiling is PR B). The MCP
+// `nodeType` descriptions no longer list `task` or `compiled-boot-prompt`. (0.58.0 is #5404, merged first; 0.59.0 is left for #5452, the opt-in read, built in parallel.)
+// 0.62.0 — BEHAVIOUR (stored values and search defaults, no SDL change) (#5485, Holger 2026-11-28; the Proposed lines of cor:dmo:020:04,
+// cor:api:090:02): a task has a role. Every runnable node with no role is role `task`, one with `role-task` is `task.role` (a runnable
+// node with another role keeps it), the task doors write `task` when the caller gives no role, and the database refuses a task-family
+// role on a row that is not runnable (the reverse is not enforced; `isRunnable` still decides running, role rules and governance). In
+// Agent system memories and install memories every runnable node, every process-family node and the `tasks` and `processes` parents
+// are node type `system` (stage 1; other memories later). A client that found them by `nodeType: "task"` or "info" finds them by
+// `isRunnable: true` or `role: "task"` / `"process"` now. Asking for instructions lifts the `system` default: `findNodes`, MCP
+// `hadron_find_nodes` and the in-run search tool treat `isRunnable: true` or a `role` in the task, process, prompt or chatbot family
+// as an explicit ask, exactly as naming a nodeType is (chat-message nodes and the memory-class default stay excluded). The in-run
+// tool gains nodeType, nodeTypes, includeSystemNodes, isRunnable and role. (0.58.0 is #5404 on main, 0.59.0 is #5452 and 0.60.0 is #5453, both merged first.)
+export const HADRON_SERVER_VERSION = '0.62.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

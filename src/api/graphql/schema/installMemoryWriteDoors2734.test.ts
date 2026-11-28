@@ -90,7 +90,7 @@ describe.each(doors)('#2734 %s', (name, call) => {
  });
  it('preserves compile-only protection (history is allowed; bulk replacement skips)', async () => {
   const f=await fixture();
-  await db.node.update({where:{id:f.node.id},data:{nodeType:'compiled-boot-prompt',role:'boot-prompt'}});
+  await db.node.update({where:{id:f.node.id},data:{nodeType:'system',role:'prompt.boot.compiled'}});
   const before=await snapshot(f);
   if(['deleteNodeRevision','updateNodeRevision','clearNodeHistory'].includes(name)) {
    await call(f,context(f.admin.id));expect(await snapshot(f)).not.toEqual(before);
