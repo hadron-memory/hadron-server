@@ -61,7 +61,7 @@ import { bootPromptRefusal } from '../lib/bootPrompt/refusal.js';
 import { applyPlatformVariables, applyRecordedVariables } from '../lib/personaDescription.js';
 import type { NextEdgeSelection } from '../lib/runner/selectNextEdge.js';
 import { type OwnerRef, isOwnedBy, orgIdOf, ownerColumns, personalAppRunsEnabled, requireOwnerRefOf } from '../lib/owner.js';
-import { resolveRunAiConfig } from '../lib/runner/runAiConfig.js';
+import { assertRunAiConfigStillOpen, requestedAiConfigName, resolveRunAiConfig } from '../lib/runner/runAiConfig.js';
 import { EdgeConditionEvalError } from '../lib/runner/selectNextEdge.js';
 
 export const RUN_REQUESTED_SUBJECT = 'run.requested.v1';
@@ -654,9 +654,8 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   let runModel = '';
   let runKeyOwnerType: string | null = null;
   {
-    const override = args.eventData && typeof args.eventData === 'object' ? ((args.eventData as Record<string, unknown>).__aiConfigName as string | undefined) : undefined;
     try {
-      const resolvedConfig = await resolveRunAiConfig(db as PrismaClient, override ?? null, { appId: args.appId, agentId: args.agentId ?? undefined, tenant });
+      const resolvedConfig = await resolveRunAiConfig(db as PrismaClient, requestedAiConfigName(args.eventData), { appId: args.appId, agentId: args.agentId ?? undefined, tenant });
       runModel = resolvedConfig.config.model ?? '';
       runKeyOwnerType = resolvedConfig.ownerType;
     } catch (err) {
@@ -975,6 +974,28 @@ async function executeAppRunInner(
     if (live) entryAddress = emitNodeUrnV2(live.memory.urn, live.loc);
   }
   let lastToolDenial: ActivationDenial | null = null;
+  // AI config is per-run in v1 (trigger override or registry walk), resolved ONCE but LAZILY: at the first hop
+  // that needs a model (#670, cor:agt:010:04 rule 5), so an all-script path runs with none.
+  let resolved: ResolvedAiConfig | null = null;
+  // #5025 (Billing A8, Holger's ruling 3): a person's run on the platform's configuration was admitted only while charging and
+  // the credit gate were on. Once either is off it fails at its next hop with the refusal a fresh run would get (NO_AI_CONFIG),
+  // checked at the top of every hop BEFORE the automation re-check, and preferred over AUTOMATION_CHANGED wherever a consent
+  // check notices first (the pinned AI identity no longer resolves for the same reason). Returns the refusal message, or null
+  // while the level is open.
+  const personPlatformRefusal = (): string | null => {
+    if (resolved === null) return null;
+    try {
+      assertRunAiConfigStillOpen(requireOwnerRefOf(run), run.appId, resolved, requestedAiConfigName(run.eventData));
+      return null;
+    } catch (err) {
+      if (err instanceof NoAiConfigAvailableError) return err.message;
+      throw err;
+    }
+  };
+  const failPin = (err: AutomationPinError): Promise<RunOutcome> => {
+    const closed = personPlatformRefusal();
+    return closed !== null ? fail('NO_AI_CONFIG', closed) : fail(err.code, err.message, err.reason);
+  };
   const checkConsent = () => deps.checkAutomationEffect ? deps.checkAutomationEffect(run) : deps.verifyAutomation(run, run.curNodeUrn ?? entryAddress);
   try {
     await deps.verifyAutomation(run, run.curNodeUrn ?? entryAddress);
@@ -997,9 +1018,6 @@ async function executeAppRunInner(
       ? [...(run.hops as Array<Record<string, unknown>>)]
       : [];
 
-    // AI config is per-run in v1 (trigger override or registry walk), resolved ONCE but LAZILY: at the first hop
-    // that needs a model (#670, cor:agt:010:04 rule 5), so an all-script path runs with none.
-    let resolved: ResolvedAiConfig | null = null;
 
     // #2047 (S10): a run finishes under the revision it was launched with (its record), with the variable values recorded
     // then. A revision deleted since refuses `BOOT_PROMPT_RECORDED_REVISION_DELETED`, never newer text.
@@ -1019,6 +1037,8 @@ async function executeAppRunInner(
       if (hop >= MAX_RUN_HOPS) {
         return fail('MAX_HOPS_EXCEEDED', `Flow exceeded ${MAX_RUN_HOPS} hops at "${cur}" (cycle?).`);
       }
+      const closedForPerson = personPlatformRefusal();
+      if (closedForPerson !== null) return fail('NO_AI_CONFIG', closedForPerson);
       if (hop > 0) await deps.verifyAutomation(run, cur);
       const hopStartedAt = Date.now();
       if (Date.now() >= deadline) {
@@ -1037,7 +1057,7 @@ async function executeAppRunInner(
       } catch (err) {
         // A mid-flow node that can't be loaded is the D20 entry-missing
         // analog: an OBSERVABLE failed run, position preserved on the row.
-        if (err instanceof AutomationPinError) return fail(err.code, err.message, err.reason);
+        if (err instanceof AutomationPinError) return failPin(err);
         await checkConsent();
         return fail('NODE_LOAD_FAILED', String((err as Error)?.message ?? err));
       }
@@ -1276,7 +1296,7 @@ async function executeAppRunInner(
           }
         }
         // Tool-loop terminal errors (plan-tools D-TL-6) — never retried:
-        if (err instanceof AutomationPinError) return fail(err.code, err.message, err.reason);
+        if (err instanceof AutomationPinError) return failPin(err);
         if (err instanceof AuthorFailError) {
           return fail('AUTHOR_FAIL', err.message); // the author's deliberate abort
         }
@@ -1284,7 +1304,7 @@ async function executeAppRunInner(
           return fail('ACTIVATION_DENIED', err.message, lastToolDenial ? `DENIED_${lastToolDenial}` : undefined); // gate said no, mid-hop
         }
         if (err instanceof ToolExecutionError) {
-          if (err.cause instanceof AutomationPinError) return fail(err.cause.code, err.cause.message, err.cause.reason);
+          if (err.cause instanceof AutomationPinError) return failPin(err.cause);
           return fail('TOOL_FAILED', err.message); // handler threw (D21)
         }
         if (err instanceof LlmInvocationError && err.transient && Date.now() < deadline) {
@@ -1408,7 +1428,8 @@ async function executeAppRunInner(
     }
   } catch (err) {
     // Unexpected infra error: record, don't crash the listener.
-    return fail(err instanceof AutomationPinError ? err.code : 'INTERNAL', String((err as Error)?.message ?? err), err instanceof AutomationPinError ? err.reason : undefined);
+    if (err instanceof AutomationPinError) return failPin(err);
+    return fail('INTERNAL', String((err as Error)?.message ?? err));
   } finally { deps.releaseAutomationProof?.(run); }
 }
 

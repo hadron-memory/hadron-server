@@ -20,6 +20,7 @@ import { Prisma } from '../../generated/prisma/index.js';
 import type { AiModelPrice, PrismaClient, UsageEvent } from '../../generated/prisma/index.js';
 import type { AiConfigOwnerType } from '../aiConfig.js';
 import { generateId } from '../id.js';
+import { debitEnabled } from './switches.js';
 import { PRICE_CACHE_TTL_MS, priceCache } from './priceCache.js';
 import { ownerColumns, ownerWhere, sameOwner, type OwnedRow, type OwnerRef } from '../owner.js';
 import { appendForLiveOwner, LedgerOwnerDeletedError } from './ledgerOwner.js';
@@ -44,11 +45,8 @@ const MTOK = 1_000_000n;
  */
 export const HOST_PRICED_PROVIDERS: ReadonlySet<string> = new Set(['openai-compatible']);
 
-/** FR-006: automatic usage debits are OFF unless explicitly enabled. */
-export function debitEnabled(): boolean {
-  const raw = process.env.BILLING_DEBIT_ENABLED?.trim().toLowerCase();
-  return raw === 'true' || raw === '1';
-}
+/** FR-006: automatic usage debits are OFF unless explicitly enabled. Defined in `./switches.ts` and read per call (#5025). */
+export { debitEnabled } from './switches.js';
 
 /** FR-006: markup applied to platform-key cost when debiting; default 0%. */
 // #5216 (item 2): the recorded markup is an Int4 column, so a value whose basis points exceed it must not reach the insert
