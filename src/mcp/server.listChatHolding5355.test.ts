@@ -3,8 +3,8 @@
  * holding `startChat` provisions, for its CREATOR and for no other caller. GraphQL `memories()` lists it since #5337; MCP's
  * list folded only `userId` + personal/private rows, and the access map skips every `userMemoryOfAgentId` row.
  *
- * H is created by the REAL `startChat` (not a seeded row). Rows built by hand are labelled SYNTHETIC: each asserts that the
- * list admits nothing for that shape. The list never exceeds the node-read gate (`canReadMemory`), and the displayed level
+ * H is written in the exact shape the retired `startChat` route wrote (#5394 retired the route; see the fixture). Other hand-built
+ * rows are labelled SYNTHETIC: each asserts that the list admits nothing for that shape. The list never exceeds the node-read gate (`canReadMemory`), and the displayed level
  * equals `canWriteToMemory`'s answer.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -57,18 +57,14 @@ async function fixture() {
   }
   await serveAgentBootPrompt(db, agent.id, 'Hi.');
 
-  const startAs = async (u: { id: string }) => {
-    const key = { organizationId_userId: { organizationId: orgO.id, userId: u.id } };
-    const prior = await db.orgMember.findUnique({ where: key });
-    await db.orgMember.upsert({ where: key, create: { organizationId: orgO.id, userId: u.id, role: 'ADMIN' }, update: { role: 'ADMIN' } });
-    try {
-      await resolvers.Mutation.startChat({}, { agentRef: agent.id }, { db, userId: u.id, roles: ['READER'] } as never);
-    } finally {
-      if (prior) await db.orgMember.update({ where: key, data: { role: prior.role } });
-      else await db.orgMember.delete({ where: key });
-    }
-    return db.memory.findFirstOrThrow({ where: { userMemoryOfAgentId: agent.id, createdBy: u.id } });
-  };
+  // H: #5394 retired the real startChat route for this shape (a start with no App identified refuses CHAT_APP_NOT_IDENTIFIED and
+  // writes nothing, pinned in access-control.noAppHolding3519.test.ts), so H is written by hand in the exact shape that route
+  // wrote. Holdings of this shape still exist, so the list arm still matters.
+  const startAs = async (u: { id: string }) =>
+    db.memory.create({ data: {
+      organizationId: orgO.id, urn: `${orgO.urn}:${generateId().toLowerCase()}`, name: `${agent.name} — ${u.id}`, userId: null,
+      class: 'knowledge', visibility: 'ORGANIZATION', userMemoryOfAgentId: agent.id, createdBy: u.id,
+    } as never });
   const hOut = await startAs(creatorOut);
   const hIn = await startAs(creatorIn);
   for (const h of [hOut, hIn]) {
