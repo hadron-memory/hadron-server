@@ -1,7 +1,7 @@
 /**
  * #5485 Ask 3 (hrn:node:hadronmemory.com:specs:cor:api:090:02) — asking for instructions lifts the `system` default.
  *
- * A filter that names `isRunnable: true`, or a `role` in an instruction family (task, process, boot-prompt, chatbot),
+ * A filter that names `isRunnable: true`, or a `role` in an instruction family (task, process, prompt, chatbot),
  * is an explicit ask, exactly as naming a `nodeType` is: `system` is not left out. `chat-message` and comments stay
  * out, and the memory-class SYSTEM default is not lifted.
  */
@@ -47,7 +47,7 @@ beforeEach(async () => {
       { ...base, id: generateId(), memoryId: sys.id, loc: 'tasks:t2', name: 'harbor role task', nodeType: 'system', isRunnable: true, role: 'task.role' },
       { ...base, id: generateId(), memoryId: sys.id, loc: 'processes:p1', name: 'harbor process', nodeType: 'system', role: 'process' },
       { ...base, id: generateId(), memoryId: sys.id, loc: 'processes:p2', name: 'harbor sub process', nodeType: 'system', role: 'process.release' },
-      { ...base, id: generateId(), memoryId: sys.id, loc: 'boot:source', name: 'harbor source', nodeType: 'system', role: 'boot-prompt.source' },
+      { ...base, id: generateId(), memoryId: sys.id, loc: 'boot:source', name: 'harbor source', nodeType: 'system', role: 'prompt.boot.source' },
       { ...base, id: generateId(), memoryId: sys.id, loc: 'conversations:c', name: 'harbor conversation', nodeType: 'system', role: 'chatbot.conversation' },
       { ...base, id: generateId(), memoryId: sys.id, loc: 'plain-system', name: 'harbor plain system', nodeType: 'system', role: 'notes' },
       { ...base, id: generateId(), memoryId: sys.id, loc: 'msg:1', name: 'harbor msg', nodeType: 'chat-message', seq: 1, isRunnable: true },
@@ -62,7 +62,7 @@ describe('#5485 the lift is decided in the one helper', () => {
   it('defaultExcludedNodeTypes lifts system for isRunnable true and for an instruction role, and never chat-message', () => {
     expect([...defaultExcludedNodeTypes({})]).toEqual(['system', 'chat-message']);
     expect([...defaultExcludedNodeTypes({ isRunnable: true } as never)]).toEqual(['chat-message']);
-    for (const role of ['task', 'task.role', 'process', 'process.x', 'boot-prompt', 'boot-prompt.rule', 'chatbot', 'chatbot.stage']) {
+    for (const role of ['task', 'task.role', 'process', 'process.x', 'prompt', 'prompt.boot.rule', 'chatbot', 'chatbot.stage']) {
       expect([...defaultExcludedNodeTypes({ role } as never)], role).toEqual(['chat-message']);
     }
     for (const filter of [{ isRunnable: false }, { isRunnable: null }, { role: 'notes' }, { role: 'tasks' }, { role: 'processor' }, { role: 'review' }]) {
@@ -89,8 +89,8 @@ describe('#5485 findNodes: asking for instructions is an explicit ask', () => {
     expect(locs(res)).toEqual(['processes:p1', 'processes:p2']);
   });
 
-  it.each(MODES)('%s: role boot-prompt and role chatbot ask too', async (_m, args) => {
-    expect(locs(await findNodes({ ...args, filter: { memoryRefs: [sys.id], role: 'boot-prompt' }, limit: 50 }))).toEqual(['boot:source']);
+  it.each(MODES)('%s: role prompt and role chatbot ask too', async (_m, args) => {
+    expect(locs(await findNodes({ ...args, filter: { memoryRefs: [sys.id], role: 'prompt' }, limit: 50 }))).toEqual(['boot:source']);
     expect(locs(await findNodes({ ...args, filter: { memoryRefs: [sys.id], role: 'chatbot' }, limit: 50 }))).toEqual(['conversations:c']);
   });
 

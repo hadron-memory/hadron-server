@@ -162,7 +162,7 @@ describe('#4033 P3-4: one deployment-policy warning text for both lints', () => 
   it('names the deployment, not "signing has not shipped", and is identical on source and compiled lint', async () => {
     await source('signed');
     const plan = await compile();
-    const compiled = await withCompileWrite(() => db.node.create({ data: { memoryId, loc: 'boot:compiled', name: 'Compiled', content: plan.text, role: 'boot-prompt.compiled', nodeType: 'system' } }));
+    const compiled = await withCompileWrite(() => db.node.create({ data: { memoryId, loc: 'boot:compiled', name: 'Compiled', content: plan.text, role: 'prompt.boot.compiled', nodeType: 'system' } }));
     await db.compiledPromptRevision.create({ data: { compiledNodeId: compiled.id, compiledRevNo: 1, targetKind: 'AGENT', targetAgentId: agentId,
       contentHash: sha256Hex(plan.text), occurrenceCount: plan.occurrences.length, provenance: { version: 1, occurrences: plan.occurrences } as never } });
     const texts: string[] = [];

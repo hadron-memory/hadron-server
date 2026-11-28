@@ -103,7 +103,7 @@ export class RegisterData {
 
 /**
  * Not inherited through a chain: a comment, or a boot prompt (the filter `readEntry` applied in SQL before #2950).
- * #5453: a boot prompt ITSELF. A rule (`boot-prompt.rule`) is inherited, as it was under its old role.
+ * #5453: a boot prompt ITSELF. A rule (`prompt.boot.rule`) is inherited, as it was under its old role.
  */
 export function inheritable(row: Pick<EntryRow, 'nodeType' | 'role'>): boolean {
   return row.nodeType !== 'comment' && !isBootPromptItselfRole(row.role);

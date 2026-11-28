@@ -5,7 +5,7 @@
 -- new migration that carries the new text. Idempotent.
 --
 -- Until #5453 a compiled boot prompt had a node type of its own and the CHECK kept its role on it
--- (chk_nodes_compiled_boot_prompt_role). The mark is the role `boot-prompt.compiled` now, so the CHECK says two
+-- (chk_nodes_compiled_boot_prompt_role). The mark is the role `prompt.boot.compiled` now, so the CHECK says two
 -- things instead:
 --   * the retired node type can never be written again, by any layer;
 --   * a node with the compiled role is always type `system`.
@@ -16,4 +16,4 @@ ALTER TABLE "nodes" DROP CONSTRAINT IF EXISTS "chk_nodes_compiled_boot_prompt_ro
 ALTER TABLE "nodes" DROP CONSTRAINT IF EXISTS "chk_nodes_compiled_boot_prompt_kind";
 ALTER TABLE "nodes" ADD CONSTRAINT "chk_nodes_compiled_boot_prompt_kind" CHECK (
   "node_type" IS DISTINCT FROM 'compiled-boot-prompt'
-  AND ("role" IS DISTINCT FROM 'boot-prompt.compiled' OR "node_type" = 'system'));
+  AND ("role" IS DISTINCT FROM 'prompt.boot.compiled' OR "node_type" = 'system'));

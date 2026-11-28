@@ -1,6 +1,6 @@
 -- #2043 (S6 PR 2, §10 Rook P2-1; cor:agt:040:18) — an approval granted OUTSIDE
 -- the boot-prompt approval gate ends when its node ENTERS the gated state: a
--- node in the boot-prompt role family, in an Agent's system memory or an App's
+-- node in the boot-prompt role family (prompt.boot, prompt.boot.*; the legacy boot-prompt and boot-prompt.*), in an Agent's system memory or an App's
 -- install memory. The approval hash covers neither role nor memory, so without
 -- this a role flip, a move, or a memory becoming placed would carry an ordinary
 -- writer's (or a worker session's) approval into a state only the manager, as
@@ -14,7 +14,7 @@
 -- migration that carries the new text. Idempotent.
 
 CREATE OR REPLACE FUNCTION hadron_is_boot_prompt_role(r text) RETURNS boolean
-LANGUAGE sql IMMUTABLE AS $$ SELECT coalesce(r = 'boot-prompt' OR r LIKE 'boot-prompt.%', false) $$;
+LANGUAGE sql IMMUTABLE AS $$ SELECT coalesce((r = 'prompt.boot' OR r LIKE 'prompt.boot.%' OR r = 'boot-prompt' OR r LIKE 'boot-prompt.%'), false) $$;
 
 -- Placed: an Agent's system memory, or an install memory (isInstallMemoryRow).
 CREATE OR REPLACE FUNCTION hadron_boot_prompt_placed(memory text) RETURNS boolean
@@ -60,13 +60,13 @@ END $$;
 DROP TRIGGER IF EXISTS boot_prompt_approval_entry_node ON "nodes";
 CREATE TRIGGER boot_prompt_approval_entry_node
   BEFORE INSERT OR UPDATE OF role, memory_id, approval_hash ON "nodes"
-  FOR EACH ROW WHEN (NEW.role = 'boot-prompt' OR NEW.role LIKE 'boot-prompt.%')
+  FOR EACH ROW WHEN (NEW.role = 'prompt.boot' OR NEW.role LIKE 'prompt.boot.%' OR NEW.role = 'boot-prompt' OR NEW.role LIKE 'boot-prompt.%')
   EXECUTE FUNCTION hadron_end_boot_prompt_node_approval();
 
 DROP TRIGGER IF EXISTS boot_prompt_approval_entry_revisions ON "nodes";
 CREATE TRIGGER boot_prompt_approval_entry_revisions
   AFTER INSERT OR UPDATE OF role, memory_id ON "nodes"
-  FOR EACH ROW WHEN (NEW.role = 'boot-prompt' OR NEW.role LIKE 'boot-prompt.%')
+  FOR EACH ROW WHEN (NEW.role = 'prompt.boot' OR NEW.role LIKE 'prompt.boot.%' OR NEW.role = 'boot-prompt' OR NEW.role LIKE 'boot-prompt.%')
   EXECUTE FUNCTION hadron_end_boot_prompt_revision_approvals();
 
 -- A memory becoming placed with boot prompts already in it: an Agent attaching it

@@ -26,14 +26,14 @@ export const INSTRUCTION_NODE_TYPE = 'system';
  * The instruction role families: the ONE list behind the lift of the `system` default (cor:api:090:02). A filter
  * naming one of these, or `isRunnable: true`, is an explicit ask for instructions.
  */
-export const INSTRUCTION_ROLE_FAMILIES: readonly string[] = Object.freeze(['task', 'process', 'boot-prompt', 'chatbot']);
+export const INSTRUCTION_ROLE_FAMILIES: readonly string[] = Object.freeze(['task', 'process', 'prompt', 'chatbot']);
 
 /** Whether `role` is `family` or a dotted descendant of it. */
 function inFamily(role: string | null | undefined, family: string): boolean {
   return typeof role === 'string' && (role === family || role.startsWith(`${family}.`));
 }
 
-/** Whether `role` is in an instruction family (task, process, boot-prompt, chatbot). */
+/** Whether `role` is in an instruction family (task, process, prompt, chatbot). */
 export function isInstructionRole(role: string | null | undefined): boolean {
   return INSTRUCTION_ROLE_FAMILIES.some((family) => inFamily(role, family));
 }

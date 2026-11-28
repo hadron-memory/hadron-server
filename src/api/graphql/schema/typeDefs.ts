@@ -301,7 +301,7 @@ export const typeDefs = `#graphql
     Proposed addition built on the #3494 gate to hrn:node:hadronmemory.com:specs:cor:api:090:02; comment result scope stays hrn:node:hadronmemory.com:specs:cor:dmo:110:08.
     """
     hasOpenThreads: Boolean
-    "#1322 — role-family filter. 'spec' matches 'spec' and 'spec.*' on a dot boundary, never 'special' / 'specification'. #5485: a role in an instruction family (task, process, boot-prompt, chatbot) is an explicit ask for instructions and lifts the system node-type default; chat-message nodes and the memory-class default stay."
+    "#1322 — role-family filter. 'spec' matches 'spec' and 'spec.*' on a dot boundary, never 'special' / 'specification'. #5485: a role in an instruction family (task, process, prompt, chatbot) is an explicit ask for instructions and lifts the system node-type default; chat-message nodes and the memory-class default stay."
     role: String
     locPrefix: String
     """

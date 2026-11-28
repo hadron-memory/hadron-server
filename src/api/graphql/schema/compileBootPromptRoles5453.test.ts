@@ -1,7 +1,7 @@
 /**
  * #5453 PR A (Asks 1, 3, 4) — the boot-prompt family by leaf, against a real database.
  *
- * A compile writes `system` / `boot-prompt.compiled`; the source address takes a source (the leaf or the bare
+ * A compile writes `system` / `prompt.boot.compiled`; the source address takes a source (the leaf or the bare
  * legacy role) and neither a rule nor a compiled node; a pointer names a compiled node by role; a rule is a
  * first-class member of the family (manager approval, lint, a read that shows variables as written) and a base
  * Agent's rule is still inherited, where a base's boot prompt itself never is.
@@ -24,9 +24,9 @@ import { resolvers } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
-const COMPILED = 'boot-prompt.compiled';
-const SOURCE = 'boot-prompt.source';
-const RULE = 'boot-prompt.rule';
+const COMPILED = 'prompt.boot.compiled';
+const SOURCE = 'prompt.boot.source';
+const RULE = 'prompt.boot.rule';
 const M = resolvers.Mutation as any;
 
 let orgId: string;
@@ -61,7 +61,7 @@ beforeEach(async () => {
   orgId = (await db.organization.create({ data: { id: generateId(), name: 'r5453-org', urn: 'r5453-org' } })).id;
 });
 
-describe('#5453 Ask 1: the compile writes system / boot-prompt.compiled', () => {
+describe('#5453 Ask 1: the compile writes system / prompt.boot.compiled', () => {
   it('a first compile creates the node as type system with the compiled role, and a recompile revises that same node', async () => {
     const f = await fixture();
     await put(f.agentMem.id, 'boot:source', 'You are {{worker.name}}.', { nodeType: 'system', role: SOURCE });
@@ -142,7 +142,7 @@ describe('#5453: a pointer names a compiled node, by role', () => {
     return validateBootPromptPointer(tx, owner!, nodeId, async () => true);
   });
 
-  it('accepts a system / boot-prompt.compiled node in the Agent\'s system memory', async () => {
+  it('accepts a system / prompt.boot.compiled node in the Agent\'s system memory', async () => {
     const f = await fixture();
     const c = await withCompileWrite(() => put(f.agentMem.id, 'boot:compiled', 'c', { nodeType: 'system', role: COMPILED }));
     expect((await validate(f, c.id)).id).toBe(c.id);

@@ -12,12 +12,12 @@ import { BOOT_PROMPT_NODE_TYPE, RETIRED_COMPILED_BOOT_PROMPT_NODE_TYPE } from '.
 const read = (p: string) => readFileSync(new URL(p, import.meta.url), 'utf8');
 
 describe('#909 slice (a): one canonical node-type list', () => {
-  it('names the eight ordinary values and the two platform kinds (#5453: compiled-boot-prompt and task left)', () => {
+  it('names the seven ordinary values and the two platform kinds (#5453: compiled-boot-prompt, task and prompt left)', () => {
     expect([...ORDINARY_NODE_TYPES]).toEqual([
-      'abstract', 'chat', 'data', 'info', 'prompt', 'record', 'reference', 'system',
+      'abstract', 'chat', 'data', 'info', 'record', 'reference', 'system',
     ]);
     expect([...PLATFORM_DEFINED_NODE_TYPES]).toEqual(['comment', 'chat-message']);
-    expect(NODE_TYPES).toHaveLength(10);
+    expect(NODE_TYPES).toHaveLength(9);
     expect(new Set(NODE_TYPES).size).toBe(NODE_TYPES.length);
   });
 
@@ -28,6 +28,7 @@ describe('#909 slice (a): one canonical node-type list', () => {
     expect(ORDINARY_NODE_TYPES).toContain(BOOT_PROMPT_NODE_TYPE);
     expect(NODE_TYPES as readonly string[]).not.toContain(RETIRED_COMPILED_BOOT_PROMPT_NODE_TYPE);
     expect(NODE_TYPES as readonly string[]).not.toContain('task');
+    expect(NODE_TYPES as readonly string[]).not.toContain('prompt');
     expect(ORDINARY_NODE_TYPES_TEXT).toContain('info (default)');
   });
 

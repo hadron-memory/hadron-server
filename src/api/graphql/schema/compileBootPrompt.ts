@@ -466,7 +466,7 @@ async function decide(
     }
     const written = await withCompileWrite(() => writeNodeCore(
       {
-        // #5453 Ask 1: type `system`, told apart by the role `boot-prompt.compiled` (the node type of its own is retired).
+        // #5453 Ask 1: type `system`, told apart by the role `prompt.boot.compiled` (the node type of its own is retired).
         memoryId: out.memoryId, loc: out.loc, name: 'Compiled boot prompt', role: BOOT_PROMPT_COMPILED_ROLE,
         nodeType: BOOT_PROMPT_NODE_TYPE, content: plan.text,
       },

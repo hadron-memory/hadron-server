@@ -12,18 +12,17 @@ export const ORDINARY_NODE_TYPES = [
   'chat',
   'data',
   'info',
-  'prompt',
   'record',
   'reference',
   'system',
 ] as const;
 
 /**
- * Kinds the platform itself writes or reserves, beyond the ordinary eight: values that carry platform-defined
+ * Kinds the platform itself writes or reserves, beyond the ordinary seven: values that carry platform-defined
  * meaning. NODE_TYPES (ordinary + these) is the full vocabulary the platform names.
  *
  * #5453 (Holger, 2026-11-27) took two values out. `compiled-boot-prompt` was never in the ruled vocabulary: a
- * compiled boot prompt is `system` and told apart by its role `boot-prompt.compiled`, and the database refuses the
+ * compiled boot prompt is `system` and told apart by its role `prompt.boot.compiled`, and the database refuses the
  * old value. `task` left the vocabulary on 2026-05-11 (#118 D3) and nothing writes it.
  */
 export const PLATFORM_DEFINED_NODE_TYPES = ['comment', 'chat-message'] as const;
