@@ -955,6 +955,12 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
         const hidden = bogusHiddenTag(text, i, close, hiddenCtx);
         if (hidden !== -1) return hidden;
       }
+      // #5323 — the `>` that ends the bogus comment may be that of a type 1 end tag alone at the head of a later line (`<!\n\n</textarea>`):
+      // Markdown reads that line afresh, so the end tag's rule below applies to it as well.
+      if (model === 'marked' && i >= rawUntil && !isLetter(text[i + 2])) {
+        const f = markedFenceBehindBogus(text, i, close);
+        if (f !== -1) return f;
+      }
       // marked ends such a block at the declaration's first `>` and reads the rest of the line as text (#5211); CommonMark keeps it raw.
       if (startsLine(i) && isLetter(text[i + 2]) && model === 'commonmark') raw(lineEndAt(close));
       if (startsLine(i) && isLetter(text[i + 2]) && model === 'marked') {
@@ -1028,6 +1034,14 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       if (BLOCK6_NAMES.has(name)) raw(containerEnd(i, true));
       else if ((!TYPE1_NAMES.has(name) || (isEnd && model === 'commonmark')) && !text.slice(i, tagEnd).includes('\n') && text.slice(tagEnd, lineEndAt(tagEnd)).trim() === '' && !interrupts()) {
         raw(containerEnd(i, true));
+      } else if (isEnd && model === 'marked' && i >= rawUntil && lineContainers.length === 0
+        && !text.slice(i, tagEnd).includes('\n') && text.slice(tagEnd, lineEndAt(tagEnd)).trim() === '' && !interrupts()) {
+        // #5323 — reached for a type 1 end tag alone on its line (any other name took the branch above): it starts a type 7 block in
+        // CommonMark and markdown-it, and none in marked, which reads the block's later lines as markup: a fence opener there that nothing
+        // closes takes the anchor in marked alone. It is written as character references, which the other readers' block passes on raw and
+        // a browser decodes to the same characters (#5320's escape).
+        const f = markedFenceUnder(text, lineEndAt(tagEnd), containerEnd(i, true));
+        if (f !== -1) return f;
       }
     }
     if (isEnd) {
@@ -1140,6 +1154,60 @@ function markedUnclosedFenceAfter(text: string, from: number): number {
     s = e + 1;
   }
   return from + m[1]!.length;
+}
+
+/**
+ * #5323 — where the first character of a fence opener is that marked opens on a line after `from` (the end of a line-head type 1 end tag's
+ * line) and before `to` (the end of the HTML block that tag starts in CommonMark) with no line after it closing it; -1 otherwise. A line that
+ * opens a closed fence or starts with a `<` ends the search: what marked reads after it is not judged here, so nothing is escaped (the safe
+ * side for bytes; the over-escape check pins it).
+ */
+function markedFenceUnder(text: string, from: number, to: number): number {
+  // After a list item's marker line, an indented fence is the item's content, which the item ends: only a fence at the line head counts.
+  let listed = false;
+  for (let s = from + 1; s < to;) {
+    const f = markedUnclosedFenceAfter(text, s);
+    if (f !== -1) return fenceRunBefore(text, f, text.lastIndexOf('\n', from - 1) + 1) || (listed && f > s) ? -1 : f;
+    const e = text.indexOf('\n', s);
+    const line = text.slice(s, e === -1 ? text.length : e);
+    if (/^ {0,3}(?:`{3,}|~{3,}|<)/.test(line)) return -1;
+    if (/^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|\r?$)/.test(line)) listed = true;
+    if (e === -1) return -1;
+    s = e + 1;
+  }
+  return -1;
+}
+
+/**
+ * #5323 (fuzz at 2c4cc253) — whether the text before `before` holds a run of the fence character at `at` no longer than the run there: a fence
+ * that run opened (at the head of a line, or after a declaration's `>` in marked) would be closed by the line at `at`, which is then a closer and
+ * must stay. The walk does not follow every such fence (a construct may run across its opener), so any run counts.
+ */
+function fenceRunBefore(text: string, at: number, before: number): boolean {
+  const c = text[at]!;
+  let len = 0;
+  while (text[at + len] === c) len += 1;
+  const runs = text.slice(0, before).match(c === '~' ? /~{3,}/g : /`{3,}/g) ?? [];
+  return runs.some((r) => r.length <= len);
+}
+
+/**
+ * #5323 — {@link markedFenceUnder} for a type 1 end tag that ends a bogus comment (`<!` at `at`, its `>` at `close`) on a later line: the tag
+ * must be alone on its line (up to three spaces before it, blanks only after it), and the line above must leave no paragraph open (blank, a
+ * setext underline or an ATX heading), where it starts a type 7 block in CommonMark.
+ */
+function markedFenceBehindBogus(text: string, at: number, close: number): number {
+  const ls = text.lastIndexOf('\n', close) + 1;
+  if (ls <= at || !/^ {0,3}<\/(?:script|style|textarea|pre)[ \t]*>$/i.test(text.slice(ls, close + 1))) return -1;
+  const nl = text.indexOf('\n', close);
+  const le = nl === -1 ? text.length : nl;
+  if (text.slice(close + 1, le).trim() !== '') return -1;
+  const above = text.slice(text.lastIndexOf('\n', ls - 2) + 1, ls - 1);
+  if (!(above.trim() === '' || /^ {0,3}(?:=+|-+)[ \t]*\r?$/.test(above) || /^ {0,3}#{1,6}(?:[ \t]|\r?$)/.test(above))) return -1;
+  const blank = /\n[ \t\r]*\n/g;
+  blank.lastIndex = ls;
+  const m = blank.exec(text);
+  return markedFenceUnder(text, le, m ? m.index : text.length);
 }
 
 /**
