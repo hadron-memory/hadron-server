@@ -161,38 +161,63 @@ describe('#5369 (#5388 LOCAL P3): a type 1 to 5 block counts only when it opens 
   });
 });
 
-describe('#5369 (#5388 LOCAL P1): the work grows with the text, not with its cube', () => {
+describe('#5369 (#5388 LOCAL P1): the work grows with the text, not with its power', () => {
   // At the frozen head a 40 KB body of this shape took 18 s (main 16 ms): each hidden tag rescanned the text for every later end tag.
   // #5476: the guard measures the growth EXPONENT (the slope of log time against log size over four doubling sizes), not a ratio of two times
   // behind a 50 ms floor: the floor switched the check on and off with the runner's speed, and the bound of 9 (linear is 4 for 4x the text)
-  // was wrong for a shape whose walk was in fact near-quadratic (the `<!x` shape scaled as n^1.9 past 16000 declarations: a newline search that
-  // ran back to the start of a text with no line break, once per bogus comment). Linear is an exponent of 1, quadratic 2, cubic 3; the bound is
-  // 1.5, the measured fits are 0.8 to 1.2 for every shape below, and a quadratic walk fits at 1.7 or more. The size list is per shape so
-  // that the slower shapes (about 60 us per repeat) stay under a second at their largest size.
+  // was wrong for a shape whose walk was in fact near-quadratic (the `<!x` shape and the backtick shape scaled as n^1.9 past 16000 repeats:
+  // a newline search that ran back to the start of a text with no line break, once per bogus comment). Linear is an exponent of 1, quadratic
+  // 2, cubic 3; the bound is 1.5 and the measured fits are 0.8 to 1.2 for every shape below. The first size is per shape, and the two fast
+  // shapes start past the knee where the old walk turned quadratic (16000), so a walk that is quadratic only past that point still fits
+  // high. The two slower shapes (about 60 microseconds per repeat, and linear) start at 1000, so that their largest size, 8000, takes about half
+  // a second and a runner five times slower still clears the cap. A uniform slowdown moves no slope, so each shape also has an absolute cap of
+  // 5 seconds at its largest size (the fast shapes take about 0.3 s there, the old walk 11 to 25 s).
   it.each([
     // [label, body, the first size]
-    ['backtick runs between hidden tags and end tags', (n: number) => 'x<!<style> `'.repeat(n) + '</style>'.repeat(n), 8000],
+    ['backtick runs between hidden tags and end tags', (n: number) => 'x<!<style> `'.repeat(n) + '</style>'.repeat(n), 16000],
     ['end tags in indented code', (n: number) => 'x<!<style> `'.repeat(n) + '\n    </style>'.repeat(n), 1000],
     ['fences between hidden tags', (n: number) => 'x<!<style>\n```\n'.repeat(n) + '</style>\n'.repeat(n), 1000],
     // #5388 (QA F1): each `<!x` hides the next hidden start from the raw reader's first pass, so each is read by a walk of its own. The text
     // has no line break, so any search for one that is not bounded by the construct costs the whole text (#5476).
-    ['declarations hiding the next hidden tag', (n: number) => 'x<!<style><!x'.repeat(n) + '</style>'.repeat(n), 8000],
+    ['declarations hiding the next hidden tag', (n: number) => 'x<!<style><!x'.repeat(n) + '</style>'.repeat(n), 16000],
   ] as Array<[string, (n: number) => string, number]>)('%s', (_label, body, first) => {
     const sizes = [first, first * 2, first * 4, first * 8];
     const fastest = (text: string): number => {
       let best = Infinity;
-      for (let k = 0; k < 3; k += 1) { const started = performance.now(); escapeUnterminatedHtml(text); best = Math.min(best, performance.now() - started); }
+      for (let k = 0; k < 5; k += 1) { const started = performance.now(); escapeUnterminatedHtml(text); best = Math.min(best, performance.now() - started); }
       return best;
     };
-    fastest(body(Math.min(first, 1000))); // warm the code before the first measured size
+    fastest(body(1000)); // warm the code before the first measured size
+    const times = sizes.map((n) => fastest(body(n)));
+    expect(times[3]).toBeLessThan(5000);
     const xs = sizes.map((n) => Math.log(n));
-    const ys = sizes.map((n) => Math.log(Math.max(fastest(body(n)), 0.01)));
+    const ys = times.map((t) => Math.log(t));
     const mean = (v: number[]): number => v.reduce((a, b) => a + b, 0) / v.length;
     const mx = mean(xs);
     const my = mean(ys);
     const slope = xs.reduce((sum, x, k) => sum + (x - mx) * (ys[k]! - my), 0) / xs.reduce((sum, x) => sum + (x - mx) ** 2, 0);
     expect(slope).toBeLessThan(1.5);
-  }, 60_000);
+    expect(slope).toBeGreaterThan(0.5); // a text that took no longer for more text would mean the measurement, not the walk, is broken
+  }, 90_000);
+
+  // #5476 (BLIND P3-4): the two bounded searches answer as the unbounded ones did. [body, the output main gave].
+  it.each([
+    ['<!x', '&lt;!x'],
+    ['<!x\n<style>', '<!x\n<style>'],
+    ['<!x <style>x', '<!x <style>x'],
+    ['<!xy<style>', '<!xy<style>'],
+    ['<!x<style>x', '<!x<style>x'],
+    ['a\n<!x', 'a\n&lt;!x'],
+    ['<!</style>', '<!</style>'],
+    ['\n\n<!</style>\n```\n', '\n\n<!</style>\n```\n'],
+    // The comment starts at the `<!` and its end tag follows at once: no line break inside it, though the line above would read as a heading.
+    ['# <!</style>\n```\nx', '# <!</style>\n```\nx'],
+    ['p\n\n<!\n</style>\n\n```\nx', 'p\n\n<!\n</style>\n\n```\nx'],
+    ['<!x\n</style>', '<!x\n</style>'],
+    ['<!\n</style>\n\n```\n<xmp>', '<!\n</style>\n\n```\n<xmp>'],
+  ])('%j', (body, out) => {
+    expect(escapeUnterminatedHtml(body)).toBe(out);
+  });
 });
 
 describe('#5369 (#5388 BLIND P2 at dabc70c5): a bare CR is not a line break to the F2 rule (stated limit, #5401)', () => {
