@@ -386,6 +386,15 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // App approves it, link lint applies to it, and a direct read shows its platform variables as written. Who may WRITE is unchanged: a
 // worker session still writes a rule and is still refused a source (worker sessions writing sources and compiling is PR B). The MCP
 // `nodeType` descriptions no longer list `task` or `compiled-boot-prompt`. (0.57.0 is #5077 F3a-2, merged first; 0.58.0 is left for #5452, the opt-in read, built in parallel.)
+// 0.58.0 — ADDITIVE (#5452, cor:api:090:02, cor:api:090:05): an explicit way to read `system` nodes. New optional
+// `NodeFilter.includeSystemNodes: Boolean` on `findNodes`, the same argument on `Query.memoryLocSegments`, and the same parameter on
+// MCP `hadron_find_nodes` (and on `hadron_list_nodes`, where it is accepted and changes nothing: that tree never hid system nodes).
+// `true` lifts `system`, and only `system`, from the default node-type exclusion; `chat-message`, comments, the memory-class SYSTEM
+// default, access, soft-deleted rows and inheritance are untouched, and an explicit `nodeType` / `nodeTypes` decides alone. No default
+// changes: `false`, `null` and omitted are the answers of 0.56.0. `appNodes` / `appNodesPage` refuse either boolean with BAD_USER_INPUT
+// (a new refusal on a new field only). A client keys on this version before sending the field: an older server refuses an unknown
+// input field over GraphQL and silently drops an unknown MCP argument (hadron-portal#2695, hadron-cli#3328). (0.56.0 is #5027,
+// merged first; the open #5441 and #5447 both claim 0.57.0, so one of them takes 0.58.0.)
 export const HADRON_SERVER_VERSION = '0.59.0';
 
 /**

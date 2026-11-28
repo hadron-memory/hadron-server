@@ -261,6 +261,21 @@ export const typeDefs = `#graphql
     """
     nodeTypes: [String!]
     """
+    #5452 — true also returns nodes of type system: it lifts system, and only system, from the default
+    node-type exclusion above (hrn:node:hadronmemory.com:specs:cor:api:090:02). For an agent builder
+    reading an Agent's definition nodes; the default stays hidden. false, null and omitted change nothing.
+    It never lifts anything else: chat-message nodes stay excluded (name nodeType "chat-message" for
+    those); comments still follow contentScope; the memory-class default stays, so a SYSTEM-class
+    memory must still be named in memoryRefs or memoryClasses; and access, soft-deleted rows and
+    inheritance are untouched, so a caller who cannot read a memory gets the same answer with and
+    without it. With nodeType or nodeTypes set, the explicit type filter decides alone and this field
+    has no effect (it is not refused). Applies in every findNodes mode (keyword, regex, vector, hybrid
+    and filter-only) and pages and counts like any other filter. appNodes and appNodesPage, which
+    apply no node-type default, refuse either boolean with BAD_USER_INPUT. The same argument is on
+    memoryLocSegments (hrn:node:hadronmemory.com:specs:cor:api:090:05).
+    """
+    includeSystemNodes: Boolean
+    """
     #1608 — content, comments or both (hrn:node:hadronmemory.com:specs:cor:dmo:110:08).
     Default CONTENT. Applied by the server before ranking, pagination and
     limits in every mode (keyword, regex, vector, hybrid and filter-only), so a
@@ -11807,7 +11822,8 @@ export const typeDefs = `#graphql
     including objectType, approvalState and minted. Nonempty memoryRefs or
     memoryClasses are rejected with BAD_USER_INPUT: the App scope is authoritative.
     where and childrenOf are rejected with BAD_USER_INPUT too (#3427, #2832); use findNodes.
-    Unlike findNodes, system-node types are not excluded by default. Deleted
+    Unlike findNodes, system-node types are not excluded by default, so includeSystemNodes
+    (either boolean) is rejected with BAD_USER_INPUT as well (#5452). Deleted
     content remains subject to recovery authority. NodeFilter.contentScope
     COMMENTS or ALL can select comments. When contentScope is omitted,
     nodeType=comment selects COMMENTS; otherwise the default CONTENT excludes
@@ -11822,7 +11838,7 @@ export const typeDefs = `#graphql
     but total counts every node appNodes would return for the filter and hasMore says whether rows
     remain past this page. Ordered by loc, then id, so the order is stable across the App's memories.
     Default page 20, limit: 0 is count-only, a negative limit is 0, a limit over 200 is served as 200,
-    a negative offset is 0. The filter's memoryRefs, memoryClasses, where and childrenOf are refused, as on appNodes.
+    a negative offset is 0. The filter's memoryRefs, memoryClasses, where, childrenOf and includeSystemNodes are refused, as on appNodes.
 
     Accepts the App's ID or URN.
     """
@@ -11838,8 +11854,16 @@ export const typeDefs = `#graphql
     it, all give the identical empty page. Rows are grouped by memory id; inside a memory, node-backed
     segments with a position come first by position, then every other segment by name (ruling 0217).
     Default page 20, cap 200 (larger is served as 200); after is the previous page's endCursor.
+
+    #5452 — includeSystemNodes: true also counts nodes of type system, exactly as NodeFilter.includeSystemNodes
+    does for findNodes (hrn:node:hadronmemory.com:specs:cor:api:090:02), so a branch made only of system nodes
+    is listed, with hasNode true where a system node sits at that loc. false, null and omitted change nothing.
+    It never lifts anything else: a branch made only of chat-message nodes or only of comments stays absent, the
+    memories read are still only those named in memoryRefs that the caller can read, and soft-deleted rows and
+    inheritance are untouched (an unreadable memory is the same empty page with and without it). Pass the same value on every
+    page of one listing: a cursor carries no record of it.
     """
-    memoryLocSegments(memoryRefs: [ID!]!, parentLoc: String!, limit: Int, after: String): LocSegmentsPage!
+    memoryLocSegments(memoryRefs: [ID!]!, parentLoc: String!, limit: Int, after: String, includeSystemNodes: Boolean): LocSegmentsPage!
 
     """
     #2190 (hrn:node:hadronmemory.com:specs:cor:dmo:050:17): the memories appNodes

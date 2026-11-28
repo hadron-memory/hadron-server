@@ -2152,6 +2152,12 @@
       "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
     },
     {
+      "name": "nodes_memory_segment_key_with_system_idx",
+      "kind": "index",
+      "file": "post-push.sql",
+      "why": "Index declared in the raw-SQL corpus; its exact shape is retained there, including idempotent declarations of Prisma-modeled indexes."
+    },
+    {
       "name": "nodes_msg_channel_seq_loc_c_idx",
       "kind": "index",
       "file": "post-push.sql",

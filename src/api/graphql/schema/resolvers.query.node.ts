@@ -35,7 +35,7 @@ import { certifiedHybridRanking, hybridKeywordCandidates } from '../../../lib/re
 import { isStatementTimeout, vectorSearchTimeoutMs } from '../../../services/embedding/vectors.js';
 import { emitNodeUrnV2, bestEffortFlatNodeUrn } from '../../../lib/urnEmit.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
-import { UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES } from '../../../lib/retrieval/defaultNodeTypes.js';
+import { defaultExcludedNodeTypes } from '../../../lib/retrieval/defaultNodeTypes.js';
 import { checkNodeTypesFilter, NodeTypesFilterError } from '../../../lib/retrieval/nodeTypeList.js';
 import { BooleanQueryError, assertQueryLength, literalQuery, relaxConjunctionToOr } from '../../../lib/retrieval/tsquery.js';
 import {
@@ -155,6 +155,8 @@ export interface FindNodesArgs {
     nodeType?: string | null;
     /** #3113 — an explicit list of node types (a union); see `checkNodeTypesFilter`. */
     nodeTypes?: string[] | null;
+    /** #5452 — `true` lifts `system` from the node-type default; ignored when `nodeType` / `nodeTypes` is set. */
+    includeSystemNodes?: boolean | null;
     /** #1608 — CONTENT (default) | COMMENTS | ALL (cor:dmo:110:08). */
     contentScope?: ContentScope | null;
     objectType?: string | null;
@@ -262,6 +264,8 @@ type AppNodesFilter = {
     nodeType?: string | null;
     /** #3113 */
     nodeTypes?: string[] | null;
+    /** #5452 — findNodes only; rejected by both App list forms (either boolean), which apply no node-type default. */
+    includeSystemNodes?: boolean | null;
     objectType?: string | null;
     tags?: string[] | null;
     isRunnable?: boolean | null;
@@ -299,6 +303,11 @@ async function appNodesRead(ctx: Context, appRef: string, filter: AppNodesFilter
   }
   if (filter?.childrenOf != null) {
     throw new GraphQLError('appNodes: filter.childrenOf is not supported. Use findNodes to read direct children.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  // #5452: the App list forms apply no node-type default (they already return system nodes, #524), so the flag
+  // would mean nothing here. Either boolean is refused, before any App lookup, as hasOpenThreads is.
+  if (filter?.includeSystemNodes != null) {
+    throw new GraphQLError('appNodes: filter.includeSystemNodes is not supported. appNodes already returns system nodes; use findNodes for the default exclusion.', { extensions: { code: 'BAD_USER_INPUT' } });
   }
   // #3427: `where` is the same kind of refusal, before the App lookup and with a fixed message (the predicate is never echoed).
   if (filter?.where != null) {
@@ -1712,7 +1721,9 @@ export const nodeQueries = {
         // orthogonal to the memory-class exclusion above).
         // #3113 — an explicit list (validated above) is explicit too: it narrows
         // to the named types and replaces the default.
-        ...(nodeTypes ? { nodeType: { in: nodeTypes } } : f.nodeType ? { nodeType: f.nodeType } : { nodeType: { notIn: [...UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES] } }),
+        // #5452 — the default comes from the one shared function (includeSystemNodes: true
+        // lifts system, never chat-message); an explicit type never reads the flag.
+        ...(nodeTypes ? { nodeType: { in: nodeTypes } } : f.nodeType ? { nodeType: f.nodeType } : { nodeType: { notIn: [...defaultExcludedNodeTypes(f)] } }),
         ...(f.objectType ? { objectType: f.objectType } : {}),
         ...(f.isRunnable != null ? { isRunnable: f.isRunnable } : {}),
         ...(f.role != null
@@ -1765,6 +1776,7 @@ export const nodeQueries = {
         ...(f.includeDeleted ? { tombstoneMemoryIds: recoverableIds } : {}),
         nodeType: f.nodeType ?? null,
         nodeTypes,
+        includeSystemNodes: f.includeSystemNodes ?? null, // #5452: the SQL default reads the same function
         objectType: f.objectType ?? null,
         isRunnable: f.isRunnable ?? null,
         hasOpenThreads: f.hasOpenThreads ?? null, syntheticCommentMemoryIds,
@@ -3000,10 +3012,12 @@ export const nodeQueries = {
      * set is `resolveNodeReadScopeIds` + `effectiveScope`, the SAME computation as `findNodes` with no query,
      * so the two cannot disagree. Every no-access shape (unreadable, unresolvable, empty memory, a parent with
      * nothing below it) is the one empty page; a request with no memoryIds is refused before any read.
+     * #5452: `includeSystemNodes: true` lists the segments `system` nodes make, through the same default
+     * function findNodes asks; it changes which NODES count, never which memories are read.
      */
     memoryLocSegments: async (
       _: unknown,
-      args: { memoryRefs: string[]; parentLoc: string; limit?: number | null; after?: string | null },
+      args: { memoryRefs: string[]; parentLoc: string; limit?: number | null; after?: string | null; includeSystemNodes?: boolean | null },
       ctx: Context,
     ) => {
       const refuse = (msg: string) => new GraphQLError(msg, { extensions: { code: 'BAD_USER_INPUT' } });
@@ -3032,6 +3046,7 @@ export const nodeQueries = {
         parent: args.parentLoc,
         limit,
         after,
+        includeSystemNodes: args.includeSystemNodes === true,
       });
     },
 

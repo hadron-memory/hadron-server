@@ -15,33 +15,54 @@
  */
 import { Buffer } from 'node:buffer';
 import { Prisma, type PrismaClient } from '../generated/prisma/index.js';
-import { UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES } from './retrieval/defaultNodeTypes.js';
+import { defaultExcludedNodeTypes } from './retrieval/defaultNodeTypes.js';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
 /** The indexed key expression (nodes_memory_segment_key_idx); the walk query inlines it and must match it unchanged. */
 export const SEGMENT_KEY_SQL = `(replace(loc, ':', chr(1))) COLLATE "C"`;
 
+/** #5452 — what a segments read may ask for beyond the defaults. */
+export interface SegmentEligibility {
+  /** `true` lists segments that `system` nodes make (cor:api:090:05); anything else keeps the default. */
+  includeSystemNodes?: boolean | null;
+}
+
 /**
- * #2836 (cor:api:090:05 rev 5): the node types a segment never comes from. findNodes' unqualified
- * defaults (system, chat-message), plus comment, which segments always left out.
+ * #2836 / #5452 (cor:api:090:05): the node types a segment never comes from. findNodes' node-type default for
+ * the same request (`defaultExcludedNodeTypes`: system and chat-message, or chat-message alone when the caller
+ * asked for system nodes), plus comment, which segments always leave out.
  */
-export const SEGMENT_INELIGIBLE_NODE_TYPES: readonly string[] = Object.freeze([...UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES, 'comment']);
+export function segmentIneligibleNodeTypes(opts?: SegmentEligibility | null): readonly string[] {
+  return Object.freeze([...defaultExcludedNodeTypes(opts), 'comment']);
+}
+
+/** The default list (no flag): system, chat-message, comment. */
+export const SEGMENT_INELIGIBLE_NODE_TYPES: readonly string[] = segmentIneligibleNodeTypes();
 
 /** The partial index holding only eligible rows (prisma/migrations/20261106050000_nodes_segment_key_eligible_index). */
 export const SEGMENT_ELIGIBLE_INDEX = 'nodes_memory_segment_key_eligible_idx';
 
 /**
- * The eligible-row predicate, with the type list inlined as a SQL literal, never a bound parameter:
- * the planner can use the partial index only when it can prove the query's predicate implies the
- * index's, and it cannot prove that from a parameter. With `alias` omitted this is, byte for byte,
- * the index's WHERE clause (pinned against the migration and post-push.sql). A chat root holds tens
- * of thousands of messages; as a row filter on the full index the walk would step over every one
- * (and the planner, expecting that, flips plans and JIT-compiles every read).
+ * #5452 — its twin for a read that asked for system nodes: the same key, holding `system` rows too and still no
+ * chat-message or comment rows (prisma/migrations/20261127234000_nodes_segment_key_with_system_index).
  */
-export function segmentEligibleSql(alias?: string): string {
+export const SEGMENT_WITH_SYSTEM_INDEX = 'nodes_memory_segment_key_with_system_idx';
+
+/**
+ * The eligible-row predicate, with the type list inlined as a SQL literal, never a bound parameter:
+ * the planner can use a partial index only when it can prove the query's predicate implies the
+ * index's, and it cannot prove that from a parameter. With `alias` omitted this is, byte for byte,
+ * the WHERE clause of one of the two partial indexes (pinned against the migrations and post-push.sql):
+ * `SEGMENT_ELIGIBLE_INDEX` by default, `SEGMENT_WITH_SYSTEM_INDEX` for `includeSystemNodes: true`. A chat
+ * root holds tens of thousands of messages; as a row filter on the full index the walk would step over
+ * every one (and the planner, expecting that, flips plans and JIT-compiles every read), so neither index
+ * holds a message. A flagged read cannot use the first index (it holds no system row), which is why the
+ * second exists; an unflagged read may be served by either, and system rows are then a row filter.
+ */
+export function segmentEligibleSql(alias?: string, opts?: SegmentEligibility | null): string {
   const col = (c: string) => (alias ? `${alias}.${c}` : c);
-  const list = SEGMENT_INELIGIBLE_NODE_TYPES.map((t) => {
+  const list = segmentIneligibleNodeTypes(opts).map((t) => {
     if (!/^[a-z][a-z0-9-]*$/.test(t)) throw new Error(`segmentEligibleSql: unexpected node type literal ${JSON.stringify(t)}`);
     return `'${t}'`;
   }).join(',');
@@ -99,8 +120,9 @@ export function decodeLocSegmentsCursor(raw: string): Cursor | null {
  *
  * Eligible nodes match findNodes' defaults: live (not soft-deleted), not system/chat-message/comment, and not an overridden inherited node. A segment exists for a memory when an eligible
  * node has loc `<parent>:<seg>` or starts with `<parent>:<seg>:` (root: `<seg>` / `<seg>:`).
+ * #5452: `includeSystemNodes: true` makes `system` nodes eligible too; chat-message and comment never are.
  */
-export interface LocSegmentsArgs {
+export interface LocSegmentsArgs extends SegmentEligibility {
   memoryIds: string[];
   excludeNodeIds: string[];
   parent: string;
@@ -127,6 +149,9 @@ export async function readLocSegments(db: Db, args: LocSegmentsArgs): Promise<Lo
 /** The exact hybrid walk statement, exported for application-query plan regressions. */
 export function locSegmentsWalkSql(args: LocSegmentsArgs): Prisma.Sql {
   const { memoryIds, excludeNodeIds, parent, limit, after } = args;
+  // #5452: ONE eligibility for every leg of the statement (chooser, both skip legs, both flat blocks).
+  const eligible = (alias: 'probe_node' | 'n' | 'flat_node') =>
+    Prisma.raw(segmentEligibleSql(alias, { includeSystemNodes: args.includeSystemNodes }));
   // #3596 / ruling 0229: prove a flat prefix with a sibling-bounded ordered probe,
   // then scan only its index range; otherwise keep the skip-scan below.
   // Skip-scan over nodes_memory_segment_key_idx: ':' is chr(1) in the key, so one segment's locs are a
@@ -154,7 +179,7 @@ export function locSegmentsWalkSql(args: LocSegmentsArgs): Prisma.Sql {
             AND (replace(flat_node.loc, ':', chr(1))) COLLATE "C" >= ${prefixKey}::text COLLATE "C"
             ${upperBound('flat_node')}
             ${afterKey ? Prisma.sql`AND (replace(flat_node.loc, ':', chr(1))) COLLATE "C" > m.last_key COLLATE "C"` : Prisma.empty}
-            AND ${Prisma.raw(segmentEligibleSql('flat_node'))}
+            AND ${eligible('flat_node')}
             AND NOT (flat_node.id = ANY(${excludeNodeIds}::text[]))
           ORDER BY (replace(flat_node.loc, ':', chr(1))) COLLATE "C" ASC
           LIMIT 64
@@ -170,7 +195,7 @@ export function locSegmentsWalkSql(args: LocSegmentsArgs): Prisma.Sql {
           WHERE probe_node.memory_id = m.memory_id
             AND (replace(probe_node.loc, ':', chr(1))) COLLATE "C" >= ${prefixKey}::text COLLATE "C"
             ${upperBound('probe_node')}
-            AND ${Prisma.raw(segmentEligibleSql('probe_node'))}
+            AND ${eligible('probe_node')}
             AND NOT (probe_node.id = ANY(${excludeNodeIds}::text[]))
           ORDER BY (replace(probe_node.loc, ':', chr(1))) COLLATE "C" ASC
           OFFSET 0
@@ -186,7 +211,7 @@ export function locSegmentsWalkSql(args: LocSegmentsArgs): Prisma.Sql {
         WHERE n.memory_id = m.memory_id
           AND (replace(n.loc, ':', chr(1))) COLLATE "C" >= ${prefixKey}::text COLLATE "C"
           ${upperBound('n')}
-          AND ${Prisma.raw(segmentEligibleSql('n'))}
+          AND ${eligible('n')}
           AND NOT (n.id = ANY(${excludeNodeIds}::text[]))
         ORDER BY (replace(n.loc, ':', chr(1))) COLLATE "C" ASC
         LIMIT 1
@@ -201,7 +226,7 @@ export function locSegmentsWalkSql(args: LocSegmentsArgs): Prisma.Sql {
           AND (replace(n.loc, ':', chr(1))) COLLATE "C" >=
               (${prefixKey}::text || replace(split_part(substr(w.loc, length(${prefix}::text) + 1), ':', 1), ':', chr(1)) || chr(2)) COLLATE "C"
           ${upperBound('n')}
-          AND ${Prisma.raw(segmentEligibleSql('n'))}
+          AND ${eligible('n')}
           AND NOT (n.id = ANY(${excludeNodeIds}::text[]))
         ORDER BY (replace(n.loc, ':', chr(1))) COLLATE "C" ASC
         LIMIT 1

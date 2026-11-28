@@ -4736,7 +4736,7 @@ export function createMcpServerInstance(
     'hadron_find_nodes',
     'Relevance-ranked full-text search across nodes. Keyword mode (default) runs Postgres full-text search: terms are STEMMED (so "running" matches "run"), results are RANKED by field-weighted relevance (name/alias > loc/tags > description/abstract > body/data), and BODY + abstract ARE indexed. Boolean operators are supported — `(banana OR apple) AND shake`, quoted phrases, and `-term` / `NOT term` — operator words are UPPERCASE-ONLY (lowercase and/or/not are plain terms, so natural phrases search literally), and malformed boolean syntax degrades to a literal phrase search instead of erroring. A query is at most 512 characters (longer is refused, never truncated) and at most 64 terms, nested 8 deep (beyond that it runs as a literal phrase); a query that only excludes terms (`-foo`, `a OR -b`) is refused, so put at least one required term in every OR branch (`foo -bar`). A plain multi-word query ANDs its terms; if that matches nothing, the search auto-relaxes to OR (any term) and flags [degraded:and_relaxed_to_or] — so a single off-corpus word doesn\'t dead-end the query. Pass `query: "*"` (or `""`) to list every node (survey mode) — useful as a first pass before adding to a memory. mode:vector / mode:hybrid run semantic search over the memory\'s vector index; mode:regex matches a POSIX regular expression against node text. To browse the tree structure, use `hadron_list_nodes` instead. Scope with `parentRel` (a subtree), `memoryUrn` (one memory), or `memoryUrns` (a set); pass `allMemories: true` to search EVERY memory you can read — the stemmed, ranked org-wide "does anyone know about X?" probe (this is the right tool for cross-memory concept/content questions; hadron_search matches literal substrings only). Each scored hit shows its score as a percentage of the top hit; when many hits sit in a narrow band the result carries a [weak_results] note, meaning the ranking found nothing clearly relevant — treat that as "the answer is probably not here" rather than reading the whole list. Use `minScore` to drop weak hits and `limit` to widen the default 10-hit page. Soft-deleted nodes are excluded. Each hit in the default view carries a `URL:` line — the node\'s portal link; copy it verbatim when citing a source to a human rather than building a link from the URN (`brief: true` omits it, as it omits the abstract).',
     SHAPE_HADRON_FIND_NODES,
-    async ({ query, mode, parentRel, memoryUrn, memoryUrns, allMemories, isRunnable, hasOpenThreads, role, objectType, nodeType, nodeTypes, nodeKind, childrenOf, brief, limit, minScore, expand, granularity, where, scope }) => {
+    async ({ query, mode, parentRel, memoryUrn, memoryUrns, allMemories, isRunnable, hasOpenThreads, role, objectType, nodeType, nodeTypes, includeSystemNodes, nodeKind, childrenOf, brief, limit, minScore, expand, granularity, where, scope }) => {
       // #3113 — the shape of `nodeTypes` is judged first, before any scope work or
       // early return below, with the one validator the resolver also runs.
       try {
@@ -4969,6 +4969,7 @@ export function createMcpServerInstance(
               objectType: objectType ?? undefined,
               nodeType: nodeType ?? undefined, // #331: exact-match pass-through to NodeFilter.nodeType
               nodeTypes: nodeTypes ?? undefined, // #3113: the explicit list, through the same resolver
+              includeSystemNodes: includeSystemNodes ?? undefined, // #5452: the resolver's one default function decides
               locPrefix: filterLocPrefix,
               childrenOf: childrenOf ?? undefined, // #2832: direct children only; '' is the top level
               // #719 — structured JSONB predicate; findNodes validates it and
@@ -6292,6 +6293,8 @@ export function createMcpServerInstance(
       // filtered set.)
       // #1608 (cor:dmo:110:08) — the content tree: comments are feedback beside
       // it, found with hadron_find_nodes nodeKind COMMENTS (GraphQL contentScope).
+      // #5452 — `includeSystemNodes` is in this tool's shape and deliberately not read: this read applies no
+      // node-type default (comments are its only exclusion), so system nodes are listed either way (pinned).
       const where: Record<string, unknown> = { deletedAt: null, nodeType: { not: COMMENT_NODE_TYPE } };
       if (prefix) where.loc = { startsWith: prefix + ':' };
       if (memoryId) where.memoryId = memoryId;
