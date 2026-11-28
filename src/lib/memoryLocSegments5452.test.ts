@@ -19,9 +19,16 @@ import { Client } from 'pg';
 import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../test/helpers.js';
 import { generateId } from './id.js';
-import * as defaults from './retrieval/defaultNodeTypes.js';
-import * as segments from './memoryLocSegments.js';
-import { locSegmentsWalkSql, readLocSegments, segmentEligibleSql, SEGMENT_ELIGIBLE_INDEX } from './memoryLocSegments.js';
+import { defaultExcludedNodeTypes, UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES } from './retrieval/defaultNodeTypes.js';
+import {
+  SEGMENT_ELIGIBLE_INDEX,
+  SEGMENT_INELIGIBLE_NODE_TYPES,
+  SEGMENT_WITH_SYSTEM_INDEX,
+  locSegmentsWalkSql,
+  readLocSegments,
+  segmentEligibleSql,
+  segmentIneligibleNodeTypes,
+} from './memoryLocSegments.js';
 
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 const prismaDir = new URL('../../prisma/', import.meta.url);
@@ -30,15 +37,11 @@ const MIGRATION = 'migrations/20261127234000_nodes_segment_key_with_system_index
 /** The flagged predicate, spelled out: system rows are in, chat-message and comment rows are not. */
 const WITH_SYSTEM_PREDICATE = `deleted_at IS NULL AND node_type <> ALL(ARRAY['chat-message','comment']) AND loc <> ''`;
 
-type ExcludedFn = (filter?: { includeSystemNodes?: unknown } | null) => readonly string[];
-const defaultExcludedNodeTypes = (defaults as unknown as { defaultExcludedNodeTypes?: ExcludedFn }).defaultExcludedNodeTypes;
-const flaggedSql = (alias?: string) =>
-  (segmentEligibleSql as unknown as (alias?: string, opts?: { includeSystemNodes?: boolean | null }) => string)(alias, { includeSystemNodes: true });
+const flaggedSql = (alias?: string) => segmentEligibleSql(alias, { includeSystemNodes: true });
 
 describe('#5452 one function decides the default node-type exclusion', () => {
   it('returns system and chat-message by default, and chat-message alone for exactly true', () => {
-    expect(defaultExcludedNodeTypes, 'defaultExcludedNodeTypes is exported').toBeTypeOf('function');
-    const fn = defaultExcludedNodeTypes!;
+    const fn = defaultExcludedNodeTypes;
     for (const filter of [undefined, null, {}, { includeSystemNodes: undefined }, { includeSystemNodes: null }, { includeSystemNodes: false }]) {
       expect(fn(filter), JSON.stringify(filter)).toEqual(['system', 'chat-message']);
     }
@@ -51,7 +54,7 @@ describe('#5452 one function decides the default node-type exclusion', () => {
     expect(fn({ includeSystemNodes: true })).toContain('chat-message');
     expect(Object.isFrozen(fn())).toBe(true);
     expect(Object.isFrozen(fn({ includeSystemNodes: true }))).toBe(true);
-    expect(fn()).toEqual([...defaults.UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES]);
+    expect(fn()).toEqual([...UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES]);
   });
 
   it('no production code reads UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES directly: every site asks the function', () => {
@@ -76,13 +79,13 @@ describe('#5452 one function decides the default node-type exclusion', () => {
   });
 
   it('the segments read derives both of its lists from that function, plus comment', () => {
-    const fn = defaultExcludedNodeTypes!;
-    expect(segments.SEGMENT_INELIGIBLE_NODE_TYPES).toEqual([...fn(), 'comment']);
-    const ineligible = (segments as unknown as { segmentIneligibleNodeTypes?: ExcludedFn }).segmentIneligibleNodeTypes;
-    expect(ineligible, 'segmentIneligibleNodeTypes is exported').toBeTypeOf('function');
-    expect(ineligible!()).toEqual([...fn(), 'comment']);
-    expect(ineligible!({ includeSystemNodes: true })).toEqual([...fn({ includeSystemNodes: true }), 'comment']);
-    expect(ineligible!({ includeSystemNodes: false })).toEqual([...fn(), 'comment']);
+    const fn = defaultExcludedNodeTypes;
+    expect(SEGMENT_INELIGIBLE_NODE_TYPES).toEqual([...fn(), 'comment']);
+    expect(segmentIneligibleNodeTypes()).toEqual([...fn(), 'comment']);
+    expect(segmentIneligibleNodeTypes({ includeSystemNodes: true })).toEqual([...fn({ includeSystemNodes: true }), 'comment']);
+    expect(segmentIneligibleNodeTypes({ includeSystemNodes: true })).toEqual(['chat-message', 'comment']);
+    expect(segmentIneligibleNodeTypes({ includeSystemNodes: false })).toEqual([...fn(), 'comment']);
+    expect(segmentIneligibleNodeTypes({ includeSystemNodes: null })).toEqual(['system', 'chat-message', 'comment']);
   });
 });
 
@@ -99,10 +102,10 @@ describe('#5452 the with-system partial index: lockstep and predicate', () => {
     expect(flaggedSql('n')).toBe(WITH_SYSTEM_PREDICATE.replace(/\b(deleted_at|node_type|loc) /g, 'n.$1 '));
     const unflagged = `deleted_at IS NULL AND node_type <> ALL(ARRAY['system','chat-message','comment']) AND loc <> ''`;
     expect(segmentEligibleSql()).toBe(unflagged);
-    const loose = segmentEligibleSql as unknown as (alias?: string, opts?: { includeSystemNodes?: boolean | null }) => string;
-    expect(loose(undefined, { includeSystemNodes: false })).toBe(unflagged);
-    expect(loose(undefined, { includeSystemNodes: null })).toBe(unflagged);
-    expect(loose(undefined, {})).toBe(unflagged);
+    expect(segmentEligibleSql(undefined, { includeSystemNodes: false })).toBe(unflagged);
+    expect(segmentEligibleSql(undefined, { includeSystemNodes: null })).toBe(unflagged);
+    expect(segmentEligibleSql(undefined, {})).toBe(unflagged);
+    expect(segmentEligibleSql(undefined, null)).toBe(unflagged);
   });
 
   it('the migration is one CREATE INDEX CONCURRENTLY statement and nothing else', () => {
@@ -121,7 +124,7 @@ describe('#5452 the with-system partial index: lockstep and predicate', () => {
   });
 
   it('the name the walk relies on is the one both files create', () => {
-    expect((segments as unknown as { SEGMENT_WITH_SYSTEM_INDEX?: string }).SEGMENT_WITH_SYSTEM_INDEX).toBe(WITH_SYSTEM_INDEX);
+    expect(SEGMENT_WITH_SYSTEM_INDEX).toBe(WITH_SYSTEM_INDEX);
   });
 
   it('the database built from post-push.sql holds the index, valid: the first partial index with system rows let in', async () => {
@@ -144,29 +147,35 @@ describe('#5452 the with-system partial index: lockstep and predicate', () => {
   });
 
   it('the migration file, sent as ONE simple query the way migrate deploy sends it, builds the same valid index', async () => {
-    const def = async (pg: Client) => (await pg.query(
-      `SELECT pg_get_indexdef(c.oid) AS def, i.indisvalid AS valid FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
-       WHERE c.relname = $1 AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = current_schema())`, [WITH_SYSTEM_INDEX])).rows[0];
+    // Built on a copy of `nodes` in a scratch schema, never on the real table: rebuilding the real index would
+    // leave it more compact than its twin, and the planner then prefers it for the DEFAULT read in every later
+    // file of this worker (#3650; it flipped memoryLocSegments2836.test.ts's plan when this pin did that).
+    const scratch = `mig5452_${generateId().slice(0, 12)}`;
     const pg = new Client({ connectionString: process.env.DATABASE_URL });
     await pg.connect();
+    const defIn = async (schema: string) => (await pg.query(
+      `SELECT pg_get_indexdef(c.oid) AS def, i.indisvalid AS valid FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+       WHERE c.relname = $1 AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = $2)`, [WITH_SYSTEM_INDEX, schema])).rows[0];
     try {
-      const before = await def(pg);
-      expect(before?.valid).toBe(true);
-      await pg.query(`DROP INDEX ${WITH_SYSTEM_INDEX}`);
-      expect(await def(pg)).toBeUndefined();
-      try {
-        // No parameters, so node-postgres uses the simple protocol: the whole file is one message. A second
-        // statement in the file would make it an implicit transaction and CONCURRENTLY would fail (SQLSTATE 25001).
-        await pg.query(read(MIGRATION));
-        expect(await def(pg)).toEqual(before);
-        // Re-running is a no-op (IF NOT EXISTS), as a retried deploy needs.
-        await pg.query(read(MIGRATION));
-        expect(await def(pg)).toEqual(before);
-      } finally {
-        // Whatever happened above, later files in this worker get the index post-push.sql gives them.
-        await pg.query(statementOf(read('post-push.sql'), false));
-      }
+      const home: string = (await pg.query('SELECT current_schema() AS s')).rows[0].s;
+      const real = await defIn(home);
+      expect(real?.valid).toBe(true);
+      await pg.query(`CREATE SCHEMA ${scratch}`);
+      await pg.query(`CREATE TABLE ${scratch}.nodes (LIKE ${home}.nodes INCLUDING DEFAULTS)`);
+      await pg.query(`SET search_path TO ${scratch}`);
+      // No parameters, so node-postgres uses the simple protocol: the whole file is one message. A second
+      // statement in the file would make it an implicit transaction and CONCURRENTLY would fail (SQLSTATE 25001).
+      await pg.query(read(MIGRATION));
+      const built = await defIn(scratch);
+      expect(built?.valid).toBe(true);
+      expect(built.def.replace(` ON ${scratch}.nodes `, ` ON ${home}.nodes `)).toBe(real.def);
+      // Re-running is a no-op (IF NOT EXISTS), as a retried deploy needs.
+      await pg.query(read(MIGRATION));
+      expect(await defIn(scratch)).toEqual(built);
+      // The real index was never touched.
+      expect(await defIn(home)).toEqual(real);
     } finally {
+      await pg.query(`DROP SCHEMA IF EXISTS ${scratch} CASCADE`).catch(() => {});
       await pg.end();
     }
   }, 60_000);
@@ -222,12 +231,12 @@ describe('#5452 the flagged walk reads the with-system index and never the messa
     await db.$executeRawUnsafe('ANALYZE nodes');
   });
 
-  const flaggedWalk = (parent: string) => (locSegmentsWalkSql as unknown as (args: Record<string, unknown>) => { text: string; values: unknown[] })(
-    { memoryIds: [memoryId], excludeNodeIds: [], parent, limit: 20, after: null, includeSystemNodes: true });
+  const flaggedWalk = (parent: string) =>
+    locSegmentsWalkSql({ memoryIds: [memoryId], excludeNodeIds: [], parent, limit: 20, after: null, includeSystemNodes: true });
 
   it('the fixture answers as the contract says: system branches listed, the message branch still not node-backed below the root', async () => {
     const read = (parent: string, includeSystemNodes?: boolean) =>
-      readLocSegments(db, { memoryIds: [memoryId], excludeNodeIds: [], parent, limit: 20, after: null, includeSystemNodes } as never);
+      readLocSegments(db, { memoryIds: [memoryId], excludeNodeIds: [], parent, limit: 20, after: null, includeSystemNodes });
     const names = async (parent: string, flag?: boolean) => (await read(parent, flag)).items.map((i) => `${i.segment}:${i.hasNode}`);
     expect(await names('')).toEqual(['doc:true', 'team-chat:true', 'zz:true']);
     expect(await names('', true)).toEqual(['conversations:true', 'doc:true', 'prompts:false', 'team-chat:true', 'zz:true']);

@@ -9,7 +9,7 @@
  * omitted are today's behaviour.
  */
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildSchema, GraphQLInputObjectType, GraphQLObjectType } from 'graphql';
+import { buildSchema, GraphQLInputObjectType, GraphQLObjectType, parse, validate } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -90,7 +90,7 @@ beforeEach(async () => {
   const targetId = generateId();
   await db.node.createMany({
     data: [
-      // The system memory: a `conversations` parent with system children (the Know Yourself shape, #5390),
+      // The system memory: a `conversations` parent with system children (a chatbot definition's shape, #5390),
       // one info sibling, one chat-message sibling and (below) one comment sibling.
       { ...base, id: generateId(), memoryId: sys.id, loc: 'conversations', name: 'harbor conversations', nodeType: 'system' },
       ...SYSTEM_CHILDREN.map((loc) => ({ ...base, id: generateId(), memoryId: sys.id, loc, name: `harbor ${loc}`, nodeType: 'system' })),
@@ -187,6 +187,26 @@ describe('#5452 findNodes: includeSystemNodes lifts the system node-type default
     // Explicit chat-message still wins with the flag set.
     const chat = await findNodes({ ...args, filter: { memoryRefs: [sys.id], nodeType: 'chat-message', includeSystemNodes: true }, limit: 50 });
     expect(locs(chat)).toEqual(['chatlog:001', 'chatlog:002', 'conversations:msg']);
+  });
+
+  // The hydration re-read would hide a ranking statement that let the flag widen an explicit type filter: the
+  // rows come back filtered either way. A one-row page does not: `conversations` (system) sorts before the first
+  // info node, so a statement that ranked it would hand back an empty page (mutant M7).
+  it.each([
+    ['keyword', { query: 'harbor', mode: 'keyword' }],
+    ['regex', { query: 'harbor', mode: 'regex' }],
+  ])('%s: an explicit type filter decides in the ranking statement too, so a system node never takes a page slot', async (_m, args) => {
+    for (const filter of [{ nodeTypes: ['info'] }, { nodeType: 'info' }]) {
+      const res = await findNodes({ ...args, sort: 'loc', filter: { memoryRefs: [sys.id], ...filter, includeSystemNodes: true }, limit: 1 });
+      expect(locs(res), JSON.stringify(filter)).toEqual(['conversations:note']);
+    }
+  });
+
+  it('with the flag and an explicit type filter, the browse total counts the named type only', async () => {
+    for (const filter of [{ nodeTypes: ['info'] }, { nodeType: 'info' }]) {
+      const res = await findNodes({ filter: { memoryRefs: [sys.id], ...filter, includeSystemNodes: true }, includeTotal: true, limit: 1 });
+      expect(res.total, JSON.stringify(filter)).toBe(2);
+    }
   });
 
   it.each(MODES)('%s: a caller who cannot read the memory gets the same empty result with and without the flag', async (_m, args) => {
@@ -317,5 +337,16 @@ describe('#5452 the wire contract: the SDL declares what the resolvers read', ()
     expect(String(arg!.type)).toBe('Boolean');
     expect(field.description).toContain('includeSystemNodes');
     expect(field.description).toContain('chat-message');
+  });
+
+  it('a real operation that sends the flag on both fields validates; a non-boolean value does not', () => {
+    const op = (value: string) => parse(`query {
+      findNodes(filter: { memoryRefs: ["m"], childrenOf: "conversations", includeSystemNodes: ${value} }) { hits { node { loc } } }
+      memoryLocSegments(memoryRefs: ["m"], parentLoc: "", includeSystemNodes: ${value}) { items { segment hasNode memoryId } hasMore endCursor }
+      appNodes(appRef: "a", filter: { includeSystemNodes: ${value} }) { loc }
+    }`);
+    for (const ok of ['true', 'false', 'null']) expect(validate(schema, op(ok)), ok).toEqual([]);
+    expect(validate(schema, op('"yes"')).map((e) => e.message).join(' | ')).toContain('Boolean cannot represent a non boolean value');
+    expect(validate(schema, op('1'))).toHaveLength(3);
   });
 });
