@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFile as execFileCb, execFileSync } from 'child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { db } from '../db/client.js';
@@ -20,10 +20,6 @@ import { generateId } from '../../lib/id.js';
 
 const env = vi.hoisted(() => ({
   failure: null as unknown, root: '', bare: '', failOn: null as null | ((args: string[]) => boolean),
-  /** A one-shot hold: the FIRST matching `execGit` call signals `entered`, then waits for `released`. */
-  hold: null as null | { on: (args: string[]) => boolean; entered: () => void; released: Promise<void> },
-  /** Checkout-lock arrivals and acquisitions, in order (the wrapper mock below). */
-  lockEvents: [] as string[],
 }));
 const TOKEN = 'tok-5469-secret';
 const SOURCE = 'https://github.com/acme/repo-5469.git';
@@ -35,27 +31,9 @@ vi.mock('../../config.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../config.js')>();
   return { ...real, get GRAPHS_PATH() { return env.root; } };
 });
-// Only execFile is canned (syncGraphFromGithub's git leg); execFileSync stays real for this file.
-vi.mock('child_process', async (importOriginal) => {
-  const real = await importOriginal<typeof import('child_process')>();
-  return {
-    ...real,
-    execFile: vi.fn((...args: unknown[]) => {
-      const argv = args[1] as string[];
-      const cb = args[args.length - 1] as Function;
-      if (typeof cb !== 'function') return;
-      cb(null, {
-        stdout: argv.includes('ls-remote') ? 'ref: refs/heads/main\tHEAD\n' : argv.includes('rev-list') ? '0\n' : '',
-        stderr: '',
-      });
-    }),
-  };
-});
 vi.mock('./execGit.js', () => ({
   execGit: vi.fn(async (args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}) => {
     if (env.failOn?.(args)) throw env.failure ?? new Error('Git command failed. Check the repository and branch, then retry.');
-    const hold = env.hold;
-    if (hold?.on(args)) { env.hold = null; hold.entered(); await hold.released; }
     const stdout = execFileSync('git', [
       '-c', 'protocol.allow=never', '-c', 'protocol.file.allow=always',
       '-c', `url.${env.bare}.insteadOf=${SOURCE}`,
@@ -66,26 +44,10 @@ vi.mock('./execGit.js', () => ({
   }),
 }));
 
-// Observe the checkout lock's queue WITHOUT replacing the real lock (the #430 sweep harness's pattern): every
-// arrival and every acquisition is recorded, so a pin can tell "queued behind" from "ran alongside".
-vi.mock('./mirrorCheckoutLock.js', async importOriginal => {
-  const real = await importOriginal<typeof import('./mirrorCheckoutLock.js')>();
-  return {
-    ...real,
-    withMirrorCheckoutLock: <T>(id: string, work: () => Promise<T>, opts?: { fenceEncryption?: boolean }) => {
-      env.lockEvents.push('requested');
-      return real.withMirrorCheckoutLock(id, async () => { env.lockEvents.push('acquired'); return work(); }, opts);
-    },
-  };
-});
-
 import { gitMirrorSweepTick } from '../../jobs/sweepGitMirrorObligations.js';
-import { syncGraphFromGithub, type MemoryWithOrg } from './syncGraphFromGithub.js';
-import { nodeFilePath } from './nodeFrontmatter.js';
 import { memoryLocalPath } from './gitMirrorCheckout.js';
 import { writeNodeToGit } from './writeNodeToGit.js';
 import { settleMirrorObligations, takeAttemptSeq } from './mirrorObligations.js';
-import { validateMemoryNodes } from '../../lib/memoryValidation.js';
 
 const IDENT = { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
 const git = (cwd: string, ...args: string[]) =>
@@ -137,12 +99,6 @@ const cloneRemote = () => {
   mkdirSync(dirname(local), { recursive: true });
   execFileSync('git', ['-c', 'protocol.file.allow=always', '-c', `url.${env.bare}.insteadOf=${SOURCE}`, 'clone', SOURCE, local], { stdio: 'ignore' });
 };
-const sequenceValue = () => db.$queryRaw<Array<{ value: string; is_called: boolean }>>`SELECT last_value::text AS value, is_called FROM git_mirror_attempt_seq`;
-/** Poll until `done` holds; fails the test after five seconds instead of hanging a held sweep forever. */
-const eventually = async (done: () => boolean) => {
-  for (let i = 0; i < 500 && !done(); i++) await new Promise(resolve => setTimeout(resolve, 10));
-  if (!done()) throw new Error('not reached within five seconds');
-};
 
 const makeNode = (loc: string, id = generateId()) => createDbNode(db, { id, loc, memoryId, name: loc || 'root' });
 const softDelete = (id: string) => db.node.update({ where: { id }, data: { deletedAt: new Date() } });
@@ -166,8 +122,6 @@ beforeEach(async () => {
   env.root = mkdtempSync(join(tmpdir(), 'hadron-5469-'));
   env.failOn = null;
   env.failure = null;
-  env.hold = null;
-  env.lockEvents = [];
   vi.spyOn(console, 'log').mockImplementation(() => {});
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -212,9 +166,27 @@ describe('#5469 a node write leaves a PENDING WRITE obligation', () => {
     ['nodeType', { nodeType: 'task' }],
     ['role', { role: 'process' }],
     ['isRunnable', { isRunnable: true }],
+    ['objectType', { objectType: 'thing' }],
+    ['abstractOriginHash', { abstractOriginHash: 'h1' }],
+    ['contentHash', { contentHash: 'h2' }],
+    ['isPlaceholder', { isPlaceholder: true }],
   ])('an update of %s that changes the file owes a WRITE', async (_name, data) => {
     await setup({ repo: false });
     const node = await makeNode('docs:a');
+    await db.gitMirrorObligation.deleteMany({});
+    await update(node.id, data);
+    expect(await rows()).toEqual([wrote(node.id)]);
+  });
+
+  // chk_nodes_authorship_shape ties the four authorship columns together, so each is changed from a valid TASK stamp.
+  it.each([
+    ['authoredByTask', { authoredByTask: 'task-2' }],
+    ['authoredByRevision', { authoredByRevision: 4 }],
+    ['authorshipKind (to HUMAN, with its companions)', { authorshipKind: 'HUMAN', authoredByTask: null, authoredByRevision: null, authoredByHuman: 'someone' }],
+  ])('an update of %s that changes the file owes a WRITE', async (_name, data) => {
+    await setup({ repo: false });
+    const node = await makeNode('docs:a');
+    await update(node.id, { authorshipKind: 'TASK', authoredByTask: 'task-1', authoredByRevision: 3, authoredAt: new Date() });
     await db.gitMirrorObligation.deleteMany({});
     await update(node.id, data);
     expect(await rows()).toEqual([wrote(node.id)]);
@@ -461,6 +433,55 @@ describe('#5469 the sweep applies the debt and the ordinary mirror settles it', 
     await update(node.id, { content: 'three' }); // collides with the existing row
     await settleMirrorObligations(db, memoryId, [{ nodeId: node.id, kind: 'WRITE', branch: 'hadron-updates' }], { result: 'cleared' }, attempt);
     expect(await rows()).toEqual([wrote(node.id)]);
+  });
+});
+
+describe('#5469 the trigger column list and the closed words', () => {
+  // The UPDATE trigger's column list, read back from pg_trigger: the file is the frontmatter (FrontmatterNodeFields in
+  // nodeFrontmatter.ts) plus the body, so a serialized field that is missing here is a silently stale mirror file.
+  const EXPECTED = [
+    'name', 'alias', 'loc', 'node_type', 'object_type', 'description', 'abstract', 'abstract_origin_hash', 'content', 'content_hash',
+    'tags', 'seq', 'data', 'properties', 'role', 'is_runnable', 'is_placeholder', 'authorship_kind', 'authored_by_task',
+    'authored_by_revision',
+  ];
+  it('the UPDATE trigger lists exactly the file-carrying columns (and the pin names each one)', async () => {
+    await setup({ repo: false });
+    const cols = await db.$queryRawUnsafe<Array<{ attname: string }>>(
+      `SELECT a.attname FROM pg_trigger t JOIN pg_attribute a ON a.attrelid = t.tgrelid AND a.attnum = ANY (t.tgattr)
+       WHERE t.tgname = 'git_mirror_node_write_update' AND t.tgrelid = 'nodes'::regclass`);
+    expect(cols.map(c => c.attname).sort()).toEqual([...EXPECTED].sort());
+  });
+
+  it('every column the frontmatter builder reads from a node is in that list', () => {
+    const src = readFileSync(new URL('./nodeFrontmatter.ts', import.meta.url), 'utf8');
+    const iface = /export interface FrontmatterNodeFields \{([\s\S]*?)\n\}/.exec(src)![1]!;
+    const camel = [...iface.matchAll(/^\s{2}(\w+)\??:/gm)].map(m => m[1]!).filter(f => f !== 'id');
+    const snake = camel.map(f => f.replace(/[A-Z]/g, c => '_' + c.toLowerCase())).map(f => f === 'is_runnable' ? 'is_runnable' : f);
+    expect(snake.filter(c => !EXPECTED.includes(c)), 'a FrontmatterNodeFields field the trigger does not watch').toEqual([]);
+  });
+
+  it('a restore that also changes a mirrored column captures the write and still cancels the REMOVE debt', async () => {
+    await setup({ repo: false });
+    const node = await makeNode('docs:a');
+    await softDelete(node.id);
+    await update(node.id, { deletedAt: null, content: 'back and changed' });
+    expect((await rows()).map(r => r.kind)).toEqual(['WRITE']);
+  });
+
+  it('the shape CHECK refuses free text on every state a WRITE row can be in, not just PENDING', async () => {
+    await setup({ repo: false });
+    const node = await makeNode('docs:a');
+    for (const state of ['PENDING', 'FAILED', 'EXHAUSTED', 'NOT_CLONED'] as const) {
+      await db.gitMirrorObligation.updateMany({ where: { nodeId: node.id }, data: { state, errorClass: state === 'PENDING' ? 'PENDING' : state === 'NOT_CLONED' ? 'NOT_CLONED' : 'PUSH_FAILED' } });
+      await expect(db.gitMirrorObligation.updateMany({ where: { nodeId: node.id }, data: { errorClass: 'boom https://x-access-token:s3cret@github.com' } }), state).rejects.toThrow();
+    }
+  });
+
+  it('the capture functions pin their search_path', async () => {
+    const fns = await db.$queryRawUnsafe<Array<{ proname: string; proconfig: string[] | null }>>(
+      `SELECT proname, proconfig FROM pg_proc WHERE proname IN ('hadron_git_mirror_capture_node_write', 'hadron_git_mirror_capture_node_removal', 'hadron_git_mirror_cancel_node_removal')`);
+    expect(fns).toHaveLength(3);
+    for (const f of fns) expect(f.proconfig, f.proname).toContain('search_path=public, pg_temp');
   });
 });
 

@@ -9,7 +9,8 @@
 -- columns; a PENDING row (a #425 captured delete debt, born from the trigger below before any attempt) says so in both
 -- columns too, and NO other state wears that word (a debt that was never attempted cannot have failed, let alone
 -- exhausted its retries); a FAILED row can wear neither word. A REMOVE row names the old loc it must vacate; a WRITE row
--- has none. `attempts` and `attempt_seq` only grow.
+-- has none. `attempts` and `attempt_seq` only grow, except that a new node write re-arms an EXHAUSTED WRITE row to one
+-- attempt (#5469, below).
 CREATE SEQUENCE IF NOT EXISTS git_mirror_attempt_seq AS bigint;
 ALTER TABLE git_mirror_obligations DROP CONSTRAINT IF EXISTS chk_git_mirror_obligation_shape;
 ALTER TABLE git_mirror_obligations ADD CONSTRAINT chk_git_mirror_obligation_shape CHECK (
@@ -45,8 +46,8 @@ LANGUAGE plpgsql SET search_path = public, pg_temp AS $capture$
 DECLARE
   v_branch text;
 BEGIN
-  -- #5469: a node that goes owes no file write. Drop its WRITE debt (every branch) first, so the sweep can never apply a
-  -- WRITE after this REMOVE; the REMOVE below is the only debt that survives. Not gated on eligibility: a row for a
+  -- #5469: a node that goes owes no file write. Drop its WRITE debt (every branch) first, so the sweep never applies a
+  -- STORED WRITE after this REMOVE (an attempt already in flight that read the live node is covered by the REMOVE row); the REMOVE below is the only debt that survives. Not gated on eligibility: a row for a
   -- memory that stopped being mirrored is just as dead, and a cascade from a deleted memory removes it anyway.
   DELETE FROM git_mirror_obligations WHERE memory_id = OLD.memory_id AND node_id = OLD.id AND kind = 'WRITE';
   SELECT COALESCE(write_branch, 'hadron-updates') INTO v_branch
@@ -115,6 +116,9 @@ CREATE TRIGGER git_mirror_node_remove_restore AFTER UPDATE OF deleted_at ON node
 -- memory with no {client} template branch. A memory deleted ahead of its nodes owes nothing, which keeps a memory delete
 -- and a write inside the same transaction from aborting on the obligations foreign key (cor:api:190:02: a dying
 -- repository never fails the database write). The capture never raises for a condition it can see; it only inserts.
+-- It is an insert (plus one nextval) inside every eligible node write, so the capture shares the writer's fate: a dropped
+-- sequence or a drifted CHECK on git_mirror_obligations would fail the node write itself. That is the accepted cost of
+-- option a (Holger 2026-11-16): the debt is recorded in the same transaction or the write does not happen.
 --
 -- The row's key is (memory_id, node_id, 'WRITE', '', branch), so repeated writes of one node collapse to one row. On a
 -- conflict the row is re-fenced rather than left alone: attempt_seq takes a new nextval, so an attempt that numbered itself
