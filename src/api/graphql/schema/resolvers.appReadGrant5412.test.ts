@@ -176,10 +176,14 @@ describe('a stored row the creation door would refuse reaches nothing', () => {
     const k = await db.memory.create({ data: { id: generateId(), name: 'k', urn: `${org.urn}:k-${generateId().slice(-8)}`, class: 'knowledge', visibility: 'ORGANIZATION', organizationId: org.id } as never });
     await activeGrant({ memory: org.id, branch: 'docs' }, admin);
     await activeGrant({ memory: [m.id], branch: 'docs' });
-    const d = await grantReadReachDetailFor(db, keyAuth());
-    expect({ whole: [...d.whole], branches: [...d.branches.keys()] }).toEqual({ whole: [], branches: [] });
-    expect(await reachFor(keyAuth(), k.id)).toEqual(NONE);
-    expect(await reachFor(keyAuth(), m.id)).toEqual(NONE);
+    // Form (a) reaches runs only, so judge with a userless run (and with a key, for the list row).
+    const r = runAuth((await run('MANUAL', null)).id);
+    for (const auth of [r, keyAuth()]) {
+      const d = await grantReadReachDetailFor(db, auth);
+      expect({ whole: [...d.whole], branches: [...d.branches.keys()] }).toEqual({ whole: [], branches: [] });
+      expect(await reachFor(auth, k.id)).toEqual(NONE);
+      expect(await reachFor(auth, m.id)).toEqual(NONE);
+    }
   });
 });
 
