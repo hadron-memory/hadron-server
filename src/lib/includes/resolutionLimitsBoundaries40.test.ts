@@ -150,11 +150,13 @@ describe('#40 approved lookups are not memoized, and every approval query is cha
   // Approval state is not hidden from this reader (it may read the target, and its approval with it), so the two
   // need not cost the same: the charge follows the queries each actually runs. A target the reader may NOT read
   // never reaches the approval reads at all (the URN parity pins below).
-  it('a target with no approved revision pays for the queries it runs: the search, one verdict, one history page', async () => {
+  // #5481 restated: was "...: the search, one verdict, one history page" at 16 lookups. A verdict reads the record at the
+  // revision asked about and nothing else, so the page of approval history (one lookup per tag) is gone: 14.
+  it('a target with no approved revision pays for the queries it runs: the search and one verdict, no history page (#5481)', async () => {
     await target('t', 'v', false);
-    await mk('two', '{{> t approved}}'.repeat(2)); // 1 + 2 × (3 + 3 + 1) + 1 = 16
-    expect(await readUnder('two', { maxLookups: 16 })).toEqual({ content: `${BROKEN_INCLUDE_NOTICE}${BROKEN_INCLUDE_NOTICE}`, limit: null });
-    expect(await readUnder('two', { maxLookups: 15 })).toEqual({ content: null, limit: 'lookups' });
+    await mk('two', '{{> t approved}}'.repeat(2)); // 1 + 2 × (3 + 3) + 1 = 14
+    expect(await readUnder('two', { maxLookups: 14 })).toEqual({ content: `${BROKEN_INCLUDE_NOTICE}${BROKEN_INCLUDE_NOTICE}`, limit: null });
+    expect(await readUnder('two', { maxLookups: 13 })).toEqual({ content: null, limit: 'lookups' });
   });
 });
 

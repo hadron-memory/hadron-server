@@ -267,9 +267,11 @@ describe('#4016 statements per row', () => {
     for (let k = 2; k < 6; k++) await make(k);
     const large = await previewStatements();
     expect(large.rows - small.rows).toBe(4);
-    // the serve's own approval walk (kept for a node with snapshots): 10 statements a node, no signature walk (a node with no
-    // signature record cannot count a revision), against 23 + the second walk before.
-    expect((large.statements - small.statements) / (large.rows - small.rows)).toBe(10);
+    // the serve's own approval walk (kept for a node with snapshots): 9 statements a node, no signature walk (a node with no
+    // signature record cannot count a revision), against 23 + the second walk before. #5481 restated: was 10; the walk's
+    // pre-filter no longer looks up which approval hashes the node's history carries (a revision is judged by the record
+    // at it), which was one statement a node.
+    expect((large.statements - small.statements) / (large.rows - small.rows)).toBe(9);
   }, 60_000);
 
   it("switch-on's own digest recompute (requireFreshSigningPreview) adds NO statements per additional row", async () => {

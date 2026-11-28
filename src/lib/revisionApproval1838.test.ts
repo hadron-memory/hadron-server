@@ -1,6 +1,7 @@
 /**
- * #1838 — historical per-revision approval (cor:dmo:060:04, R7): a revision is
- * approved when some recorded approval covers exactly its hashed content.
+ * #1838 — historical per-revision approval (cor:dmo:060:04). Since #5481 (Holger, 2026-11-28) a revision is approved
+ * only when an approval is recorded AT it; the R7 rule this file first pinned ("approved when some recorded approval
+ * covers exactly its hashed content") is reversed, and the three tests that pinned it are restated below, each marked.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
@@ -65,13 +66,15 @@ describe('revisionApprovalOf (#1838, R7)', () => {
     expect(await stateOf(n.id, 4)).toBe('NOT_APPROVED');
   });
 
-  it('3 (R7 later): an approval recorded on a later identical-content revision covers the earlier one', async () => {
+  // #5481 restated: was "3 (R7 later): an approval recorded on a later identical-content revision covers the earlier
+  // one" (revision 1 read APPROVED by revision 2's record). No approval is recorded at revision 1.
+  it('3 (#5481): an approval recorded on a later identical-content revision does NOT reach back to the earlier one', async () => {
     const n = await mk('r:3');
     await touchMeta(n.id, ['x']); // rev 2: same text as rev 1
     await approve(n.id); // recorded at rev 2
     await edit(n.id, 'changed'); // rev 3
-    expect(await revisionApprovalOf(db, n.id, 1)).toMatchObject({ state: 'APPROVED', record: { revision: 2 } });
-    expect(await stateOf(n.id, 2)).toBe('APPROVED');
+    expect(await revisionApprovalOf(db, n.id, 1)).toEqual({ state: 'NOT_APPROVED', record: null });
+    expect(await revisionApprovalOf(db, n.id, 2)).toMatchObject({ state: 'APPROVED', record: { revision: 2 } });
   });
 
   it('4/5: changed content and never-approved revisions (even between approved ones) read not approved', async () => {
@@ -107,6 +110,9 @@ describe('revisionApprovalOf (#1838, R7)', () => {
     expect(await stateOf(n.id, 9)).toBe('NOT_APPROVED');
   });
 
+  // #5481 restated: the pre-#620-style row at revision 7 (same text as the approved revision, no approval columns) read
+  // APPROVED "by identical text to a real record (R7)" until the record's row was deleted. It carries no approval, so it
+  // reads NOT_APPROVED from the start; the rest of the test is unchanged.
   it('11: legacy rows: only a row with copied approval columns and a revNo counts', async () => {
     const n = await mk('r:7');
     await approve(n.id); // rev 1
@@ -127,9 +133,10 @@ describe('revisionApprovalOf (#1838, R7)', () => {
     });
     expect(carried.approvalHash).not.toBeNull();
     expect(await stateOf(n.id, 1)).toBe('APPROVED');
-    expect(await stateOf(n.id, 7)).toBe('APPROVED'); // identical text to a real record (R7)
+    expect(await stateOf(n.id, 7)).toBe('NOT_APPROVED'); // identical text to a real record, but no approval of its own (#5481)
     await db.nodeRevision.deleteMany({ where: { id: carried.id } });
-    expect(await stateOf(n.id, 7)).toBe('NOT_APPROVED'); // the legacy NULL-revNo row covers nothing
+    expect(await stateOf(n.id, 1)).toBe('NOT_APPROVED'); // the record's row is gone
+    expect(await stateOf(n.id, 7)).toBe('NOT_APPROVED'); // and the legacy NULL-revNo row covers nothing
   });
 
   it('records from another capture memory never cover this one', async () => {
@@ -196,11 +203,14 @@ describe('entering an encrypted memory ends approvals (#1838, cor:dmo:120:04)', 
     for (const r of [1, 2, 4]) expect(await stateOf(n.id, r)).toBe('NOT_APPROVED');
     // E-D: a node outside the seam call is untouched.
     expect((await db.node.findUniqueOrThrow({ where: { id: other.id } })).approvalHash).not.toBeNull();
-    // Fresh approval after the seam counts again and covers byte-identical text.
+    // Fresh approval after the seam counts again, for the revision it is recorded at. #5481 restated: this ended
+    // "and covers byte-identical text" (revision 1 read APPROVED again through the new record); an approval does not
+    // reach back, so the ended revision 1 stays not approved.
     const live = await db.node.findUniqueOrThrow({ where: { id: n.id } });
     const receipt = await approve(n.id);
     expect(receipt.approval.revision).toBe(live.revSeq);
-    expect(await stateOf(n.id, 1)).toBe('APPROVED');
+    expect(await stateOf(n.id, live.revSeq)).toBe('APPROVED');
+    expect(await stateOf(n.id, 1)).toBe('NOT_APPROVED');
   });
 
   it('E-A: in-place encryption runs the seam for the memory nodes, tombstones and snapshots', async () => {

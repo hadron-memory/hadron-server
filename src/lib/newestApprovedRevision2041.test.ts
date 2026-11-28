@@ -210,26 +210,36 @@ describe('the unmetered walk pre-filters by approval hash (#3801)', () => {
     expect(await same(n.id, 1)).toEqual({ found: null, truncated: false });
   });
 
-  it('the carrier lookup is bounded by the batch, not by the node\'s whole approval history', async () => {
+  // #5481 restated: this pinned that the pre-filter's lookup of CARRIERS BY TEXT HASH was bounded by the batch. A revision
+  // is now judged by the record at it alone, so there is no such lookup to bound: the pre-filter reads its own batch's
+  // rows, never the node's approval history and never a text.
+  it('the pre-filter reads only its own batch: no approval-history lookup, no grouped read, no text (#5481)', async () => {
     const n = await mk('d:7'); await approve(n.id);
     await db.nodeRevision.createMany({ data: Array.from({ length: 60 }, (_, i) => ({
       id: generateId(), nodeId: n.id, memoryId: memory.id, loc: n.loc, name: n.name, content: `old ${i}`, tags: [], revNo: 100 + i,
       approvedAt: new Date(), approvedByInfo: 't', approvalHash: `h${i}`.padEnd(64, '0'),
     })) as never });
     await db.node.update({ where: { id: n.id }, data: { revSeq: 400, content: 'changed head' } });
-    const spy = vi.spyOn(db.nodeRevision, 'groupBy');
+    const group = vi.spyOn(db.nodeRevision, 'groupBy');
+    const find = vi.spyOn(db.nodeRevision, 'findMany');
     await newestApprovedRevisionOf(db, n.id, 1);
-    const carrierReads = spy.mock.calls.map((c) => c[0] as unknown as { where?: { approvalHash?: { in?: string[] } } }).filter((a) => a?.where?.approvalHash?.in);
-    spy.mockRestore();
-    for (const a of carrierReads) expect(a.where!.approvalHash!.in!.length).toBeLessThanOrEqual(1);
-    expect(carrierReads.length).toBeGreaterThan(0);
+    const reads = find.mock.calls.map((c) => c[0] as { where?: { approvalHash?: unknown; revNo?: { in?: number[] } }; select?: Record<string, boolean>; take?: number });
+    group.mockRestore(); find.mockRestore();
+    expect(group.mock.calls.length).toBe(0);
+    expect(reads.some((r) => r.where?.approvalHash != null)).toBe(false);
+    expect(reads.some((r) => r.select?.content || r.select?.name || r.select?.abstract)).toBe(false);
+    // Every read of rows is bounded: the batch's own numbers, or the candidate enumeration's `take`.
+    for (const r of reads) expect(r.where?.revNo?.in?.length ?? r.take ?? Infinity).toBeLessThanOrEqual(2);
   });
 
-  it('repeated matching hashes cost one grouped row, not one fetched row per duplicate', async () => {
+  // #5481 restated: this pinned that many rows repeating one approval hash cost one grouped carrier row. There is no
+  // carrier lookup any more. What stays true, and is pinned instead: a row that carries an approval is left to the
+  // verdict (the pre-filter never judges integrity), and the verdict rejects one whose text does not hash to it.
+  it('rows that carry an approval are left to the verdict, which rejects the ones whose text does not hash to it (#5481)', async () => {
     const n = await mk('d:9'); await approve(n.id);
     const live = await db.node.findUniqueOrThrow({ where: { id: n.id } });
     const hash = live.approvalHash!;
-    // 120 snapshots carrying the SAME approval hash (as metadata-only revisions after one approval do); live text differs
+    // 120 snapshots carrying the SAME approval hash over text that is not the approved text; live text differs
     await db.nodeRevision.createMany({ data: Array.from({ length: 120 }, (_, i) => ({
       id: generateId(), nodeId: n.id, memoryId: memory.id, loc: n.loc, name: n.name, content: `dup ${i}`, tags: [], revNo: 100 + i,
       approvedAt: new Date(), approvedByInfo: 't', approvalHash: hash,
@@ -237,12 +247,17 @@ describe('the unmetered walk pre-filters by approval hash (#3801)', () => {
     await db.node.update({ where: { id: n.id }, data: { revSeq: 400, content: 'changed head', approvalHash: null } });
     const find = vi.spyOn(db.nodeRevision, 'findMany');
     const group = vi.spyOn(db.nodeRevision, 'groupBy');
-    await newestApprovedRevisionOf(db, n.id, 1);
+    const verdicts = vi.spyOn(db.nodeRevision, 'findFirst');
+    const result = await newestApprovedRevisionOf(db, n.id, 10);
     const unboundedCarrierRead = find.mock.calls.some((c) => (c[0] as { where?: { approvalHash?: unknown } })?.where?.approvalHash != null);
     const grouped = group.mock.calls.length;
-    find.mockRestore(); group.mockRestore();
+    const verdictReads = verdicts.mock.calls.filter((c) => (c[0] as { select?: { content?: boolean } })?.select?.content).length;
+    find.mockRestore(); group.mockRestore(); verdicts.mockRestore();
     expect(unboundedCarrierRead).toBe(false);
-    expect(grouped).toBeGreaterThan(0);
+    expect(grouped).toBe(0);
+    expect(result).toEqual({ found: null, truncated: true, resumeBelow: 211 });
+    expect(verdictReads).toBe(9); // the nine history rows of the batch; the live revision (no approval) is skipped unread
+    expect(result).toEqual(await newestApprovedRevisionOf(db, n.id, 10, meter));
   });
 
   it('a metered walk does not read the live text outside its charged verdicts', async () => {

@@ -91,10 +91,15 @@ describe('#40: a revision captured in a memory the include cannot serve is never
   });
 });
 
-describe('#40: every row of a fetched approval page is charged', () => {
+// #5481 restated. This group was "#40: every row of a fetched approval page is charged": `rev=9 approved` (text `H`, no
+// approval of its own) was served because snapshot 1's record covered its text, and the page of eight history rows it
+// read to find that record was charged ("an early valid record does not leave the rest of its page uncharged",
+// "control: at the default limits the earliest record serves"). A revision is now judged by the record AT it, so no
+// history page is fetched: the budget question the group asked no longer exists, and what replaces it is that the
+// other rows' texts are never loaded at all.
+describe('#40, #5481: an approval verdict loads the asked revision only, never other history rows', () => {
   // `t` is live at revision 10 (`v`). Snapshot 9 holds `H` with no approval of its own. Snapshot 1 is a valid
-  // approval of `H`, so it is the earliest record; snapshots 2-8 carry the same hash over 100-byte altered text
-  // (not approvals) and arrive in the same page of eight. They were loaded, so they are charged.
+  // approval of `H`; snapshots 2-8 carry the same hash over 100-byte altered text (not approvals).
   beforeEach(async () => {
     const hash = computeApprovalHash({ title: 't', abstract: null, content: 'H' });
     const t = await mk('t', 'v', { revSeq: 10 });
@@ -102,14 +107,16 @@ describe('#40: every row of a fetched approval page is charged', () => {
     for (let revNo = 1; revNo <= 8; revNo++) await snapshot(t.id, revNo, revNo === 1 ? 'H' : 'X'.repeat(100), approval);
     await snapshot(t.id, 9, 'H');
     await mk('p', '{{> t rev=9 approved}}');
+    await mk('q', '{{> t rev=1 approved}}');
   });
 
-  it('an early valid record does not leave the rest of its page uncharged', async () => {
-    expect(await readUnder('p', { maxLoadedBytes: 200 })).toMatchObject({ content: null, limit: 'loaded' });
+  it('a pinned revision with no approval of its own is the notice, and the 700 bytes of history are not charged', async () => {
+    expect(await readUnder('p', { maxLoadedBytes: 200 })).toMatchObject({ content: BROKEN_INCLUDE_NOTICE, limit: null });
+    expect(await readUnder('p')).toMatchObject({ content: BROKEN_INCLUDE_NOTICE, limit: null });
   });
 
-  it('control: at the default limits the earliest record serves', async () => {
-    expect(await readUnder('p')).toMatchObject({ content: 'H', limit: null });
+  it('control: the revision the approval is recorded at serves, within the same small budget', async () => {
+    expect(await readUnder('q', { maxLoadedBytes: 200 })).toMatchObject({ content: 'H', limit: null });
   });
 });
 

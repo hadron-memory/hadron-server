@@ -82,11 +82,14 @@ describe('#40: a missing and an unreadable URN target cost the same at the looku
   });
 });
 
-describe('#40: an approval history is charged as it is read', () => {
+// #5481 restated. This group was "#40: an approval history is charged as it is read": `rev=20 approved` paged through
+// nineteen history rows to find the record (snapshot 19) that covered revision 20's text, and paid for each (2,221
+// loaded bytes, 8 lookups). A revision is now judged by the record AT it: revision 20 carries none and is the notice,
+// revision 19 serves, and either way only the asked revision is read (302 bytes, 5 lookups).
+describe('#40, #5481: an approval verdict is charged for the asked revision only', () => {
   /**
-   * `t` is at revision 21. Snapshot 20 holds the text with no approval of its own; snapshot 19 is the
-   * earliest valid approval of that text; snapshots 1-18 carry the same approval hash over altered text
-   * (not approvals). `rev=20 approved` must page through all nineteen to find 19, and pays for each.
+   * `t` is at revision 21. Snapshot 20 holds the text with no approval of its own; snapshot 19 is a valid
+   * approval of that text; snapshots 1-18 carry the same approval hash over altered text (not approvals).
    */
   beforeEach(async () => {
     const text = 'H'.repeat(100);
@@ -100,21 +103,24 @@ describe('#40: an approval history is charged as it is read', () => {
         ...(revNo <= 19 ? approval : {}),
       } });
     }
-    await mk('p', '{{> t rev=20 approved}}');
+    await mk('p', '{{> t rev=19 approved}}');
+    await mk('q', '{{> t rev=20 approved}}');
   });
 
-  // Loaded: the target row (100), the verdict's live row (1 + 100) and revision 20 (1 + 100), then
-  // revisions 1-19 (19 × 101) = 2,221.
-  it('loaded text: the whole history read is charged, at the byte', async () => {
-    expect(await readUnder('p', { maxLoadedBytes: 2_221 })).toMatchObject({ content: 'H'.repeat(100), limit: null });
-    expect(await readUnder('p', { maxLoadedBytes: 2_220 })).toMatchObject({ content: null, limit: 'loaded' });
+  // Loaded: the target row (100), the verdict's live row (1 + 100) and the asked revision (1 + 100) = 302.
+  it('loaded text: the asked revision is charged at the byte, and no other history row', async () => {
+    expect(await readUnder('p', { maxLoadedBytes: 302 })).toMatchObject({ content: 'H'.repeat(100), limit: null });
+    expect(await readUnder('p', { maxLoadedBytes: 301 })).toMatchObject({ content: null, limit: 'loaded' });
+    expect(await readUnder('q', { maxLoadedBytes: 302 })).toMatchObject({ content: BROKEN_INCLUDE_NOTICE, limit: null });
+    expect(await readUnder('q', { maxLoadedBytes: 301 })).toMatchObject({ content: null, limit: 'loaded' });
   });
 
-  // Lookups: the target (1), the verdict's live row, revision and memories (3), three pages of 8 (3),
-  // the default data node (1) = 8.
-  it('lookups: every page of history is a charged query', async () => {
-    expect(await readUnder('p', { maxLookups: 8 })).toMatchObject({ content: 'H'.repeat(100), limit: null });
-    expect(await readUnder('p', { maxLookups: 7 })).toMatchObject({ content: null, limit: 'lookups' });
+  // Lookups: the target (1), the verdict's live row, revision and memories (3), the default data node (1) = 5.
+  it('lookups: one verdict, no page of history', async () => {
+    expect(await readUnder('p', { maxLookups: 5 })).toMatchObject({ content: 'H'.repeat(100), limit: null });
+    expect(await readUnder('p', { maxLookups: 4 })).toMatchObject({ content: null, limit: 'lookups' });
+    expect(await readUnder('q', { maxLookups: 5 })).toMatchObject({ content: BROKEN_INCLUDE_NOTICE, limit: null });
+    expect(await readUnder('q', { maxLookups: 4 })).toMatchObject({ content: null, limit: 'lookups' });
   });
 });
 
