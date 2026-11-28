@@ -13584,7 +13584,16 @@ async function dispatchMcpSessionlessRequest(req: Request, res: Response): Promi
   }
   // The SDK forwards `req.auth` to the factory untouched and verifies nothing itself. No credential goes in it.
   (req as Request & { auth?: unknown }).auth = { token: '', clientId: '', scopes: [], extra: { [SESSIONLESS_PRINCIPAL_KEY]: principal } };
-  await sessionlessMcpNodeHandler(req as never, res as never, req.body);
+  // The adapter answers a conversion or handler failure itself (a 500 through its onerror fallback); this catch is for
+  // what is left (a write to a response whose client went away), because Express 4 never answers a rejected async
+  // handler and an unhandled rejection is process-fatal on current Node.
+  try {
+    await sessionlessMcpNodeHandler(req as never, res as never, req.body);
+  } catch (error) {
+    mcpLog('error', 'mcp_sessionless_adapter_threw', { name: (error as Error)?.name });
+    if (!res.headersSent) res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal error' }, id: null });
+    else res.destroy();
+  }
 }
 
 /**
