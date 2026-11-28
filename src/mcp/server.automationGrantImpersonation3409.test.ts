@@ -9,10 +9,9 @@
  * person, answers the one DOOR_RETIRED refusal before any check and changes nothing. The team snapshot tools are unchanged.
  */
 import { beforeEach, expect, it, vi } from 'vitest';
-import { Client } from '@modelcontextprotocol/client';
+import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { McpServer } from '@modelcontextprotocol/server';
 import { withPositionalTool } from './hadronMcpServer.js';
-import { InMemoryTransport } from '@modelcontextprotocol/client';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';

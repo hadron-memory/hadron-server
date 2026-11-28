@@ -9,7 +9,8 @@
  */
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import type { OwnerRef } from '../owner.js';
-import { debitEnabled, creditBalance } from './index.js';
+import { creditBalance } from './index.js';
+import { creditGateActive } from './switches.js';
 import { databaseNow, settleAndMeasure } from './settleExpiredGrants.js';
 import { ensurePeriodGrant, periodGrantDue } from './periodGrant.js';
 import { ownerId, ownerType } from '../owner.js';
@@ -25,15 +26,8 @@ export class CreditsExhaustedError extends Error {
   }
 }
 
-/** The deployment switch: ONLY the exact value `true`, read per call. `TRUE`, `1`, ` true` and every other value mean off. */
-export function creditGateEnabled(): boolean {
-  return process.env.BILLING_CREDIT_GATE_ENABLED === 'true';
-}
-
-/** The gate runs only when debits are on as well: with no debit there is nothing to run out of. One parse, shared with the debit. */
-export function creditGateActive(): boolean {
-  return debitEnabled() && creditGateEnabled();
-}
+/** The deployment switches, defined in one place (`./switches.ts`) and read per call (#5025: the AI configuration walk reads the same predicate). */
+export { creditGateEnabled, creditGateActive } from './switches.js';
 
 
 /**

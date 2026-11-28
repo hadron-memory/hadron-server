@@ -55,11 +55,11 @@ const MAX_RESTARTS = 32;
 /** #5265 — the scans the last call of escapeUnterminatedHtml ran (one per model per escape), for a pin that bounds the work, not the wall clock. */
 let scansRun = 0;
 /** #5332 — a raw-text element's (or `plaintext`) start: it takes the rest of the page as text once a reader emits it. */
-// #5384: the span between a bare `<![` and its first `>` (exclusive) ends in a raw-text start's name and attributes at a line head, up to three
-// spaces in.
-const BARE_BANG_BRACKET_HIDES_RAW_START =
-  /\n {0,3}<(?:script|style|textarea|title|xmp|iframe|noembed|noframes|noscript|plaintext|template)(?=[\s/]|$)[^<]*$/i;
 const RAW_TEXT_START = /<(script|style|textarea|title|xmp|iframe|noembed|noframes|noscript|plaintext)(?=[\s/>]|$)/i;
+// #5384: the span between a bare declaration bracket `<![` and its first `>` (exclusive) ends in a raw-text start's name and attributes (or a
+// `template`'s) at a line head, up to three spaces in.
+const BARE_DECL_BRACKET_HIDES_RAW_START =
+  /\n {0,3}<(?:script|style|textarea|title|xmp|iframe|noembed|noframes|noscript|plaintext|template)(?=[\s/]|$)[^<]*$/i;
 /**
  * #5332 — where a bogus comment (`<!` or `</` with no letter after it, at `at`, running to the `>` at `close`) hides a raw-text start that
  * Markdown emits, or -1. Markdown reads the `<!` or `</` as text and the tag before the `>` as a tag (`<!<script>` emits the `<script>` raw);
@@ -971,7 +971,11 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
       // interrupts the paragraph, a start four columns into a list item) to escapes that lose the anchor where the jump kept it (fuzz at f27a59aa,
       // 87 regressing pairs). With no `>` in reach the `<!` is escaped as above: a reader that keeps the line raw (marked after a line-head
       // `<?>`) would have the bogus comment take what follows.
-      if (i >= rawUntil && text[i + 2] === '[' && BARE_BANG_BRACKET_HIDES_RAW_START.test(text.slice(i + 3, close))) { i += 3; continue; }
+      const bareBracketHidesRawStart = i >= rawUntil && text[i + 2] === '[' && BARE_DECL_BRACKET_HIDES_RAW_START.test(text.slice(i + 3, close));
+      if (bareBracketHidesRawStart) {
+        i += 3;
+        continue;
+      }
       // #5388 QA F2 (at 722ea31f): `<!` and no letter is text to Markdown, so a later line that opens a comment block (type 2, which
       // interrupts a paragraph) is read afresh there, while a browser reading the raw string has that `<!--` inside the bogus comment. When the
       // comment it opens does not end before the bogus comment's `>`, the two readings resume in different places: escape the `<!`.

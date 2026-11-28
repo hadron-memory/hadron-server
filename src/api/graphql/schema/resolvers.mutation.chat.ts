@@ -508,7 +508,7 @@ export const chatMutations = {
         // one shared memory per installed Agent.
         // #4039 (D8): found with no write (no create, no revive, no adopt); provisioned only once the start is decided.
         targetMemoryId = await locateAppClassMemory({
-          appId: selectedApp.id, agentId: resolvedAgentId, agentUrn: agent.urn, db: ctx.db,
+          appId: selectedApp.id, agentId: resolvedAgentId, agentUrn: agent.urn, organizationId: selectedApp.organizationId, db: ctx.db,
         });
         const sharedApp = selectedApp;
         ensureTarget = async (client) => {

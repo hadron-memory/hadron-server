@@ -1,7 +1,7 @@
 /** Non-secret execution identities included in automation consent (#1719). */
 import type { PrismaClient, AiServiceConfig, McpServer, HomeAssistantInstance } from '../../generated/prisma/index.js';
 import { NoAiConfigAvailableError } from '../aiConfig.js';
-import { resolveRunAiConfig } from '../runner/runAiConfig.js';
+import { requestedAiConfigName, resolveRunAiConfig } from '../runner/runAiConfig.js';
 import { type OwnerRef, orgIdOf } from '../owner.js';
 import { parseMcpRunToolName } from '../mcpServers.js';
 import { parseHaRunToolName } from '../homeAssistant.js';
@@ -17,8 +17,7 @@ export interface ExecutionIdentities {
   ha: Record<string, ReturnType<typeof haIdentity> | null>;
 }
 export function configSelection(row: ExecutionSelection & { eventData?: unknown }): ExecutionSelection {
-  const override = (row.eventData as Record<string, unknown> | null)?.__aiConfigName;
-  return { agentId: row.agentId, aiConfigName: row.aiConfigName ?? (typeof override === 'string' ? override : null) };
+  return { agentId: row.agentId, aiConfigName: row.aiConfigName ?? requestedAiConfigName(row.eventData) };
 }
 /** Credential columns and updatedAt are deliberately excluded: a credential
  * rotation changes neither destination nor admitted operations. */

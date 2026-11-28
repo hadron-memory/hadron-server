@@ -4,8 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { createServer } from '../server.js';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
-import { Client, ProtocolError } from '@modelcontextprotocol/client';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import { Client, ProtocolError, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { signJwt } from '../auth/jwt.js';
 
 let server: Server | undefined;

@@ -29,6 +29,7 @@
  */
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { isPureAppKeyShape } from './appMemoryLinks.js';
+import { appTenantRowFilter } from './auth/teamSpace.js';
 import { isRunPrincipal } from './auth/runPrincipal.js';
 
 type OwnMemoryPrincipal = {
@@ -67,12 +68,14 @@ export async function ownAppMemoryIds(
   const rows = await db.memory.findMany({
     where: {
       ...(onlyMemoryIds ? { id: { in: [...onlyMemoryIds] } } : {}),
-      appId: auth.appId!,
+      ...appTenantRowFilter({ id: auth.appId!, organizationId: app.organizationId }),
       class: 'app',
       deletedAt: null,
       userMemoryOfAgentId: null,
       workerOf: { none: {} },
-      // The App's own tenant: its organization's rows for an org App; the App owner's (org-less) rows for a user-owned App.
+      // The App's own tenant, both halves: owner (org-owned rows for an org App, the App owner's for a user-owned App) and
+      // organization (an org App's; none for a user-owned App). Deliberately STRICTER than the shared comparison on the
+      // organization half (main's behaviour kept): a user-owned App's own-memory arm lists only organization-less rows.
       ownerUserId: app.ownerUserId ?? null,
       organizationId: app.organizationId ?? null,
     },

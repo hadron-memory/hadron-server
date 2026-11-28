@@ -1,5 +1,6 @@
 // Unit tests for object-store client config wiring. The actual presign /
-// S3 calls are covered by integration tests against MinIO; here we verify
+// S3 calls are covered against a real store by realStore5167.test.ts (SeaweedFS in local dev, gated on
+// OBJECTSTORE_TEST_ENDPOINT); here we verify
 // env-handling and the not-configured failure modes only.
 //
 // ASSET_STORAGE_* is the only spelling read. The earlier OBJECT_STORAGE_*

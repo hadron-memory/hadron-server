@@ -20,8 +20,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { Client } from '@modelcontextprotocol/client';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { createServer } from '../../server.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../helpers.js';

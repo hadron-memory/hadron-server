@@ -56,10 +56,43 @@ export const teamSpaceAudienceFilter = {
   userMemoryOfAgentId: null,
 } as const satisfies Prisma.MemoryWhereInput;
 
+/**
+ * THE tenant bound on "this row belongs to that App" (hadron-internal#92): an app-class row carries its App's id AND its
+ * App's tenant. For an organization's App, a row that names it but sits under another organization is not the App's,
+ * whatever its `appId` says, so it is never read, listed or posted to through that App. This is an organization bound only:
+ * each consumer still applies its own owner-user bound. An organization's App matches rows of its organization; a
+ * user-owned App has no organization to compare, and matches by id (a transfer out of an organization leaves its rows under
+ * the pre-transfer one). Every team-space predicate (the access fold, the chat
+ * filters, the own-memory arm, {@link isTeamSpaceRow}) consumes this one comparison, so the next consumer cannot drift.
+ */
+export type AppTenant = { id: string; organizationId: string | null };
+
+export function appTenantRowFilter(app: AppTenant): Prisma.MemoryWhereInput {
+  // A user-owned App has no organization to compare: a transfer out of an organization leaves its rows under the
+  // pre-transfer one (a stated contract, #2441), so only an organization's App is bounded by it.
+  // Only an explicit null means user-owned: an absent (undefined) organization must not drop the bound.
+  return app.organizationId === null ? { appId: app.id } : { appId: app.id, organizationId: app.organizationId ?? null };
+}
+
+/**
+ * {@link appTenantRowFilter} for several Apps; an empty list matches nothing. Composed through `AND`, so spreading it beside
+ * a caller's own `OR` cannot overwrite either. A caller that has its own top-level `AND` must nest this filter inside it.
+ */
+export function appsTenantRowFilter(apps: readonly AppTenant[]): Prisma.MemoryWhereInput {
+  return { AND: [{ OR: apps.map(appTenantRowFilter) }] };
+}
+
+/** The same comparison over a loaded row: an organization App needs the row's organization to equal its own; a user-owned App (organization null) accepts any. */
+export function isAppTenantRow(row: { organizationId: string | null }, app: { organizationId: string | null }): boolean {
+  return app.organizationId === null || (row.organizationId ?? null) === (app.organizationId ?? null);
+}
+
 /** The columns {@link isTeamSpaceRow} needs — select these on the memory. */
 export interface TeamSpaceRowShape {
   class: string;
   appId: string | null;
+  /** The row's own organization (hadron-internal#92): it must equal the App's. */
+  organizationId: string | null;
   ownerUserId: string | null;
   userMemoryOfAgentId: string | null;
   /** Any non-empty array means a Worker claims this memory. `take: 1` is enough. */
@@ -95,12 +128,15 @@ export function isTeamSpaceRow(
   opts: {
     /** `App.ownerUserId` — null for an org-owned App. */
     appOwnerUserId: string | null;
+    /** `App.organizationId` — null for a user-owned App (hadron-internal#92). */
+    appOrganizationId: string | null;
     /** True when the context is an impersonated support session. */
     impersonating: boolean;
   },
 ): boolean {
   if (mem.class !== 'app' || mem.appId === null) return false;
   if (mem.userMemoryOfAgentId !== null || mem.workerOf.length > 0) return false;
+  if (!isAppTenantRow(mem, { organizationId: opts.appOrganizationId })) return false;
   if (mem.ownerUserId === null) return true;
   // spec 047: the App owner's row is the team space of a user-owned App, and no support-session path reaches it.
   // Everyone else's user-owned row is not (strict owner-only memories, whatever their class).

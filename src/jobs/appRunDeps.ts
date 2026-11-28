@@ -26,7 +26,7 @@ import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { writeNodeCore } from '../api/graphql/schema/resolvers.mutation.node.js';
 import { runAuthoring } from '../lib/runner/runAuthoring.js';
 import type { ResolvedAiConfig } from '../lib/aiConfig.js';
-import { resolveRunAiConfig } from '../lib/runner/runAiConfig.js';
+import { requestedAiConfigName, resolveRunAiConfig } from '../lib/runner/runAiConfig.js';
 import { requireOwnerRefOf } from '../lib/owner.js';
 import { orgOnlyToolsMessage, orgOnlyToolsRefused } from '../lib/runner/tools/orgOnly.js';
 import { generateText, generateExtraction, generateWithTools, type ExtractionField } from '../lib/llm/index.js';
@@ -200,12 +200,8 @@ export function makeProdRunDeps(db: PrismaClient): RunExecutionDeps {
       // Trigger-level override rides on the schedule/webhook row; the run
       // carries it via eventData.__aiConfigName (set by the trigger minting
       // path) — else the registry walk from the run's context.
-      const override =
-        run.eventData && typeof run.eventData === 'object'
-          ? ((run.eventData as Record<string, unknown>).__aiConfigName as string | undefined)
-          : undefined;
       // #5077: the run's own owner, through the one run wrapper (a person's run: the App's or the Agent's own key only).
-      const resolved = await resolveRunAiConfig(db, override ?? null, {
+      const resolved = await resolveRunAiConfig(db, requestedAiConfigName(run.eventData), {
         appId: run.appId,
         agentId: run.agentId ?? undefined,
         tenant: requireOwnerRefOf(run),

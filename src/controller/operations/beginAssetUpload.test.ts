@@ -1,8 +1,9 @@
 /**
  * Integration test (US2 / FR-008): beginAssetUpload validates the
  * agent + the App's asset-upload gate, validates limits, and mints a
- * presigned PUT URL. R2 client is mocked so the test runs without a
- * MinIO instance; an end-to-end MinIO test lives separately.
+ * presigned PUT URL. The object-store client is mocked so the test runs without a
+ * store; the client's calls against a real store (SeaweedFS, #5167) are
+ * covered inside the object-store scaffold (realStore5167.test.ts).
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';

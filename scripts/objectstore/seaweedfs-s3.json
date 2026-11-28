@@ -1,0 +1,9 @@
+{
+  "identities": [
+    {
+      "name": "hadron-dev",
+      "credentials": [{ "accessKey": "hadron-dev", "secretKey": "hadron-dev-secret" }],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

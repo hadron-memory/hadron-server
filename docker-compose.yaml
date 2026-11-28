@@ -20,43 +20,44 @@ services:
       timeout: 5s
       retries: 10
 
-  # MinIO substitutes for Cloudflare R2 in local dev (S3-compatible API).
-  # Spec: specs/001-asset-upload/quickstart.md §2.
-  # CORS for the portal origin is configured at first run via the init container below.
-  minio:
-    image: minio/minio:latest
-    container_name: hadron-r2
+  # #5167 (Holger, 2026-11-28: SeaweedFS): the local dev object store, S3-compatible, Apache-2.0. It replaced MinIO, whose
+  # upstream is archived and whose images stopped pulling anonymously. Pinned by digest (release 4.55). Host port 9000
+  # maps to SeaweedFS's S3 port 8333, so a dev `.env` with ASSET_STORAGE_ENDPOINT=http://localhost:9000 keeps working.
+  # Credentials: scripts/objectstore/seaweedfs-s3.json (dev-only values). Production storage (Hetzner) is unrelated.
+  s3:
+    image: chrislusf/seaweedfs:4.55@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9
+    container_name: hadron-s3
     restart: unless-stopped
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: hadron-dev
-      MINIO_ROOT_PASSWORD: hadron-dev-secret
+    command: server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "9000:8333"
     volumes:
-      - minio_data:/data
+      - seaweedfs_data:/data
+      - ./scripts/objectstore/seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
+    # /healthz answers on the S3 port once the gateway serves; the image ships curl, so no `mc` is needed.
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8333/healthz"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
 
-  # One-shot init: create the bucket and apply CORS for the portal origin.
-  minio-init:
-    image: minio/mc:latest
-    container_name: hadron-r2-init
+  # One-shot init: create the bucket and apply CORS for the portal origin (scripts/objectstore/seaweedfs-init.sh, run in
+  # the same image, whose curl signs SigV4). Fails loudly if the CORS rule does not apply.
+  s3-init:
+    image: chrislusf/seaweedfs:4.55@sha256:7ca46aeae2f223b37e5d91593c17ab37738eec6df6ab69b48a0487f7643342b9
+    container_name: hadron-s3-init
     depends_on:
-      minio:
+      s3:
         condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      mc alias set local http://minio:9000 hadron-dev hadron-dev-secret &&
-      mc mb -p local/hadron-assets-dev &&
-      mc anonymous set none local/hadron-assets-dev &&
-      echo '{\"CORSRules\":[{\"AllowedOrigins\":[\"http://localhost:5173\"],\"AllowedMethods\":[\"PUT\",\"GET\",\"HEAD\"],\"AllowedHeaders\":[\"*\"],\"ExposeHeaders\":[\"ETag\"],\"MaxAgeSeconds\":3600}]}' > /tmp/cors.json &&
-      mc cors set local/hadron-assets-dev /tmp/cors.json || true
-      "
+    entrypoint: ["sh", "/init/seaweedfs-init.sh"]
+    environment:
+      S3_URL: http://s3:8333
+      S3_ACCESS_KEY: hadron-dev
+      S3_SECRET_KEY: hadron-dev-secret
+      S3_BUCKET: hadron-assets-dev
+      S3_CORS_ORIGIN: http://localhost:5173
+    volumes:
+      - ./scripts/objectstore/seaweedfs-init.sh:/init/seaweedfs-init.sh:ro
 
   # 039 Phase 1 — platform message bus (NATS JetStream, `-js`). Dev-only
   # convenience: the server runs standalone without it (NATS_URL unset →
@@ -97,4 +98,4 @@ services:
 volumes:
   postgres_data:
   graphs:
-  minio_data:
+  seaweedfs_data:
