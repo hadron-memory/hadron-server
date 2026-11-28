@@ -9764,14 +9764,16 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
    * one and replies with its id. Delegates to GraphQL `appRun(ref:)`
    * (findings:node-write-surface-invariants: MCP tools delegate, never
    * re-implement), so the gate is exactly that resolver's: a platform admin, a
-   * READER in the run's organization, the run's own App key, or a user with a
+   * READER in the run's organization, whoever manages the App a person owns
+   * (#5077: its owner or an owner-role member, never a platform admin, for a
+   * run with no organization), the run's own App key, or a user with a
    * live App relationship for a run on their behalf or a MANUAL run they
    * started (`mayReadAppRunWithoutOrgRole`). A denial reads as not found, the
    * same answer as a missing run, so the tool is no existence oracle.
    */
   server.tool(
     'hadron_get_run',
-    "Read an app run you started (or may read): its status, where it is or stopped (curNodeUrn), why it failed (failure), what it extracted (data, the run envelope) and the path it walked (hops: one entry per completed hop, with the edge it took). Pass the run id or hrn:apprun URN that hadron_run_task printed. Gated like appRun: you may read a run if you are a READER in its organization; if it runs on your behalf or you started it manually, while you keep a live relationship with its App (App member or active subscriber); or if you hold that App's own key. A run you cannot read answers 'not found', the same as one that does not exist. Read-only.",
+    "Read an app run you started (or may read): its status, where it is or stopped (curNodeUrn), why it failed (failure), what it extracted (data, the run envelope) and the path it walked (hops: one entry per completed hop, with the edge it took). Pass the run id or hrn:apprun URN that hadron_run_task printed. Gated like appRun: you may read a run if you are a READER in its organization, or you manage the App a person owns (its owner or an owner-role member); if it runs on your behalf or you started it manually, while you keep a live relationship with its App (App member or active subscriber); or if you hold that App's own key. A run you cannot read answers 'not found', the same as one that does not exist. Read-only.",
     SHAPE_HADRON_GET_RUN,
     async ({ ref }) => {
       if (!auth.userId && !auth.appId) return refusalResult('Not authenticated.');
@@ -9779,7 +9781,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (!runRef) return textResult('Pass the run id or hrn:apprun URN that hadron_run_task printed.');
       let run: Record<string, unknown> | null;
       try {
-        run = (await resolvers.Query.appRun({}, { ref: runRef }, chatCtx())) as Record<string, unknown> | null;
+        // #5077 (F3a-2): the read gate refuses an impersonated session and a refused session binding (isRefusedPrincipal) a
+        // person's run, so it must see both, as GraphQL does (Rook, SEC10 on #5441).
+        run = (await resolvers.Query.appRun({}, { ref: runRef }, {
+          ...chatCtx(), ...mcpRequestSessionContext(auth), impersonation: auth.impersonation ?? undefined,
+        })) as Record<string, unknown> | null;
       } catch (e) {
         // A denied read is indistinguishable from a missing run (no oracle).
         if (/^(Forbidden|Unauthenticated)/.test((e as Error)?.message ?? '')) run = null;
@@ -9832,9 +9838,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             userId: auth.userId ?? undefined,
             apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
-            sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],
             organizationId: auth.organizationId ?? undefined,
+            // #5077 (F3a-2): the door refuses an impersonated session and a refused session binding (isRefusedPrincipal) on
+            // a person's App, so it must see both, as GraphQL does (Rook, SEC10 on #5441).
+            ...mcpRequestSessionContext(auth),
+            impersonation: auth.impersonation ?? undefined,
           };
           try {
             const runId = await resolvers.Mutation.runTask(

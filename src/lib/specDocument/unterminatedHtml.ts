@@ -62,6 +62,8 @@ const RAW_TEXT_START = /<(script|style|textarea|title|xmp|iframe|noembed|noframe
  * a browser reading the raw string ends a bogus comment at that `>`. Only a start tag Markdown accepts, on one line and ending at that `>`, with nothing
  * before it in the comment that Markdown could read another way (a `<`, a backtick, a backslash), on the comment's line or the next, and
  * not closed later by its own end tag (Markdown's raw text then ends where a browser's reading resumes anyway).
+ * #5324 — the same test serves a line-head `<div/` (`at` is its `<`), where a browser reads the hidden tag as an attribute of the tag that
+ * ends at `close`: what lies between `at + 2` and the hidden tag is the rest of the block name and its `/`, which rule nothing out.
  */
 function bogusHiddenTag(text: string, at: number, close: number, ctx: () => HiddenContext): number {
   const body = text.slice(at + 2, close + 1);
@@ -460,6 +462,8 @@ const AUTOLINK = /<(?:[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*|[A-Za-z0-9.!#$%&'*+/
  */
 const CM_OPEN_TAG = /^<[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\s*=\s*(?:[^\s"'=<>`]+|'[^']*'|"[^"]*"))?)*\s*\/?>$/;
 const CM_CLOSE_TAG = /^<\/[A-Za-z][A-Za-z0-9-]*\s*>$/;
+/** #5324 — {@link CM_OPEN_TAG} at the start of a text that may go on after the tag's `>`. */
+const CM_OPEN_TAG_PREFIX = new RegExp(CM_OPEN_TAG.source.slice(0, -1));
 
 /** CommonMark HTML block type 6 (spec 0.31): the tag names that start a block (the name may be an opening or a closing tag). */
 const BLOCK6 = 'address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h1|h2|h3|h4|h5|h6|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul';
@@ -1004,6 +1008,18 @@ function firstUnterminated(text: string, from: number, model: ReaderModel = 'com
     // #5211 — outside an HTML block, a tag CommonMark does not accept is text to Markdown, which reads what it holds: the scan goes on inside
     // it. A raw-text element, a template and a block opener at the head of a line keep the browser's reading, which is the stricter one.
     // #5289 — that holds for a tag whose value holds `<template` too: Markdown emits it live and the anchor lands in its content (parse5).
+    // #5324 — a block name at the head of a line starts no block when a `/` follows it with no `>` after (`<div/<xmp>`): CommonMark needs a
+    // blank, `>`, `/>` or the line's end there, and marked a space, newline or `>`. Markdown reads `<div/` as text and emits a raw-text
+    // start after it, which a browser reading the raw string takes for an attribute: that start is escaped, as behind a bogus comment
+    // (#5332). The rest of the line keeps the reading below, so no body whose anchor already survives changes. (`<div/>` ends at its `/>`
+    // and hides nothing, so the test needs no exception for it.)
+    // The hidden tag ends at its own `>`, which a quoted value of the `<div/` can hold (`<div/x="<xmp>">`): Markdown reads the quote as text.
+    if (i >= rawUntil && startsLine(i) && opensBlock && text[nameEnd] === '/') {
+      const start = RAW_TEXT_START.exec(text.slice(i + 2, tagEnd));
+      const own = start === null ? null : CM_OPEN_TAG_PREFIX.exec(text.slice(i + 2 + start.index, tagEnd));
+      const hidden = own === null || start === null ? -1 : bogusHiddenTag(text, i, i + 2 + start.index + own[0].length - 1, hiddenCtx);
+      if (hidden !== -1) return hidden;
+    }
     if (i >= rawUntil && !RAW_TEXT.has(name) && name !== 'template' && name !== 'plaintext' && !(startsLine(i) && opensBlock)
       && !(isEnd ? CM_CLOSE_TAG : CM_OPEN_TAG).test(text.slice(i, tagEnd))) { i += 1; continue; }
     // A block-level tag at the head of a line (type 6), or a complete tag alone on its line that does not interrupt a paragraph (type 7),
