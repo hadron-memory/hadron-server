@@ -75,7 +75,7 @@ beforeEach(async () => {
   await db.$executeRawUnsafe(`INSERT INTO app_key_scopes (id, app_key_id, scope, granted_by_user_id) VALUES ($1, $2, 'grant:read', $3)`, generateId(), keyId, alice);
 });
 
-const POINT = `query($ref: String!, $mem: String) { node(ref: $ref, memoryRef: $mem) { id loc } }`;
+const POINT = `query($ref: ID!, $mem: ID) { node(ref: $ref, memoryRef: $mem) { id loc } }`;
 
 describe('condition 1: the per-memory reach sets never gain a branch-only memory', () => {
   it('getAccessibleMemoryIds (full and scoped) and memoryAccessFilter leave it out; the branch map carries it', async () => {
@@ -99,7 +99,7 @@ describe('point read: node(ref)', () => {
 
   it('outside the branch (and across the `:` boundary) answers byte-identically to a missing node, in every form', async () => {
     const { m, inside, outside } = await branchWorld();
-    const urnOf = async (id: string) => (await gql(`query($ref: String!) { node(ref: $ref) { urn } }`, { ref: id })).data?.node?.urn as string;
+    const urnOf = async (id: string) => (await gql(`query($ref: ID!) { node(ref: $ref) { urn } }`, { ref: id })).data?.node?.urn as string;
     const insideUrn = await urnOf(inside.api.id);
     expect(insideUrn).toMatch(/docs:api$/);
     const urnAt = (loc: string) => insideUrn.replace(/docs:api$/, loc);
@@ -116,12 +116,12 @@ describe('point read: node(ref)', () => {
   });
 
   it('a node it admits carries nothing from outside the branch: no edges, no memory record, no comments, stored content', async () => {
-    const { inside } = await branchWorld();
+    const { inside, outside } = await branchWorld();
     await db.node.update({ where: { id: inside.api.id }, data: { content: 'see {{include other:secret}}' } });
-    const r = await gql(`query($ref: String!) { node(ref: $ref) {
+    const r = await gql(`query($ref: ID!) { node(ref: $ref) {
       id content memory { id } outgoingEdges { target { id loc } } incomingEdges { source { id loc } }
-      commentSummary { comments openThreads } asComment { id } lintWarnings { items { message } } inheritedFrom { agentId }
-      revisionBytes authorship { kind } createdByUser { id } approvalStatus { state } mintStatus { minted } signingRequests { id }
+      commentSummary { comments openThreads } asComment { id } lintWarnings { items { text } } inheritedFrom { agentId }
+      revisionBytes authorship { kind } createdByUser { handle } approvalStatus { state } mintStatus { minted } signingRequests { id }
     } }`, { ref: inside.api.id });
     expect(r.errors).toBeUndefined();
     const n = r.data!.node;
@@ -139,7 +139,9 @@ describe('point read: node(ref)', () => {
     expect(n.approvalStatus).toEqual({ state: 'NOT_APPLICABLE' });
     expect(n.mintStatus).toEqual({ minted: false });
     expect(n.signingRequests).toEqual([]);
-    expect(JSON.stringify(r)).not.toContain('secret');
+    expect(JSON.stringify(r)).not.toContain('SECRET');
+    expect(JSON.stringify(r)).not.toContain(outside.secret.id);
+    expect(JSON.stringify(r)).not.toContain(outside.other.id);
   });
 });
 
@@ -199,15 +201,16 @@ describe('condition 2: a whole-memory route always wins', () => {
 });
 
 describe('condition 6: a branch is a loc prefix on a `:` boundary, and `_` / `%` are literal', () => {
-  it('a_b admits a_b and a_b:c, never axb or a_bc; a%b never admits a-anything', async () => {
+  it('a_b admits a_b and a_b:c, never axb or a_bc; a branch naming `%` is no loc, so its grant is inert and reaches nothing', async () => {
     const m = await alicesMemory();
     for (const loc of ['a_b', 'a_b:c', 'axb', 'a_bc', 'axb:c', 'a%b', 'a%b:c', 'aZZb', 'aZZb:c']) await node(m.id, loc);
     await activeGrant({ memory: m.id, branch: 'a_b' });
     const m2 = await alicesMemory();
-    for (const loc of ['a%b', 'a%b:c', 'aZZb', 'aZZb:c']) await node(m2.id, loc);
+    for (const loc of ['aZZb', 'aZZb:c', 'a_b']) await node(m2.id, loc);
     await activeGrant({ memory: m2.id, branch: 'a%b' });
     expect(locs(await gql(FIND, { mem: [m.id] }))).toEqual(['a_b', 'a_b:c']);
     expect(locs(await gql(FIND, { q: 'zebrafish', mode: 'keyword', mem: [m.id] }))).toEqual(['a_b', 'a_b:c']);
-    expect(locs(await gql(FIND, { mem: [m2.id] }))).toEqual(['a%b', 'a%b:c']);
+    expect(locs(await gql(FIND, { mem: [m2.id] }))).toEqual([]);
+    expect((await nodeBranchScopes(keyCtx())).has(m2.id)).toBe(false);
   });
 });
