@@ -24,6 +24,7 @@ import { generateId } from './id.js';
 import { clearNodeAuthorship } from './nodeAuthorship.js';
 import { normalizeRole } from './enforceNodeSchema.js';
 import { modernBootPromptKind } from './bootPrompt.js';
+import { isTaskRole, modernTaskKind } from './instructionRoles.js';
 import { isQuestionFamilyRole } from './questions/index.js';
 import { computeApprovalHash } from './approvalHash.js';
 import { newestApprovedRevisionOf } from './nodeApproval.js';
@@ -663,7 +664,10 @@ export function restorableNodeFields(revision: {
   // #5453: a revision captured before the definition-node migration holds a source as `info` / `boot-prompt`, a rule
   // as `info` / `boot-prompt-rule` and a compiled prompt under its retired node type. History rows are left as they
   // were captured; a restore writes today's kind, so no restore brings the retired type or the bare role back.
-  const kind = modernBootPromptKind({ nodeType: revision.nodeType, role: revision.role });
+  // #5485: and the role `role-task` becomes `task.role`, a runnable node with no role `task`. The node type is not
+  // remapped here (no placement is known); a task role never goes onto a row that is not runnable.
+  const mapped = modernTaskKind(modernBootPromptKind({ nodeType: revision.nodeType, role: revision.role }), { isRunnable: revision.isRunnable });
+  const kind = revision.isRunnable === true || !isTaskRole(mapped.role) ? mapped : { ...mapped, role: null };
   return {
     ...base,
     nodeType: kind.nodeType,

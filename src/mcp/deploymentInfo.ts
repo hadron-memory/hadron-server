@@ -395,7 +395,17 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // (a new refusal on a new field only). A client keys on this version before sending the field: an older server refuses an unknown
 // input field over GraphQL and silently drops an unknown MCP argument (hadron-portal#2695, hadron-cli#3328). (0.56.0 is #5027,
 // merged first; the open #5441 and #5447 both claim 0.57.0, so one of them takes 0.58.0.)
-export const HADRON_SERVER_VERSION = '0.59.0';
+// 0.60.0 — BEHAVIOUR (stored values and search defaults, no SDL change) (#5485, Holger 2026-11-28; the Proposed lines of cor:dmo:020:04,
+// cor:api:090:02): a task has a role. Every runnable node with no role is role `task`, one with `role-task` is `task.role` (a runnable
+// node with another role keeps it), the task doors write `task` when the caller gives no role, and the database refuses a task-family
+// role on a row that is not runnable (the reverse is not enforced; `isRunnable` still decides running, role rules and governance). In
+// Agent system memories and install memories every runnable node, every process-family node and the `tasks` and `processes` parents
+// are node type `system` (stage 1; other memories later). A client that found them by `nodeType: "task"` or "info" finds them by
+// `isRunnable: true` or `role: "task"` / `"process"` now. Asking for instructions lifts the `system` default: `findNodes`, MCP
+// `hadron_find_nodes` and the in-run search tool treat `isRunnable: true` or a `role` in the task, process, boot-prompt or chatbot family
+// as an explicit ask, exactly as naming a nodeType is (chat-message nodes and the memory-class default stay excluded). The in-run
+// tool gains nodeType, nodeTypes, includeSystemNodes, isRunnable and role. (0.58.0 is #5452 and 0.59.0 is #5453, both merged first.)
+export const HADRON_SERVER_VERSION = '0.60.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

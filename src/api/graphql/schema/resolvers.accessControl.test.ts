@@ -445,7 +445,7 @@ describe('Mutation.replaceSubtree retirement (#454)', () => {
     const governed = await createDbNode(db, {
       memoryId: graphA.id, loc: 'bulk.governed', name: 'governed', ownerRepo,
     });
-    await db.node.update({ where: { id: governed.id }, data: { role: 'task' } });
+    await db.node.update({ where: { id: governed.id }, data: { role: 'review' } });
     const edge = await db.edge.create({
       data: {
         memoryId: graphA.id, sourceId: ordinary.id, targetId: runnable.id,
@@ -469,7 +469,7 @@ describe('Mutation.replaceSubtree retirement (#454)', () => {
           nodes: [
             { memoryId: graphA.id, loc: 'bulk.new', name: 'new', content: 'replacement' },
             { memoryId: graphA.id, loc: 'bulk.new-runnable', name: 'new-runnable', isRunnable: true },
-            { memoryId: graphA.id, loc: 'bulk.new-governed', name: 'new-governed', role: 'task' },
+            { memoryId: graphA.id, loc: 'bulk.new-governed', name: 'new-governed', role: 'review' },
           ],
           edges: [{ sourceLoc: 'bulk.new', targetLoc: 'bulk.new-runnable', name: 'rel' }],
         },
@@ -481,7 +481,7 @@ describe('Mutation.replaceSubtree retirement (#454)', () => {
     expect(await db.nodeRevision.findUnique({ where: { id: history.id } })).toMatchObject({ content: 'original' });
     expect(await db.nodeRevision.count({ where: { nodeId: ordinary.id } })).toBe(1);
     expect(await db.edge.findUnique({ where: { id: edge.id } })).toMatchObject({ sourceId: ordinary.id, targetId: runnable.id });
-    expect(await db.node.findUnique({ where: { id: governed.id } })).toMatchObject({ role: 'task' });
+    expect(await db.node.findUnique({ where: { id: governed.id } })).toMatchObject({ role: 'review' });
   });
 
   it('preserves write authorization and concealed-memory errors', async () => {

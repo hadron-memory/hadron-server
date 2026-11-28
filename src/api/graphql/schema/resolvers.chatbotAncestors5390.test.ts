@@ -193,10 +193,10 @@ describe('#5390 skeleton and retrofit', () => {
   it('a new Agent starts with `conversations` and `prompts`', async () => {
     const a = await resolvers.Mutation.createAgent({}, { orgRef: orgId, name: 'fresh', visibility: 'ORGANIZATION' }, { db, roles: ['ADMIN'], userId } as never) as unknown as { systemMemoryId: string };
     const n = await nodeAt(a.systemMemoryId, 'conversations');
-    // #5453 Ask 8: the skeleton writes the definition parents as `system`; `processes` and `tasks` are not in the ruled set.
+    // #5453 Ask 8 and #5485: the skeleton writes the definition parents, `processes` and `tasks` included, as `system`.
     expect([n!.name, n!.nodeType, n!.role]).toEqual(['Conversations', 'system', null]);
     for (const loc of ['boot', 'boot:rules', 'prompts']) expect((await nodeAt(a.systemMemoryId, loc))!.nodeType, loc).toBe('system');
-    for (const loc of ['processes', 'tasks']) expect((await nodeAt(a.systemMemoryId, loc))!.nodeType, loc).toBe('info');
+    for (const loc of ['processes', 'tasks']) expect((await nodeAt(a.systemMemoryId, loc))!.nodeType, loc).toBe('system'); // #5485
     expect((await nodeAt(a.systemMemoryId, 'prompts'))!.name).toBe('Prompts');
   });
 

@@ -116,10 +116,10 @@ describe('#5485 Ask 1: the role step runs in every memory, role only', () => {
     await put(knowledgeMem, 'work:other2', { isRunnable: true, role: 'spec' });
     const notices: string[] = [];
     const c = new pg.Client({ connectionString: process.env.DATABASE_URL });
-    c.on('notice', (n) => notices.push(n.message));
+    c.on('notice', (n) => notices.push(String(n.message)));
     await c.connect();
     try { await c.query(MIGRATION); } finally { await c.end(); }
-    expect(notices.join('\n')).toMatch(/runnable node.* another role.*2/i);
+    expect(notices.join('\n')).toMatch(/\b2 runnable node\(s\) with another role kept/);
   });
 
   it('a task-family role on a row that is not runnable is cleared, so the CHECK can hold; role-task there is left', async () => {

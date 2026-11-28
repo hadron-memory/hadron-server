@@ -786,6 +786,11 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 \ir compiled-prompt-revision-invariants.sql
 \ir boot-prompt-approval-invariants.sql
 
+-- #5485 — the task role family, the stage 1 retype of tasks and processes, and the CHECK that keeps a task role
+-- on a runnable row. One source, copied verbatim into migration 20261128020000_task_role_family (pinned by
+-- src/lib/taskRoleFamilyMigration5485.test.ts). After the boot-prompt invariants.
+\ir task-role-family.sql
+
 -- #1655: compiled automation versions.
 \ir automation-invariants.sql
 

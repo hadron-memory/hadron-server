@@ -96,7 +96,7 @@ describe('#5485 findNodes: asking for instructions is an explicit ask', () => {
 
   it.each(MODES)('%s: a role outside the instruction families and isRunnable false do not ask', async (_m, args) => {
     expect(locs(await findNodes({ ...args, filter: { memoryRefs: [sys.id], role: 'notes' }, limit: 50 }))).toEqual([]);
-    expect(locs(await findNodes({ ...args, filter: { memoryRefs: [sys.id], isRunnable: false }, limit: 50 }))).toEqual(['docs']);
+    expect(locs(await findNodes({ ...args, filter: { memoryRefs: [sys.id], isRunnable: false }, limit: 50 }))).toEqual([]);
   });
 
   it.each(MODES)('%s: with no memory named, a system-class memory stays out; chat-message stays out everywhere', async (_m, args) => {

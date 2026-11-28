@@ -41,18 +41,16 @@ describe('#5485 createTaskNode', () => {
   it('keeps a role the caller gives', async () => {
     await M.createTaskNode({}, { input: { memoryRef: memoryId, loc: 'c', name: 'c', isRunnable: true, role: 'task.role' } }, ctx());
     expect(await at('c')).toMatchObject({ isRunnable: true, role: 'task.role' });
-    await M.createTaskNode({}, { input: { memoryRef: memoryId, loc: 'd', name: 'd', isRunnable: true, role: 'review' } }, ctx());
-    expect(await at('d')).toMatchObject({ isRunnable: true, role: 'review' });
+    await M.createTaskNode({}, { input: { memoryRef: memoryId, loc: 'd', name: 'd', isRunnable: true, role: 'notes' } }, ctx());
+    expect(await at('d')).toMatchObject({ isRunnable: true, role: 'notes' });
   });
 });
 
 describe('#5485 hadron_create_task', () => {
-  it('writes role task when the caller gives none, and keeps one it is given', async () => {
+  it('writes role task (the MCP task doors take no role parameter)', async () => {
     const urn = (loc: string) => `hrn:node:door-org.test:corpus:${loc}`;
     await mcp().callToolText('hadron_create_task', { urn: urn('m1'), name: 'm1' });
     expect(await at('m1')).toMatchObject({ isRunnable: true, role: 'task' });
-    await mcp().callToolText('hadron_create_task', { urn: urn('m2'), name: 'm2', role: 'task.role' });
-    expect(await at('m2')).toMatchObject({ isRunnable: true, role: 'task.role' });
   });
 });
 

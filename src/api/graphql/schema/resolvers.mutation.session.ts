@@ -134,6 +134,7 @@ import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { deriveFamily, normalizeFamily } from '../../../lib/agentTasks/family.js';
+import { isTaskRole, modernTaskKind } from '../../../lib/instructionRoles.js';
 import { COMPILED_BOOT_PROMPT_WHERE, NOT_COMPILED_BOOT_PROMPT_WHERE, isCompiledBootPrompt, modernBootPromptKind } from '../../../lib/bootPrompt.js';
 import { effortFromToken, fillEmptyAppliedRunSettings, isEffortLevel, recordRunSettings, type EffortLevel } from '../../../lib/agentTasks/runSettings.js';
 import { isNodeLocUniqueViolation } from '../../../lib/prismaErrors.js';
@@ -2881,7 +2882,12 @@ export const sessionMutations = {
             let clearRestoredAuthorship = false;
             // #5453: a snapshot published before the migration holds a source as `info` / `boot-prompt` and a rule as
             // `info` / `boot-prompt-rule`. Restoring writes today's kind, never the old type or the bare role back.
-            const kind = modernBootPromptKind({ nodeType: (n.nodeType as string) ?? 'system', role: (n.role as string | null | undefined) ?? null });
+            // #5485: and before the task role family a task was typed `task` with the role `role-task`, a process `info`: an
+            // Agent system memory is a system placement, so both come back `system`, with today's role.
+            const kind = modernTaskKind(
+              modernBootPromptKind({ nodeType: (n.nodeType as string) ?? 'system', role: (n.role as string | null | undefined) ?? null }),
+              { systemPlacement: true },
+            );
             const nodeData = {
               name: n.name as string,
               nodeType: kind.nodeType,
@@ -2936,7 +2942,9 @@ export const sessionMutations = {
             const upserted = await tx.node.upsert({
               where: { loc_memoryId: { loc, memoryId: sysMemId } },
               // #4244: a row made anew takes the snapshot's role; over an existing row the live role stays.
-              create: { id: generateId(), memoryId: sysMemId, loc, ...nodeData, role: kind.role },
+              // #5485: a task role is only on a runnable row (chk_nodes_task_role_runnable), and a snapshot carries no
+              // `isRunnable`: a node made anew with a task role was a task, so it is made runnable.
+              create: { id: generateId(), memoryId: sysMemId, loc, ...nodeData, role: kind.role, ...(isTaskRole(kind.role) ? { isRunnable: true } : {}) },
               update: {
                 ...nodeData,
                 ...(clearRestoredAuthorship ? clearNodeAuthorship() : {}),

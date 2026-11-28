@@ -246,7 +246,7 @@ export const typeDefs = `#graphql
     memoryRefs: [ID!]
     "Restrict by memory class. SYSTEM is excluded by default; passing this (or naming a system memory in memoryRefs) overrides that."
     memoryClasses: [MemoryClass!]
-    "Without it, system and chat-message nodes are left out (hrn:node:hadronmemory.com:specs:cor:api:090:02); naming one of them returns it. record nodes are never left out. An explicit 'comment' with no contentScope searches comments (as COMMENTS)."
+    "Without it, system and chat-message nodes are left out (hrn:node:hadronmemory.com:specs:cor:api:090:02); naming one of them returns it. Two classes of content: knowledge (the default) and instructions for an LLM (type system: tasks, processes, boot prompts, chatbot scripts); asking for instructions (isRunnable true, or a role in an instruction family) lifts system as naming a type does (#5485), and includeSystemNodes asks for both. record nodes are never left out. An explicit 'comment' with no contentScope searches comments (as COMMENTS)."
     nodeType: String
     """
     #3113 — an explicit list of node types, a union: only nodes whose type is in the list
@@ -286,7 +286,7 @@ export const typeDefs = `#graphql
     objectType: String
     tags: [String!]
     """
-    #2999 — runnability is tri-state. true returns only runnable rows; false returns only rows explicitly marked not runnable. A row never marked (NULL) matches neither, and only an omitted filter returns it. (hrn:node:hadronmemory.com:specs:cor:api:060:04)
+    #2999 — runnability is tri-state. true returns only runnable rows; false returns only rows explicitly marked not runnable. A row never marked (NULL) matches neither, and only an omitted filter returns it. (hrn:node:hadronmemory.com:specs:cor:api:060:04; true is also an explicit ask for instructions and lifts the system node-type default, #5485; chat-message nodes and the memory-class default stay)
     """
     isRunnable: Boolean
     """
@@ -301,7 +301,7 @@ export const typeDefs = `#graphql
     Proposed addition built on the #3494 gate to hrn:node:hadronmemory.com:specs:cor:api:090:02; comment result scope stays hrn:node:hadronmemory.com:specs:cor:dmo:110:08.
     """
     hasOpenThreads: Boolean
-    "#1322 — role-family filter. 'spec' matches 'spec' and 'spec.*' on a dot boundary, never 'special' / 'specification'."
+    "#1322 — role-family filter. 'spec' matches 'spec' and 'spec.*' on a dot boundary, never 'special' / 'specification'. #5485: a role in an instruction family (task, process, boot-prompt, chatbot) is an explicit ask for instructions and lifts the system node-type default; chat-message nodes and the memory-class default stay."
     role: String
     locPrefix: String
     """

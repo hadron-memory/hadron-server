@@ -22,7 +22,8 @@ describe('#632 run memory search registry and model surface', () => {
     const schema = tool().inputSchema as { additionalProperties: boolean; required: string[]; properties: Record<string, Record<string, unknown>> };
     expect(schema.additionalProperties).toBe(false);
     expect(schema.required).toEqual(['query']);
-    expect(Object.keys(schema.properties).sort()).toEqual(['limit', 'memoryUrn', 'query']);
+    // #5485: the node-type vocabulary of the MCP tool, so a run can ask for instructions.
+    expect(Object.keys(schema.properties).sort()).toEqual(['includeSystemNodes', 'isRunnable', 'limit', 'memoryUrn', 'nodeType', 'nodeTypes', 'query', 'role']);
     expect(schema.properties.limit).toMatchObject({ type: 'integer', minimum: 1, maximum: 20, default: 10 });
     expect(schema.properties).not.toHaveProperty('orgId');
     expect(schema.properties).not.toHaveProperty('principal');

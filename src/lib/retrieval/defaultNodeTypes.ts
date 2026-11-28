@@ -1,3 +1,5 @@
+import { asksForInstructions } from '../instructionRoles.js';
+
 /**
  * The node types an UNQUALIFIED search leaves out (cor:api:090:02).
  *
@@ -24,6 +26,7 @@ const EXCLUDED_WITH_SYSTEM_NODES: readonly string[] = Object.freeze(
  * #5452 (cor:api:090:02) — the node types a filter with NO explicit `nodeType` / `nodeTypes` leaves out.
  *
  * `includeSystemNodes: true` lifts `system` and nothing else: `chat-message` stays out on every answer.
+ * #5485: so does a filter that asks for instructions (`asksForInstructions`).
  * Only the boolean `true` lifts; `false`, `null`, omitted and any other value keep the default, so a loosely
  * typed caller cannot widen a read by accident. It decides the node-type default ONLY: the memory-class
  * SYSTEM default, access, soft-deleted rows, comments and inheritance are other clauses and never read this.
@@ -32,6 +35,13 @@ const EXCLUDED_WITH_SYSTEM_NODES: readonly string[] = Object.freeze(
  * regex, browse and vector statements), the Prisma `structuredWhere` (the hydration and list paths) and the
  * loc-segments read (`memoryLocSegments.ts`), so none of them can disagree on what an unqualified read returns.
  */
-export function defaultExcludedNodeTypes(filter?: { includeSystemNodes?: unknown } | null): readonly string[] {
-  return filter?.includeSystemNodes === true ? EXCLUDED_WITH_SYSTEM_NODES : UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES;
+export function defaultExcludedNodeTypes(
+  filter?: { includeSystemNodes?: unknown; isRunnable?: unknown; role?: unknown } | null,
+): readonly string[] {
+  // #5485 — naming `isRunnable: true` or a role in an instruction family is an explicit ask for instructions,
+  // exactly as naming a nodeType is: it lifts `system` here, and only `system`. Decided HERE so the SQL clause and
+  // the Prisma filter cannot disagree; `chat-message` and the memory-class default never read it.
+  return filter?.includeSystemNodes === true || asksForInstructions(filter)
+    ? EXCLUDED_WITH_SYSTEM_NODES
+    : UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES;
 }

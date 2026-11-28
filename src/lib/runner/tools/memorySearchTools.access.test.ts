@@ -285,3 +285,27 @@ describe('#632 adapter fences, inherited-base scoping and paging (shares the mod
     } finally { spy.mockRestore(); }
   });
 });
+
+describe('#5485 a run can ask for instructions, and gets what findNodes returns for the same filter', () => {
+  it.each([
+    ['nothing', {}],
+    ['includeSystemNodes', { includeSystemNodes: true }],
+    ['nodeType system', { nodeType: 'system' }],
+    ['nodeTypes info', { nodeTypes: ['info'] }],
+    ['isRunnable true', { isRunnable: true }],
+    ['role task', { role: 'task' }],
+    ['role process', { role: 'process' }],
+  ] as Array<[string, Record<string, unknown>]>)('%s', async (name, filter) => {
+    const attached = memories.attached.id;
+    await node(attached, 'tasks:sys-task', { nodeType: 'system', isRunnable: true, role: 'task' });
+    await node(attached, 'processes:sys-process', { nodeType: 'system', role: 'process' });
+    await node(attached, 'plain-system', { nodeType: 'system' });
+    const c = await context(true);
+    const actual = (await call(c, { memoryUrn: memories.attached.urn, ...filter, limit: 20 })).hits.map(h => h.urn).sort();
+    const engine = await Q.findNodes({}, { query: queryText, mode: 'keyword', filter: { memoryRefs: [attached], ...filter }, limit: 20, expand: 0 }, c.principal);
+    expect(actual).toEqual(engine.hits.map((h: any) => emitNodeUrnV2(h.node.memory.urn, h.node.loc)).sort());
+    if (name === 'isRunnable true' || name === 'role task') expect(actual.map(u => u.split(':').pop())).toEqual(['sys-task']);
+    if (name === 'role process') expect(actual.map(u => u.split(':').pop())).toEqual(['sys-process']);
+    if (name === 'nothing') expect(actual.join()).not.toContain('sys-');
+  });
+});

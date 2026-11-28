@@ -718,6 +718,12 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
+      "name": "chk_nodes_task_role_runnable",
+      "kind": "check-constraint",
+      "file": "task-role-family.sql",
+      "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
+    },
+    {
       "name": "chk_owner_limits_one_owner",
       "kind": "check-constraint",
       "file": "owner-limit-invariants.sql",
