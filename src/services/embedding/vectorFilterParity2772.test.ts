@@ -228,3 +228,14 @@ describe('Charles survivors (#4665): the budget is measured inside the transacti
     for (const w of [wn[0], wc[0]]) { expect(w.stoppedEarly).toBeFalsy(); expect(w.exhausted).toBe(true); }
   });
 });
+
+describe('#5412 BLIND P2-2 (Bob): the passage (chunk) leg carries the branch arm', () => {
+  it('a branch-only memory returns passages only from inside the prefix, though the nearest chunks sit outside it', async () => {
+    const hits = await getRetrievalProvider().vectorSearchChunks({ db, memoryIds: [mem], queryEmbedding: query(), limit: 3, onWindow: () => {}, filter: { branches: [{ memoryId: mem, prefixes: ['tgt'] }] } } as any);
+    expect(hits).toHaveLength(3);
+    for (const h of hits) expect(targets).toContain(h.nodeId);
+    // Control: with no branch the nearest chunks are the decoys, so the pin can fail.
+    const open = await getRetrievalProvider().vectorSearchChunks({ db, memoryIds: [mem], queryEmbedding: query(), limit: 3, onWindow: () => {} } as any);
+    expect(open.some((h) => decoys.includes(h.nodeId))).toBe(true);
+  });
+});
