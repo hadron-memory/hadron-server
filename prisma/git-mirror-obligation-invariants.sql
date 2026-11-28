@@ -41,7 +41,7 @@ ALTER TABLE git_mirror_obligations ADD CONSTRAINT chk_git_mirror_obligation_shap
 -- a row keyed on it would be routed to a literal client/{client} branch. #3042's posture holds — retries
 -- never substitute an unknown client — so a delete in a templated memory does not propagate, as on main today.
 CREATE OR REPLACE FUNCTION hadron_git_mirror_capture_node_removal() RETURNS trigger
-LANGUAGE plpgsql AS $capture$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $capture$
 DECLARE
   v_branch text;
 BEGIN
@@ -85,7 +85,7 @@ CREATE TRIGGER git_mirror_node_remove_soft_delete AFTER UPDATE OF deleted_at ON 
 -- sees a live node owning the loc, and clears it without Git). A row naming some OTHER loc stays: that
 -- is a move's vacated-loc debt, which the move still owes.
 CREATE OR REPLACE FUNCTION hadron_git_mirror_cancel_node_removal() RETURNS trigger
-LANGUAGE plpgsql AS $cancel$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $cancel$
 BEGIN
   DELETE FROM git_mirror_obligations
   WHERE memory_id = NEW.memory_id AND node_id = NEW.id
@@ -124,7 +124,7 @@ CREATE TRIGGER git_mirror_node_remove_restore AFTER UPDATE OF deleted_at ON node
 -- (findings:mirror-retry-throw-must-retain-attempt-fence). A known limit (cor:int:010:01): a sync that runs before the
 -- sweep can still replace the write, as with an owed removal.
 CREATE OR REPLACE FUNCTION hadron_git_mirror_capture_node_write() RETURNS trigger
-LANGUAGE plpgsql AS $capture_write$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $capture_write$
 DECLARE
   v_branch text;
 BEGIN
