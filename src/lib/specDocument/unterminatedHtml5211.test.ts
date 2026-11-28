@@ -233,16 +233,22 @@ describe('#5265 rebuild on items 2, 4 and 9: the bodies main keeps', () => {
     // [body, the readers that lose it, the same on main]: a line-head `<!<b>`, a raw-text element two lines on or past a blank, `<!` inside
     // an HTML block (a browser's bogus comment is the only reading there), and a lesser tag.
     // Known losses that main has too (Xan, team chat #152402): the `</textarea>` two lines on is #5323 (escaping it would lose the anchor
-    // in commonmark.js and markdown-it, which keep it on main), and the `<xmp>` behind `<div/` is #5324 (not the window's).
+    // in commonmark.js and markdown-it, which keep it on main). The `<xmp>` behind `<div/` (#5324, not the window's) is escaped now: below.
     for (const [body, lost] of [
       ['<!<b>\n-\n<!x>~~~', []], ['<!\n\n</textarea>\n~~~', ['marked']], ['<!\n-\n</textarea>\n~~~', ['marked']], ['<x>\n```<!<xmp>', []],
       // The `</` site's mirror of the `<!` one inside an HTML block (Bradley, LOCAL at 8dd599df).
       ['<x>\n```</<xmp>', []], ['<div>\n</<script>', []],
-      ['-<!<pre>\n<div/<xmp>', ['commonmark.js', 'markdown-it']],
     ] as Array<[string, string[]]>) {
       expect(escapeUnterminatedHtml(body), body).toBe(body);
       expect(losers(body), body).toEqual(lost);
     }
+  });
+  it('#5324: the `<xmp>` behind `<div/` after a bare `<!` line is escaped, and no reader loses the anchor', () => {
+    const body = '-<!<pre>\n<div/<xmp>';
+    expect(losers(body)).toEqual(['commonmark.js', 'markdown-it']);
+    expect(escapeUnterminatedHtml(body)).toBe('-<!<pre>\n<div/&lt;xmp>');
+    expect(losers(escapeUnterminatedHtml(body))).toEqual([]);
+    expect(escapeUnterminatedHtml(escapeUnterminatedHtml(body))).toBe(escapeUnterminatedHtml(body));
   });
 });
 
