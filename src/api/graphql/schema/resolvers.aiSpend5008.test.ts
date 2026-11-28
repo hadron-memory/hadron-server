@@ -11,7 +11,7 @@ import { ApolloServer } from '@apollo/server';
 import { buildASTSchema, isObjectType, isEnumType, getNamedType, isScalarType, parse } from 'graphql';
 
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { cleanDb, createPriceRowForTest } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -411,7 +411,7 @@ describe('#5008 aiSpend — ids only, scalars only (pin 10)', () => {
 describe('#5008 aiSpend — a real debit through the write path (pin 12)', () => {
   it('recordLlmUsage on the platform key with debits on shows its cost and the marked-up charge', async () => {
     vi.stubEnv('BILLING_DEBIT_ENABLED', 'true');
-    await db.aiModelPrice.create({
+    await createPriceRowForTest(db, {
       data: {
         id: generateId(), provider: 'anthropic', model: 'claude-spend', tier: 1, inputMicroCentsPerMTok: 30_000_000n, outputMicroCentsPerMTok: 150_000_000n,
         markupBasisPoints: 2500, effectiveAt: new Date('2026-01-01T00:00:00Z'), createdBy: platformAdmin,

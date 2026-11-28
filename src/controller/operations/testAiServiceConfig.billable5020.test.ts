@@ -7,7 +7,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { db } from '../../integrations/db/client.js';
-import { cleanDb } from '../../test/helpers.js';
+import { cleanDb, createPriceRowForTest } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { encryptToken } from '../../lib/tokenCrypto.js';
 import { clearPriceCache } from '../../lib/metering/index.js';
@@ -58,7 +58,7 @@ beforeEach(async () => {
   platformAdmin = (await db.user.create({ data: { id: generateId(), handle: 'b5020c-platform', githubId: 502003, roles: ['ADMIN'] } })).id;
   await db.orgMember.create({ data: { id: generateId(), organizationId: orgA, userId: person, role: 'CONTRIBUTOR' } });
   await db.orgMember.create({ data: { id: generateId(), organizationId: orgA, userId: adminA, role: 'ADMIN' } });
-  await db.aiModelPrice.create({
+  await createPriceRowForTest(db, {
     data: { id: generateId(), provider: 'glm', model: 'GLM-5.3', tier: 1, inputMicroCentsPerMTok: 30_000_000n, outputMicroCentsPerMTok: 150_000_000n, effectiveAt: new Date('2026-01-01') },
   });
 });
