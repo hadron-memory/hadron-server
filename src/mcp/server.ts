@@ -5596,13 +5596,13 @@ export function createMcpServerInstance(
       if (branch && memory) {
         // No inheritance for a branch-only memory (a branch is the grant giver's memory, never an Agent's base), and every
         // candidate row is judged by its own loc.
-        const admitted = async (where: { loc: string }) => {
-          const row = await db.node.findFirst({ where: { ...where, memoryId: memory.id, deletedAt: null }, include: readProjectionInclude });
+        const admitted = async (candidate: string) => {
+          const row = await db.node.findFirst({ where: { loc: candidate, memoryId: memory.id, deletedAt: null }, include: readProjectionInclude });
           return row && branchAdmitsLoc(branch, row.loc) ? row : null;
         };
-        let hit = await admitted({ loc: literalLoc ?? loc });
+        let hit = await admitted(literalLoc ?? loc);
         const literal = !!hit && !!literalLoc;
-        if (!hit && literalLoc) hit = await admitted({ loc });
+        if (!hit && literalLoc) hit = await admitted(loc);
         if (!hit) {
           // A moved node: the alias names the node; its CURRENT memory decides, whole or by branch.
           let target: { id: string; memoryId: string; loc: string } | null = null;
