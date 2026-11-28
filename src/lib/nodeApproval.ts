@@ -388,11 +388,14 @@ export function mintedSql(minted: boolean | null | undefined): string | null {
   return minted ? `(NOT ${encrypted} AND minted_at IS NOT NULL)` : `(${encrypted} OR minted_at IS NULL)`;
 }
 
-/** Whether a revision was approved, and by which recorded approval (#1838). */
+/** Whether a revision is approved, and by which recorded approval (#1838, #5481). */
 export interface RevisionApproval {
   /** NOT_APPLICABLE inside an encrypted memory (cor:dmo:120:00): nothing is read. */
   state: 'APPROVED' | 'NOT_APPROVED' | 'NOT_APPLICABLE';
-  /** The covering record, with the revision it was recorded at. Null unless APPROVED. */
+  /**
+   * The approval this revision carries, with the revision it was recorded at: this revision, or an earlier one when
+   * every revision since left the title, abstract and content unchanged (#5481). Null unless APPROVED.
+   */
   record: NodeApprovalRecord | null;
   /**
    * Only when APPROVED: the exact content this verdict hashed, and the memory that captured it. An include serves
@@ -404,20 +407,27 @@ export interface RevisionApproval {
 const NOT_APPROVED_REVISION: RevisionApproval = { state: 'NOT_APPROVED', record: null };
 
 /**
- * #1838 (cor:dmo:060:04, Holger's R7) — was revision `revNo` of the node
- * approved? Yes when some recorded approval covers exactly its hashed content,
- * whichever revision the approval was recorded on. The records are the
- * `NodeRevision` rows' copied approvals plus the node's current one, and no
- * table was added for them.
+ * #5481 (Holger, 2026-11-28: "the latest, compiled and approved revision is served [...] The text is not a factor
+ * at all") — is revision `revNo` of the node approved? Only when an approval is recorded AT it:
  *
- * A record counts only while the text it hashed still hashes to it (an altered
- * snapshot or live row is not an approval, and stays the integrity check's to
- * report), only from the same capture memory as the revision asked about (a
- * node moved across memories discloses nothing across them), and only with a
- * hash (an approval ended on encrypted entry has none). A legacy row with no
- * `revNo` can be neither pinned nor a record. This is a per-revision read: it
- * deliberately does not change what `Node.approvalStatus` says about the live
- * revision (#1611).
+ * - a revision with a history row: the row itself carries an approval. The revision writer puts one there for the
+ *   revision the approval was recorded at, and for each later revision the approval was still in force at, because
+ *   no revision in between changed the title, abstract or content (`approvalForSnapshot`; cor:dmo:120:04, unchanged:
+ *   such a write keeps an approval). Nothing else is consulted: no other revision's record, and no text of another
+ *   revision.
+ * - the live revision (it has no row): the node's standing approval, by the status rule (`approvalHoldsFor`: no
+ *   content change since it was recorded). That is the same record, not yet copied.
+ *
+ * So a revision whose text merely EQUALS a text approved at another revision is not approved, in either direction:
+ * a restore or a compile back to an earlier approved text needs a new approval, and an approval never reaches back
+ * to an older revision. This reverses the #1838 rule of hrn:node:hadronmemory.com:specs:cor:dmo:060:04 ("approved
+ * when some recorded approval covers its content, whichever revision it was recorded on").
+ *
+ * The integrity condition stays: the record counts only while the text of THIS revision still hashes to it (an
+ * altered snapshot or live row is not an approval, and stays the integrity check's to report). A record with no hash
+ * (an approval ended on encrypted entry) is none, and a legacy row with no `revNo` can be neither pinned nor a
+ * record. This is a per-revision read: it does not change what `Node.approvalStatus` says about the live revision
+ * (#1611).
  *
  * Pure read; `db` may be a transaction client.
  */
@@ -449,7 +459,7 @@ export async function revisionApprovalOf(
     where: { nodeId, revNo },
     select: {
       memoryId: true, name: true, abstract: true, content: true,
-      revNo: true, approvedBy: true, approvedByInfo: true, approvedAt: true, approvalHash: true,
+      revNo: true, approvedRevNo: true, approvedBy: true, approvedByInfo: true, approvedAt: true, approvalHash: true,
     },
   });
   const isLive = !target && revNo === live.revSeq;
@@ -466,59 +476,29 @@ export async function revisionApprovalOf(
 
   const hashOf = (f: { name: string; abstract: string | null; content: string | null }) =>
     computeApprovalHash({ title: f.name, abstract: f.abstract, content: f.content });
-  const wanted = hashOf(target ?? live);
-  const served = { content: (target ?? live).content, memoryId: captureMemoryId };
-  type Row = {
-    revNo: number | null; approvedBy: string | null; approvedByInfo: string | null; approvedAt: Date | null;
-    approvalHash: string | null; name: string; abstract: string | null; content: string | null;
-  };
-  // A snapshot's copied approval is a record only while the text it hashed still hashes to it (an altered
-  // snapshot is not an approval), and only one covering this revision's text counts here.
-  const recordOf = (r: Row): NodeApprovalRecord | null => (
-    r.revNo != null && r.approvedAt != null && r.approvalHash === wanted && hashOf(r) === r.approvalHash
-      ? { revision: r.revNo, approvedBy: r.approvedBy, approvedByInfo: r.approvedByInfo, approvedAt: r.approvedAt, hash: r.approvalHash }
-      : null
-  );
-  const currentRecord = captureMemoryId === live.memoryId ? approvalRecordOf(live) : null;
-  const current = currentRecord && approvalHoldsFor(live) && hashOf(live) === currentRecord.hash && currentRecord.hash === wanted
-    ? currentRecord : null;
+  // The record AT this revision, and nothing else: its own row's, or (the live revision has no row) the node's
+  // standing approval. Either counts only while this revision's own text still hashes to it.
+  const record = target ? carriedRecordOf(target) : (approvalHoldsFor(live) ? approvalRecordOf(live) : null);
+  if (!record || record.hash !== hashOf(target ?? live)) return NOT_APPROVED_REVISION;
+  return { state: 'APPROVED', record, served: { content: (target ?? live).content, memoryId: captureMemoryId } };
+}
 
-  // Prefer the record made AT this revision: its own snapshot (already loaded, and always from the capture
-  // memory), else the node's current approval when it was made at this revision.
-  const atRevision = (target ? recordOf(target as Row) : null) ?? (current?.revision === revNo ? current : null);
-  if (atRevision) return { state: 'APPROVED', record: atRevision, served };
-
-  // Else the earliest record that covers it. Only rows carrying this text's hash can cover it, and they are read
-  // oldest first in bounded pages, each charged before it runs and its texts after, so a long approval history
-  // is never materialized past the budget (#40). A snapshot sorts before the current approval on a tie.
-  const where: Prisma.NodeRevisionWhereInput = {
-    nodeId, approvalHash: wanted, revNo: { not: null }, approvedAt: { not: null },
-    OR: [{ memoryId: captureMemoryId }, ...(captureMemoryId === live.memoryId ? [{ memoryId: null }] : [])],
+/**
+ * #5481 — the approval a history row carries, as a record naming the revision it was recorded at: the row's own
+ * revision, or the earlier one it carries forward (`approvedRevNo`). Null for a row that carries none, a hashless one
+ * (ended on encrypted entry), a legacy row with no `revNo`, and a row that names a revision ABOVE its own (no
+ * approval is recorded before its revision exists). The caller still checks the row's text against the hash.
+ */
+function carriedRecordOf(row: {
+  revNo: number | null; approvedRevNo: number | null; approvedBy: string | null; approvedByInfo: string | null;
+  approvedAt: Date | null; approvalHash: string | null;
+}): NodeApprovalRecord | null {
+  if (row.revNo == null || row.approvedAt == null || row.approvalHash == null) return null;
+  if (row.approvedRevNo != null && row.approvedRevNo > row.revNo) return null;
+  return {
+    revision: row.approvedRevNo ?? row.revNo, approvedBy: row.approvedBy, approvedByInfo: row.approvedByInfo,
+    approvedAt: row.approvedAt, hash: row.approvalHash,
   };
-  let earliest: NodeApprovalRecord | null = null;
-  let after: number | null = null;
-  for (;;) {
-    meter?.chargeLookup();
-    const page: Row[] = await db.nodeRevision.findMany({
-      where: after == null ? where : { AND: [where, { revNo: { gt: after } }] },
-      select: {
-        revNo: true, approvedBy: true, approvedByInfo: true, approvedAt: true, approvalHash: true,
-        name: true, abstract: true, content: true,
-      },
-      orderBy: { revNo: 'asc' },
-      take: APPROVAL_RECORD_PAGE,
-    });
-    // Every row the page returned was loaded, so every row is charged before one is chosen (#40).
-    for (const r of page) chargeTexts(meter, r);
-    earliest = page.map(recordOf).find((r): r is NodeApprovalRecord => r != null) ?? null;
-    if (earliest || page.length < APPROVAL_RECORD_PAGE) break;
-    // Past the current approval's revision no snapshot can be the earliest.
-    after = page[page.length - 1].revNo;
-    if (current && after != null && after >= current.revision) break;
-  }
-  const record = earliest && (!current || earliest.revision <= current.revision) ? earliest : current;
-  if (!record) return NOT_APPROVED_REVISION;
-  return { state: 'APPROVED', record, served };
 }
 
 /** #40: what an approval read charges against a resolved read's budget (a `ResolutionBudget` is one). */
@@ -526,9 +506,6 @@ export interface ApprovalReadMeter {
   chargeLookup(count?: number): void;
   chargeLoaded(text: string | null | undefined): void;
 }
-
-/** Rows of approval history read per query when looking for the earliest covering record. */
-export const APPROVAL_RECORD_PAGE = 8;
 
 function chargeTexts(meter: ApprovalReadMeter | undefined, f: { name: string; abstract: string | null; content: string | null }): void {
   if (!meter) return;
@@ -555,11 +532,13 @@ export interface NewestApprovedRevision {
 /**
  * #2041 (cor:dmo:150:05, "a newer unapproved edit of an `approved` target is
  * not broken: serve the newest approved revision") — the newest revision of
- * the node that `revisionApprovalOf` reads APPROVED. It is a walk over that one
- * predicate (live revision first, then the retained snapshots newest-first), so
- * no second definition of "approved" exists. It reads no `approvedRevNo`
- * pointer: that is the node's CURRENT approval, which a later edit supersedes
- * and an encrypted entry can end.
+ * the node that `revisionApprovalOf` reads APPROVED: since #5481 the highest
+ * revision number an approval is recorded at, whatever any other revision's
+ * text is. It is a walk over that one predicate (live revision first, then the
+ * retained snapshots newest-first), so no second definition of "approved"
+ * exists. It does not jump to the node's `approvedRevNo`: that names the
+ * revision the CURRENT approval was recorded at, whose row may be captured in
+ * another memory, deleted by hand or ended by an encrypted entry.
  *
  * Only revisions that can be served from the node's CURRENT memory count: a
  * snapshot captured in another memory (a node moved across memories) is never
@@ -582,7 +561,7 @@ export async function newestApprovedRevisionOf(
   if (!live) return none;
   const examined = candidates.slice(0, cap);
   // A metered walk (an include's resolved read) keeps its per-verdict charges, which #40 pins; only an unmetered one pre-filters.
-  const skippable = meter ? new Set<number>() : await revisionsWithNoApprovalHash(db, nodeId, live, examined);
+  const skippable = meter ? new Set<number>() : await revisionsCarryingNoApproval(db, nodeId, live, examined);
   for (const revNo of examined) {
     if (skippable.has(revNo)) continue;
     const verdict = await revisionApprovalOf(db, nodeId, revNo, meter);
@@ -601,7 +580,7 @@ export async function newestApprovedRevisionOf(
  * holds its number, plus every snapshot servable from the node's CURRENT memory (a foreign-memory capture is never
  * selected). `snapshotNos` marks which numbers a current-memory snapshot holds — the `source` an approval found there
  * reports. Null `live` is a node that no longer exists: nothing to offer. `below` (#3801) continues a past-batch walk
- * under that revision number only. `live` carries `memoryId` too: the unmetered pre-filter (`revisionsWithNoApprovalHash`)
+ * under that revision number only. `live` carries `memoryId` too: the unmetered pre-filter (`revisionsCarryingNoApproval`)
  * needs it.
  */
 export async function servableRevisionNumbers(
@@ -676,7 +655,7 @@ export async function newestApprovedAndSignedRevisionOf(
   let approvedUnsigned = false;
   const examined = candidates.slice(0, cap);
   // A metered walk (an include's resolved read) keeps its per-verdict charges, which #40 pins; only an unmetered one pre-filters.
-  const skippable = meter ? new Set<number>() : await revisionsWithNoApprovalHash(db, nodeId, live, examined);
+  const skippable = meter ? new Set<number>() : await revisionsCarryingNoApproval(db, nodeId, live, examined);
   for (const revNo of examined) {
     if (skippable.has(revNo)) continue;
     const verdict = await revisionApprovalOf(db, nodeId, revNo, meter);
@@ -728,14 +707,15 @@ export async function newestApprovedRevisionForServe(
 }
 
 /**
- * #3801 — the revisions of `revNos` that `revisionApprovalOf` cannot read APPROVED, found set-wise instead of one verdict
- * each. Every route to APPROVED there needs a record whose hash equals the hash of THAT revision's text (its own snapshot's
- * copied approval, the node's current approval, or an earlier covering snapshot), so a revision whose text hashes to none of
- * the node's recorded approval hashes is not approved, whatever else is true. Three reads and one bounded carrier lookup per batch instead of ~3 per
- * revision. It only ever ADDS skips for revisions it positively hashed: a number held by more than one row, or one it
- * cannot read, is left to the verdict, and an encrypted memory skips nothing (the verdict answers NOT_APPLICABLE).
+ * #3801, #5481 — the revisions of `revNos` that `revisionApprovalOf` cannot read APPROVED, found set-wise instead of one
+ * verdict each. A revision is approved only by the record AT it (#5481), so a history row that carries no approval hash
+ * is not approved, whatever else is true, and neither is the live revision of a node whose standing approval does not
+ * hold. Three reads per batch, none of them a text, instead of ~3 per revision. It only ever ADDS skips for revisions
+ * it positively read: a number held by more than one row, or one it cannot read, is left to the verdict, and an
+ * encrypted memory skips nothing (the verdict answers NOT_APPLICABLE). Whether a carried record still matches its
+ * text is the verdict's to say.
  */
-async function revisionsWithNoApprovalHash(
+async function revisionsCarryingNoApproval(
   db: Pick<PrismaClient, 'node' | 'nodeRevision' | 'memory'> | Prisma.TransactionClient,
   nodeId: string,
   live: { memoryId: string; revSeq: number },
@@ -743,34 +723,22 @@ async function revisionsWithNoApprovalHash(
 ): Promise<Set<number>> {
   const skip = new Set<number>();
   if (revNos.length === 0) return skip;
-  const [memory, liveText, rows] = await Promise.all([
+  const [memory, node, rows] = await Promise.all([
     db.memory.findUnique({ where: { id: live.memoryId }, select: { isEncrypted: true } }),
-    db.node.findUnique({ where: { id: nodeId }, select: { revSeq: true, name: true, abstract: true, content: true, approvalHash: true } }),
-    db.nodeRevision.findMany({ where: { nodeId, revNo: { in: revNos } }, select: { revNo: true, name: true, abstract: true, content: true } }),
+    db.node.findUnique({ where: { id: nodeId }, select: { revSeq: true, contentRevSeq: true, approvedRevNo: true, approvedAt: true, approvalHash: true } }),
+    db.nodeRevision.findMany({ where: { nodeId, revNo: { in: revNos } }, select: { revNo: true, approvedAt: true, approvalHash: true } }),
   ]);
-  if (!memory || memory.isEncrypted || !liveText) return skip;
-  const hashOf = (f: { name: string; abstract: string | null; content: string | null }) =>
-    computeApprovalHash({ title: f.name, abstract: f.abstract, content: f.content });
+  if (!memory || memory.isEncrypted || !node) return skip;
   const byNo = new Map<number, typeof rows>();
   for (const r of rows) byNo.set(r.revNo!, [...(byNo.get(r.revNo!) ?? []), r]);
-  const hashes = new Map<number, string>();
   for (const revNo of revNos) {
     const held = byNo.get(revNo) ?? [];
-    const text = held.length === 1 ? held[0] : held.length === 0 && revNo === live.revSeq && liveText.revSeq === live.revSeq ? liveText : null;
-    if (text) hashes.set(revNo, hashOf(text));
+    if (held.length === 1) {
+      if (held[0].approvedAt == null || held[0].approvalHash == null) skip.add(revNo);
+    } else if (held.length === 0 && revNo === live.revSeq && node.revSeq === live.revSeq) {
+      if (node.approvedAt == null || node.approvalHash == null || !approvalHoldsFor(node)) skip.add(revNo);
+    }
   }
-  // Only the batch's own hashes can matter, so ask which of THOSE are recorded: the read is bounded by the batch, never by
-  // the length of the node's approval history.
-  const wanted = [...new Set(hashes.values())];
-  const recorded = new Set<string>(wanted.filter((h) => h === liveText.approvalHash));
-  const unresolved = wanted.filter((h) => !recorded.has(h));
-  if (unresolved.length > 0) {
-    // GROUP BY runs in the database (Prisma applies `distinct` client-side, which would fetch every duplicate row), so the
-    // rows returned never exceed the batch's own hashes however many revisions repeat one.
-    const carriers = await db.nodeRevision.groupBy({ by: ['approvalHash'], where: { nodeId, approvalHash: { in: unresolved } } });
-    for (const c of carriers) recorded.add(c.approvalHash!);
-  }
-  for (const [revNo, h] of hashes) if (!recorded.has(h)) skip.add(revNo);
   return skip;
 }
 

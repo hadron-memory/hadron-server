@@ -3155,8 +3155,10 @@ model CompiledPromptRevision {
 /// - The snapshot holds the content fields of the node. Operational fields (the embedding queue, token counts,
 ///   sync provenance, audit stamps) are deliberately not versioned. A null `nodeType` marks a row from before
 ///   the full snapshot existed; restoring such a row leaves the fields it does not hold as they are.
-/// - The `approved*` columns copy the node's approval when an approved revision is edited away. The approval of
-///   record is on the Node.
+/// - The `approved*` columns copy the node's approval when a revision it is in force at is edited away: the
+///   revision it was recorded at, and each later revision that left the title, abstract and content unchanged
+///   (#5481). A revision is approved only when its own row carries an approval. The approval of record is on the
+///   Node.
 /// - History is bounded: `Memory.maxRevCount` (default 10) is how many revisions are kept per node, and the
 ///   oldest are pruned when a new one is written.
 ///
@@ -3257,6 +3259,12 @@ model NodeRevision {
   approvedAt         DateTime?           @map("approved_at")
   /// #1591: approval hash v1 recorded when this revision was approved.
   approvalHash       String?             @map("approval_hash")
+  /// #5481: the revision the approval this row carries was recorded at. Null on a row whose approval was recorded at
+  /// its own revision. Lower than `revNo` on a row that carries an approval forward: the approval was still in
+  /// force when this revision was captured, because no revision since the record changed the title, abstract or
+  /// content (hrn:node:hadronmemory.com:specs:cor:dmo:120:04); and on a row the #5481 migration re-anchored once
+  /// (migration 20261128150000_approval_by_revision). Never set without the other approval columns.
+  approvedRevNo      Int?                @map("approved_rev_no")
   /// #696: per-node MONOTONIC revision number (1, 2, 3, …) — the stable atom
   /// in the `hrn:noderev:<root>:<mem>:<loc...>:<rev>` URN (rendered `r<N>`).
   /// Minted race-safely from `Node.revSeq` (atomic increment) inside the same

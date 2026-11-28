@@ -14,6 +14,8 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { approvalStateOf, newestApprovedRevisionOf, revisionApprovalOf } from './nodeApproval.js';
 import { revisionsExemptFromPruning } from './nodeRevisionSnapshot.js';
+import { computeApprovalHash } from './approvalHash.js';
+import { plainPinWarnings } from './includes/plainPinWarnings.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
@@ -115,6 +117,20 @@ describe('#5481 an `approved` include resolves to the newest revision an approva
     expect(await read('inc')).toBe('B');
   });
 
+  it('a target with a later non-content revision: the approved text is served before and after an unapproved edit, pinned or not', async () => {
+    const n = await mk('tagged', 'A');
+    await approve(n.id); // rev 1
+    await tag(n.id, ['x']); // rev 2: same hashed content
+    await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'inc-t', name: 'inc-t', content: '{{> tagged approved}}|{{> tagged rev=1 approved}}|{{> tagged rev=2 approved}}' } });
+    expect(await read('inc-t')).toBe('A|A|A');
+    await edit(n.id, 'B'); // rev 3, unapproved
+    expect(await read('inc-t')).toBe('A|A|A');
+    await edit(n.id, 'A'); // rev 4 repeats A, unapproved: not what is served (revision 2 is), and a pin on it is broken
+    await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'inc-t4', name: 'inc-t4', content: '{{> tagged rev=4 approved}}' } });
+    expect(await read('inc-t')).toBe('A|A|A');
+    expect(await read('inc-t4')).toBe('[Include unavailable]');
+  });
+
   it('pinned at the unapproved revision 4: broken; pinned at revision 2: served', async () => {
     await table('rule2');
     await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'inc4', name: 'inc4', content: '{{> rule2 rev=4 approved}}' } });
@@ -161,6 +177,20 @@ describe('#5481 a write that does not change the hashed content keeps the approv
     await edit(n.id, 'C'); // rev 4
     expect(await stateOf(n.id, 2)).toBe('NOT_APPROVED');
     expect(await stateOf(n.id, 3)).toBe('NOT_APPROVED');
+    expect(await newest(n.id)).toMatchObject({ revNo: 1 });
+  });
+
+  it('the approved text coming back and THEN a non-content write: neither revision\'s row carries the old approval', async () => {
+    const n = await mk('m:6', 'A');
+    await approve(n.id); // rev 1
+    await edit(n.id, 'B'); // rev 2: ends the approval
+    await edit(n.id, 'A'); // rev 3: the approved text again, nothing in force
+    await tag(n.id, ['x']); // rev 4: captures rev 3
+    await edit(n.id, 'C'); // rev 5: captures rev 4
+    const rows = await db.nodeRevision.findMany({ where: { nodeId: n.id, revNo: { in: [3, 4] } } });
+    expect(rows.map((r) => [r.content, r.approvalHash, r.approvedAt, r.approvedRevNo])).toEqual([['A', null, null, null], ['A', null, null, null]]);
+    expect(await stateOf(n.id, 3)).toBe('NOT_APPROVED');
+    expect(await stateOf(n.id, 4)).toBe('NOT_APPROVED');
     expect(await newest(n.id)).toMatchObject({ revNo: 1 });
   });
 
@@ -222,6 +252,48 @@ describe('#5481 integrity, encryption and capture memory are unchanged', () => {
     expect(charged).not.toContain('B');
     // And the newest-approved walk never selects it: revision 1 is the newest one servable from this memory.
     expect(await newest(n.id)).toMatchObject({ revNo: 1 });
+  });
+});
+
+describe('#5481 a history row is judged by what it carries, and by nothing it cannot carry', () => {
+  it('a row that names a revision ABOVE its own as the one its approval was recorded at is not approved', async () => {
+    const n = await mk('c:1', 'A');
+    await edit(n.id, 'B'); // rev 2; row 1 holds A and carries nothing
+    const hash = computeApprovalHash({ title: 'Title c:1', abstract: null, content: 'A' });
+    const record = { approvedByInfo: 'test', approvedAt: new Date(), approvalHash: hash };
+    await db.nodeRevision.updateMany({ where: { nodeId: n.id, revNo: 1 }, data: { ...record, approvedRevNo: 5 } });
+    expect(await stateOf(n.id, 1)).toBe('NOT_APPROVED');
+    // control: the same row naming its own revision (or none) is approved, and reports that revision.
+    await db.nodeRevision.updateMany({ where: { nodeId: n.id, revNo: 1 }, data: { approvedRevNo: 1 } });
+    expect(await revisionApprovalOf(db, n.id, 1)).toMatchObject({ state: 'APPROVED', record: { revision: 1 } });
+    await db.nodeRevision.updateMany({ where: { nodeId: n.id, revNo: 1 }, data: { approvedRevNo: null } });
+    expect(await revisionApprovalOf(db, n.id, 1)).toMatchObject({ state: 'APPROVED', record: { revision: 1 } });
+  });
+
+  it('the row written for a non-content revision names the revision the approval was recorded at, with the original approver and time', async () => {
+    const n = await mk('c:2', 'A');
+    await approve(n.id); // rev 1
+    const approvedAt = (await db.node.findUniqueOrThrow({ where: { id: n.id } })).approvedAt;
+    await tag(n.id, ['x']); // rev 2
+    await tag(n.id, ['y']); // rev 3
+    const rows = await db.nodeRevision.findMany({ where: { nodeId: n.id }, orderBy: { revNo: 'asc' } });
+    expect(rows.map((r) => [r.revNo, r.approvedRevNo, r.approvedBy, r.approvedAt?.getTime(), r.approvalHash != null])).toEqual([
+      [1, null, admin.id, approvedAt!.getTime(), true],
+      [2, 1, admin.id, approvedAt!.getTime(), true],
+    ]);
+  });
+
+  it('a plain pin is warned as prunable on a revision that only carries an approval forward, not on the one it was recorded at', async () => {
+    const n = await mk('pinned', 'A');
+    await approve(n.id); // rev 1
+    await tag(n.id, ['x']); // rev 2
+    await edit(n.id, 'B'); // rev 3; row 2 carries revision 1's approval forward
+    const historyReader: Context = { db, userId: admin.id, roles: ['READER'] }; // the advice is for a history reader
+    expect(await plainPinWarnings(historyReader, { memoryId: memory.id }, '{{> pinned rev=1}}')).toEqual([]);
+    expect(await plainPinWarnings(historyReader, { memoryId: memory.id }, '{{> pinned rev=2}}')).toMatchObject([{ code: 'include.pin.unkept' }]);
+    // control: a revision that carries nothing is warned the same way.
+    await edit(n.id, 'C'); // rev 4; row 3 holds B and carries nothing
+    expect(await plainPinWarnings(historyReader, { memoryId: memory.id }, '{{> pinned rev=3}}')).toMatchObject([{ code: 'include.pin.unkept' }]);
   });
 });
 

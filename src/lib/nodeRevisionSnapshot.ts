@@ -304,13 +304,14 @@ async function approvalContradictedBy(
   return computeApprovalHash({ title: node.name, abstract: node.abstract, content: node.content }) !== node.approvalHash;
 }
 
-/** The live node's approval columns (#1591). */
+/** The live node's approval columns (#1591), with the content boundary that says whether the approval still stands (#1611). */
 const NODE_APPROVAL_SELECT = {
   approvedRevNo: true,
   approvedBy: true,
   approvedByInfo: true,
   approvedAt: true,
   approvalHash: true,
+  contentRevSeq: true,
 } as const;
 
 interface NodeApprovalColumns {
@@ -319,22 +320,38 @@ interface NodeApprovalColumns {
   approvedByInfo: string | null;
   approvedAt: Date | null;
   approvalHash: string | null;
+  contentRevSeq: number;
 }
 
 /**
- * #1591 — the approval a snapshot of revision `revNo` carries: the live node's
- * approval when it names exactly that revision, otherwise none. This is how an
- * approval moves into history when its revision is edited away, so every
- * revision-write site gets it without passing anything.
+ * #1591, #5481 — the approval a snapshot of revision `revNo` carries. A revision is approved only when its own row
+ * carries an approval (`revisionApprovalOf`), so this is where an approval is recorded AT a revision:
+ *
+ * - the revision the approval was recorded at (`approvedRevNo === revNo`): the node's approval is copied as it is,
+ *   as it always was (a hashless one too: an approval ended on encrypted entry keeps who, when and which revision);
+ * - a LATER revision the approval was still in force at (#5481): the approval is copied with the revision it was
+ *   recorded at (`approvedRevNo`), when no revision since the record changed the title, abstract or content. That is
+ *   the node's own status rule (`contentRevSeq <= approvedRevNo`, #1611, cor:dmo:120:04) read at capture, before the
+ *   edit that replaces this revision is applied. It is revision arithmetic, never a comparison of texts: a revision
+ *   whose text merely equals an approved text gets nothing (Holger, 2026-11-28).
+ *
+ * `node` must be the node row as it is when this revision is captured, with the edit that replaces it not yet
+ * applied. A caller that had already applied a content change would only make this copy nothing (the boundary has
+ * moved), never too much. The reader re-checks that the row's text still hashes to what it carries.
  */
 function approvalForSnapshot(node: NodeApprovalColumns | null, revNo: number) {
-  if (!node || node.approvedRevNo !== revNo) return {};
-  return {
+  if (!node || node.approvedRevNo == null) return {};
+  const copied = {
     approvedBy: node.approvedBy,
     approvedByInfo: node.approvedByInfo,
     approvedAt: node.approvedAt,
     approvalHash: node.approvalHash,
   };
+  if (node.approvedRevNo === revNo) return copied;
+  const stillInForce = node.approvedRevNo < revNo
+    && node.approvalHash != null && node.approvedAt != null
+    && node.contentRevSeq <= node.approvedRevNo;
+  return stillInForce ? { ...copied, approvedRevNo: node.approvedRevNo } : {};
 }
 
 /**
@@ -439,13 +456,14 @@ export async function createNodeRevision(
  * served revisions add their set here, never a second prune rule).
  *
  * - #1632 (cor:dmo:130:05, Holger #9901): a revision a signature was made on.
- * - #1838 (cor:dmo:060:04, R7): a revision whose row carries a recorded
- *   approval (a hash), because that row is the evidence identical-content
- *   revisions are judged approved by.
- *
- * - #2063 (hrn:node:hadronmemory.com:specs:cor:dmo:150:07): the newest
- *   revision the existing approval predicate qualifies, including a covered
- *   non-carrier. Includes themselves add no retention exemption.
+ * - #1838, #5481 (cor:dmo:060:04): the revision an approval was RECORDED at (its
+ *   row carries the record as its own). A later row that only carries that
+ *   approval forward (#5481, `approvedRevNo` below its `revNo`) is ordinary
+ *   history, so non-content revisions under a standing approval do not pile up.
+ * - #2063, #5481 (hrn:node:hadronmemory.com:specs:cor:dmo:150:07): the newest
+ *   approved revision, by the one approval predicate: the revision a serve
+ *   and an `approved` include pick. Includes themselves add no retention
+ *   exemption.
  * - #2047 (cor:dmo:150:07, cor:dmo:060:04): the compiled revision an open
  *   session or an unfinished run was served (`served_prompts`). Revision
  *   identity there is `Node.revSeq`, which is `NodeRevision.revNo`.
@@ -464,7 +482,7 @@ export async function revisionsExemptFromPruning(
     db.nodeSignature.findMany({ where: { nodeId }, select: { revision: true }, distinct: ['revision'] }),
     db.nodeRevision.findMany({
       where: { nodeId, memoryId, approvalHash: { not: null }, revNo: { not: null } },
-      select: { revNo: true },
+      select: { revNo: true, approvedRevNo: true },
     }),
     // #2047 (cor:dmo:150:07): the compiled revision an OPEN session or an unfinished run was served. A chat's record
     // retains nothing (the rule names sessions and runs), and an owner that has ended releases its own revision only.
@@ -478,7 +496,8 @@ export async function revisionsExemptFromPruning(
           OR (sp.kind = 'RUN' AND r.status IN ('PENDING', 'RUNNING')))`,
   ]);
   const out = new Set<number>(signed.map((s) => s.revision));
-  for (const c of carriers) if (c.revNo != null) out.add(c.revNo);
+  // The record's own row only (#5481): a row that carries an approval forward names an EARLIER revision.
+  for (const c of carriers) if (c.revNo != null && !(c.approvedRevNo != null && c.approvedRevNo < c.revNo)) out.add(c.revNo);
   for (const sv of servedOpen) out.add(Number(sv.rev));
   // #2751: absence, not a bounded qualification scan, can prove there is
   // nothing approved to retain. Check ALL hashed carriers for this node:
