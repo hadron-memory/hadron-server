@@ -14,6 +14,7 @@
 import { z } from 'zod';
 
 import type { AiServiceConfig, Prisma, PrismaClient } from '../generated/prisma/index.js';
+import { creditGateActive } from './metering/switches.js';
 import { encryptToken } from './tokenCrypto.js';
 import { chatToolChoiceFor, type ChatToolChoice } from './llm/chatToolChoice.js';
 import { type OwnedRow, type OwnerRef, ownerOfWork } from './owner.js';
@@ -263,11 +264,12 @@ export function aiConfigTenantFor(input: {
 
 /**
  * Whether the walk may consult the HadronServer level: the platform's configuration answers for a server context and for
- * an organization, never for a person and never for an unowned row (their App or their own Agent brings its own key).
- * A8 (#5025) opens it for a person by changing this one line.
+ * an organization, never for an unowned row, and for a person only while the deployment charges for and gates platform-key
+ * spend (#5025, Billing A8; cor:dmo:050:10): `creditGateActive()` is the one predicate, read per call, so every such use is
+ * debited to the person (cor:dmo:170:05) and checked against the person's balance (cor:acl:050:05).
  */
 function platformLevelOpen(tenant: AiConfigTenant): boolean {
-  return 'server' in tenant || 'organizationId' in tenant;
+  return 'server' in tenant || 'organizationId' in tenant || ('userId' in tenant && creditGateActive());
 }
 
 /**

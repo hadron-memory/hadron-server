@@ -10,6 +10,7 @@ import {
   resolveAiConfigs,
   type AiConfigOwnerType,
 } from '../../../lib/aiConfig.js';
+import { creditGateActive } from '../../../lib/metering/switches.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
@@ -544,9 +545,11 @@ export const agentQueries = {
         // manager. An authorized installation can still resolve its identity.
         const discloseKey = await canManageResolvedConfig(ctx, config, agentRef);
         // #5075 backstop (defense in depth, unreachable while the walk is right): a person's App never answers from the
-        // organization or platform level. The walk (aiConfigTenantFor) is the rule; this keeps the one query that
-        // decrypts keys from handing back such a row if the walk ever regresses.
-        if (appOwnerUserId !== null && (ownerType === 'HADRON_SERVER' || ownerType === 'ORGANIZATION')) {
+        // organization level, and from the platform level only while charging and the credit gate are both on (#5025,
+        // Billing A8; the walk's own predicate, creditGateActive). The walk (aiConfigTenantFor) is the rule; this keeps the
+        // one query that decrypts keys from handing back such a row if the walk ever regresses. A platform row admitted here
+        // stays masked: discloseKey above needs whoever manages the platform configuration (a platform admin).
+        if (appOwnerUserId !== null && (ownerType === 'ORGANIZATION' || (ownerType === 'HADRON_SERVER' && !creditGateActive()))) {
           throw new NoAiConfigAvailableError(name ?? DEFAULT_AI_CONFIG_NAME, 'this context');
         }
         if (discloseKey && !config.apiKeyEncrypted) {
