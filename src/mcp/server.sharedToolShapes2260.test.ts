@@ -117,7 +117,10 @@ describe('#5474: the two SDK 2.x tool-surface deltas, pinned structurally', () =
     await server.connect(remote);
     await client.connect(local);
     const received: unknown[] = [];
-    const deliver = local.onmessage!;
+    // The client installs its receive callback on connect; if a later SDK renames or defers it, say so here rather
+    // than fail with a TypeError inside the transport.
+    const deliver = local.onmessage;
+    if (!deliver) throw new Error('InMemoryTransport has no onmessage after client.connect: the SDK changed how the client receives');
     local.onmessage = (message, extra) => { received.push(JSON.parse(JSON.stringify(message))); deliver(message, extra); };
     try {
       await client.listTools();
@@ -133,7 +136,10 @@ describe('#5474: the two SDK 2.x tool-surface deltas, pinned structurally', () =
   it('advertises every tool input schema as JSON Schema 2020-12 and no tool carries `execution`', async () => {
     for (const [name, v] of Object.entries(VARIANTS)) {
       const tools = await wireTools(v.auth);
-      expect(tools.length, `${name}: tools listed`).toBeGreaterThan(50);
+      // The same tool count the golden pins for this principal, so a list that came back short (or empty, which would
+      // make the two filters below vacuous) fails here.
+      const golden = JSON.parse(fs.readFileSync(GOLDEN, 'utf8')) as Record<string, unknown[]>;
+      expect(tools.length, `${name}: tools listed`).toBe(golden[name].length);
       const wrongDialect = tools.filter((t) => t.inputSchema.$schema !== 'https://json-schema.org/draft/2020-12/schema').map((t) => t.name);
       expect(wrongDialect, `${name}: tools whose inputSchema.$schema is not 2020-12`).toEqual([]);
       const withExecution = tools.filter((t) => 'execution' in t).map((t) => t.name);

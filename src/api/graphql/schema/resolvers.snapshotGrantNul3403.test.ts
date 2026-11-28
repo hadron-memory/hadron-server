@@ -249,7 +249,7 @@ for (const worker of [false, true]) for (const unauthorized of [false, true]) {
     // and names the field first.
     expect(result.error?.message).toContain('Input validation error:');
     // The field and the reason, not zod's exact sentence, so a zod wording change is not a failure (#5474).
-    expect(result.error?.message).toMatch(/triggerKind.*expected string, received null/);
+    expect(result.error?.message).toMatch(/triggerKind[\s\S]*expected string, received null/);
     expect(await snapshot()).toEqual(before);
   });
 }
