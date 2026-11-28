@@ -387,7 +387,15 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // `memory.write`); they are deprecated in the SDL and removed once a CLI release carrying hadron-cli#3319 ships.
 // `AutomationApproval.readGrants` is always empty (deprecated). (4) A run carrying a user id no longer reads through #2883's grant: a
 // user-backed run reads only what its user reads. (0.56.0 is #5391 and 0.57.0 is #5441, both merged first.)
-export const HADRON_SERVER_VERSION = '0.58.0';
+// 0.59.0 — BREAKING (behaviour, no SDL change) (#5486, #415 slice 2, cor:api:090:01): `findNodes(mode: regex)` and `hadron_find_nodes`
+// with mode:regex refuse, before any database work and with `BAD_USER_INPUT` and a fixed sentence that never echoes the pattern, (1) a
+// pattern over 200 characters (inside the 512 entry bound), (2) a pattern that uses a backreference (`\1`-`\9`, outside a bracket
+// expression) or a construct that can hide one from the check: a leading `(?b)`, `(?e)` or `(?x)` option, an inline `(?#...)` comment.
+// A search that ran before can now be refused, so a client keys on this version before sending such a pattern. ADDITIVE: a regex search is
+// throttled per caller (the principal): one statement in flight per server process and 10 per 60 s across the fleet; the refusal is
+// `RATE_LIMITED` with a positive `retryAfterSeconds` (GraphQL `extensions`, MCP `structuredContent.error`), a different code from the
+// pattern refusals, so a client may retry it. (0.58.0 is #5404, merged first.)
+export const HADRON_SERVER_VERSION = '0.59.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
