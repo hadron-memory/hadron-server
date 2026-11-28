@@ -61,10 +61,14 @@ export function assertRunAiConfigStillOpen(
 }
 
 /**
- * The configuration name a run asks for, read as the run's resolver reads it (`appRunDeps` `resolveConfig`): the trigger's
- * override (`eventData.__aiConfigName`), else null (the walk's `default`). Used only to NAME the mid-run refusal.
+ * The configuration name a run asks for: the trigger's override (`eventData.__aiConfigName`), else null (the walk's
+ * `default`). The ONE reader of that key, shared by the mint (`mintAppRun`), the run's resolver (`appRunDeps`
+ * `resolveConfig`), the automation consent (`configSelection`) and the mid-run refusal, so the four cannot read it apart.
+ * Only a string counts; anything else is no override. An empty string is kept, as every reader kept it before: the walk
+ * misses it and falls back to `default`.
  */
 export function requestedAiConfigName(eventData: unknown): string | null {
   if (!eventData || typeof eventData !== 'object') return null;
-  return ((eventData as Record<string, unknown>).__aiConfigName as string | undefined) ?? null;
+  const name = (eventData as Record<string, unknown>).__aiConfigName;
+  return typeof name === 'string' ? name : null;
 }

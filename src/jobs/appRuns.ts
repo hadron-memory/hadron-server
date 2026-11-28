@@ -654,9 +654,8 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   let runModel = '';
   let runKeyOwnerType: string | null = null;
   {
-    const override = args.eventData && typeof args.eventData === 'object' ? ((args.eventData as Record<string, unknown>).__aiConfigName as string | undefined) : undefined;
     try {
-      const resolvedConfig = await resolveRunAiConfig(db as PrismaClient, override ?? null, { appId: args.appId, agentId: args.agentId ?? undefined, tenant });
+      const resolvedConfig = await resolveRunAiConfig(db as PrismaClient, requestedAiConfigName(args.eventData), { appId: args.appId, agentId: args.agentId ?? undefined, tenant });
       runModel = resolvedConfig.config.model ?? '';
       runKeyOwnerType = resolvedConfig.ownerType;
     } catch (err) {

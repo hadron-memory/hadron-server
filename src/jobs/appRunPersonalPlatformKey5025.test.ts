@@ -6,6 +6,9 @@
  * Red on main: F2's `platformLevelOpen` (src/lib/aiConfig.ts) closes the platform level to a person's tenant and F3a's
  * `resolveRunAiConfig` refuses a `HADRON_SERVER` answer for a person's run, so a person's App with only the platform's
  * `default` fails NO_AI_CONFIG whatever the switches say.
+ *
+ * Named `appRun…` like its neighbours (`appRunCreditGate5023`, `appRunBillable5020`, `appRun.personalOwner5077`), which
+ * all test `appRuns.ts`; the singular is this directory's convention, not a mismatch.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -21,7 +24,7 @@ import { cleanDb, createPriceRowForTest } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 import { resolveAiConfig } from '../lib/aiConfig.js';
-import { assertRunAiConfigStillOpen, resolveRunAiConfig } from '../lib/runner/runAiConfig.js';
+import { assertRunAiConfigStillOpen, requestedAiConfigName, resolveRunAiConfig } from '../lib/runner/runAiConfig.js';
 import { deriveEdgeLoc } from '../lib/edgeLoc.js';
 import { clearPriceCache, creditBalance, grantCredits, recordLlmUsage } from '../lib/metering/index.js';
 import { reloadOwnerDefaultMonthlyGrantForTests, resetPeriodGrantStateForTests } from '../lib/metering/periodGrant.js';
@@ -91,9 +94,9 @@ async function platformDefault() {
   return server;
 }
 
-const mintFor = (p: Person) => mintAppRun(db, {
+const mintFor = (p: Person, eventData?: Record<string, unknown>) => mintAppRun(db, {
   owner: { userId: p.user.id }, appId: p.app.id, agentId: p.agent.id, userId: p.user.id,
-  triggerKind: 'MANUAL', entryNodeUrn: p.entryUrn, publish: false,
+  triggerKind: 'MANUAL', entryNodeUrn: p.entryUrn, publish: false, ...(eventData ? { eventData } : {}),
 });
 const fund = (p: Person, amount: bigint) =>
   grantCredits(db, { owner: { userId: p.user.id }, amountMicroCents: amount, sourceType: 'test', sourceId: `fund-${p.user.id}-${amount}` });
@@ -330,6 +333,31 @@ describe('#5025 ruling 3 (Holger, 2026-11-28): a switch turned off mid-run fails
       expect(failure.code).toBe(flip ? 'NO_AI_CONFIG' : 'AUTOMATION_CHANGED');
     });
   }
+
+  it('the hop refusal names the run\'s requested configuration, read from the run itself (the wiring, not just the helper)', async () => {
+    switchesOn();
+    const p = await person('a8named');
+    await platformDefault();
+    await fund(p, 1_000_000_000n);
+    // a trigger override with no such configuration: the walk falls back to the platform's `default`
+    const run = await mintFor(p, { __aiConfigName: 'custom-5025' });
+    let calls = 0;
+    const llm = vi.fn(async () => {
+      if (++calls === 1) vi.stubEnv(GATE, 'false');
+      return { text: 'ok', tokensIn: 1000, tokensOut: 500, provider: 'test', model: 'platform-model' };
+    });
+    expect(await executeAppRun(db, run.id, deps(llm))).toBe('failed');
+    const failure = (await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).failure as { code: string; message: string };
+    expect(failure.code).toBe('NO_AI_CONFIG');
+    expect(failure.message).toContain("neither 'custom-5025' nor 'default'");
+  });
+
+  it('requestedAiConfigName is the one reader of the override: a string (even empty) counts, anything else is none', () => {
+    expect(requestedAiConfigName({ __aiConfigName: 'x' })).toBe('x');
+    expect(requestedAiConfigName({ __aiConfigName: '' })).toBe('');
+    for (const v of [undefined, null, 7, true, ['x'], { n: 'x' }]) expect(requestedAiConfigName({ __aiConfigName: v })).toBeNull();
+    for (const d of [undefined, null, 'x', 7]) expect(requestedAiConfigName(d)).toBeNull();
+  });
 
   it('with the switches staying on, both hops run and both are debited (the control)', async () => {
     switchesOn();
