@@ -344,6 +344,8 @@ const leaks = (out: string, sent: string, t: Target) => [
 async function probe(d: Door, c: Caller, t: Target, w: World) {
   const real = globalThis.fetch;
   let sent = '';
+  // #5486: this matrix probes disclosure, not the regex throttle (10 a minute per caller), which one caller's many probes would trip.
+  await db.rateLimitBucket.deleteMany({ where: { fieldClass: 'REGEX_SEARCH' } });
   const spy = vi.spyOn(globalThis, 'fetch').mockImplementation((u, i) => { sent += String(i?.body ?? ''); return real(u, i); });
   try {
     const out = await d.run(c, t, w);

@@ -1,5 +1,5 @@
 import { openThreadsWhere } from '../../../lib/comments/openThreads.js';
-import { admitOperationRate } from '../../../lib/rateLimit/index.js';
+import { admitOperationRate, withRegexSearchSlot } from '../../../lib/rateLimit/index.js';
 import { transportRateIdentity } from '../../../lib/rateLimit/identity.js';
 import { normalizeFindNodesPaging } from '../../../lib/findNodesPaging.js';
 import { readCompiledRevision } from '../../../lib/bootCompile/provenance.js';
@@ -37,6 +37,8 @@ import { emitNodeUrnV2, bestEffortFlatNodeUrn } from '../../../lib/urnEmit.js';
 import { getRetrievalProvider } from '../../../lib/retrieval/postgres.js';
 import { UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES } from '../../../lib/retrieval/defaultNodeTypes.js';
 import { checkNodeTypesFilter, NodeTypesFilterError } from '../../../lib/retrieval/nodeTypeList.js';
+import { assertRegexPatternAllowed } from '../../../lib/retrieval/regexGuard.js';
+import { regexSearchTimeoutMs } from '../../../lib/retrieval/regexTimeout.js';
 import { BooleanQueryError, assertQueryLength, literalQuery, relaxConjunctionToOr } from '../../../lib/retrieval/tsquery.js';
 import {
   compileNodeWhere,
@@ -1867,6 +1869,8 @@ export const nodeQueries = {
       const q = query!.trim();
       // #435: the raw bound runs before ANY mode work (embed, regex, keyword, hybrid, and the literal fallback, which only sees a q that passed).
       assertQueryLength(q);
+      // #5486: a regex pattern is bounded and may not backreference, judged before any database work.
+      if ((mode ?? 'hybrid') === 'regex') assertRegexPatternAllowed(q);
       const effectiveMode = mode ?? 'hybrid';
       const lexFields = (fields ?? undefined) as LexicalField[] | undefined;
       const model = isEmbeddingConfigured() ? getEmbeddingClient().model : null;
@@ -2097,7 +2101,10 @@ export const nodeQueries = {
         };
         try {
           if (effectiveMode === 'regex') {
-            return await hydrateInOrder(await provider.regexSearch({ ...common, pattern: q }), null, null, null);
+            // #5486: one in flight and 10 a minute per caller, counted on the principal; the refusal is RATE_LIMITED.
+            const regexHits = await withRegexSearchSlot(ctx.db, ctx.limiterIdentity ?? transportRateIdentity(ctx), regexSearchTimeoutMs(),
+              () => provider.regexSearch({ ...common, pattern: q }));
+            return await hydrateInOrder(regexHits, null, null, null);
           }
           const ranked = await provider.lexicalSearch({ ...common, query: q });
           // #496 — a natural-language query implicitly ANDs its terms, so one

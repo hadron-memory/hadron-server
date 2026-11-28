@@ -95,10 +95,18 @@ export async function checkRateConfiguration(db: PrismaClient): Promise<void> {
   }
 }
 export class RateLimited extends GraphQLError {
-  constructor(fieldClass: FieldClass, retryAfterSeconds: number) {
+  constructor(fieldClass: FieldClass | typeof REGEX_SEARCH_CLASS, retryAfterSeconds: number) {
     super('Too many requests.', { extensions: { code: 'RATE_LIMITED', fieldClass, retryAfterSeconds } });
   }
 }
+/**
+ * #5486 (cor:api:090:01): the regex-search throttle. Its bucket rows live in the shared table under this class
+ * name; it has NO policy row (a new policy class would change what every older instance's readiness check counts), so
+ * its numbers are constants here (Holger 2026-11-28: 10 per minute per caller, plus one in flight) read per call.
+ */
+export const REGEX_SEARCH_CLASS = 'REGEX_SEARCH' as const;
+export const REGEX_SEARCH_WINDOW_SECONDS = 60;
+export const REGEX_SEARCH_PER_WINDOW = 10;
 /** Privacy-bounded metrics only. No subject, token, proof, IP or request text can enter here. */
 function observe(fieldClass: FieldClass, dimension: 'principal'|'key'|'ip'|'store', mode: string) {
   console.info('rate-limit-observation', { fieldClass, dimension, mode });
@@ -220,4 +228,54 @@ export async function cleanupRateBuckets(db: PrismaClient, take = 200) {
     const [{now}] = await tx.$queryRaw<Array<{now:Date}>>`SELECT clock_timestamp() AT TIME ZONE 'UTC' AS now`;
     return tx.rateLimitBucket.deleteMany({ where: { id: { in: candidates.map(r => r.id) }, expiresAt: { lt: now } } });
   });
+}
+
+/**
+ * #5486: admit one regex statement for the caller: a fixed 60 s window of at most REGEX_SEARCH_PER_WINDOW per
+ * PRINCIPAL (a second credential of the same person shares the count; an identity with no principal is counted by its
+ * IP). A refused attempt is not counted. Same keyed, aliased, locked buckets as admitRateInTx. An unavailable store
+ * admits (a read class, as FAN_OUT_READS); a bad keyring or manifest refuses like every other admission.
+ */
+export async function admitRegexSearchRate(db: PrismaClient, identity: RateIdentity): Promise<void> {
+  readRateKeys();
+  validateIdentity(identity);
+  const dim = identity.principal ? 'principal' as const : 'ip' as const;
+  const subject = identity.principal ?? identity.ip!;
+  try {
+    await db.$transaction(async tx => {
+      const manifest = await tx.rateLimitManifest.findUnique({ where: { id: 'global' } });
+      if (!manifest) await seedRateConfig(tx);
+      await configFence(tx);
+      const { manifest: m, keys } = validateManifest(await tx.rateLimitManifest.findUnique({ where: { id: 'global' } }));
+      const aliases = m.keyIds.map(id => `${id}:${createHmac('sha256', keys.get(id)!).update(JSON.stringify(['v1',REGEX_SEARCH_CLASS,dim,subject])).digest('hex')}`);
+      await subjectLocks(tx, aliases.map(s => `${REGEX_SEARCH_CLASS}:${dim}:${s}`));
+      const [{ now }] = await tx.$queryRaw<Array<{now: Date}>>`SELECT clock_timestamp() AT TIME ZONE 'UTC' AS now`;
+      const windowMs = REGEX_SEARCH_WINDOW_SECONDS * 1000;
+      const windowStart = new Date(Math.floor(now.getTime() / windowMs) * windowMs);
+      const retry = Math.max(1, Math.ceil((windowStart.getTime() + windowMs - now.getTime()) / 1000));
+      const rows = await tx.rateLimitBucket.findMany({ where: { fieldClass: REGEX_SEARCH_CLASS, dimension: dim, subject: { in: aliases }, windowStart }, select: { used: true } });
+      const used = rows.reduce((mx, r) => r.used > mx ? r.used : mx, 0n);
+      if (used >= BigInt(REGEX_SEARCH_PER_WINDOW)) { observe(REGEX_SEARCH_CLASS as never, dim, 'ENFORCING'); throw new RateLimited(REGEX_SEARCH_CLASS, retry); }
+      for (const subj of aliases) await tx.rateLimitBucket.upsert({
+        where: { fieldClass_dimension_subject_windowStart: { fieldClass: REGEX_SEARCH_CLASS, dimension: dim, subject: subj, windowStart } },
+        create: { id: generateId(), fieldClass: REGEX_SEARCH_CLASS, dimension: dim, subject: subj, windowStart, used: used + 1n, expiresAt: new Date(windowStart.getTime() + windowMs + RETENTION_MS) },
+        update: { used: used + 1n } });
+    });
+  } catch (error) {
+    if (error instanceof RateLimited || error instanceof RateConfigurationError || !storeUnavailable(error)) throw error;
+    observe(REGEX_SEARCH_CLASS as never, 'store', 'ENFORCING');
+  }
+}
+
+// One regex statement in flight per caller, per process. A second concurrent attempt is refused (not queued) with the
+// same RATE_LIMITED code; the wait it names is the statement budget, the longest the first can still run.
+const regexInFlight = new Set<string>();
+export async function withRegexSearchSlot<T>(db: PrismaClient, identity: RateIdentity, budgetMs: number, run: () => Promise<T>): Promise<T> {
+  const key = identity.principal ?? `ip:${identity.ip ?? ''}`;
+  if (regexInFlight.has(key)) throw new RateLimited(REGEX_SEARCH_CLASS, Math.max(1, Math.ceil(budgetMs / 1000)));
+  regexInFlight.add(key);
+  try {
+    await admitRegexSearchRate(db, identity);
+    return await run();
+  } finally { regexInFlight.delete(key); }
 }
