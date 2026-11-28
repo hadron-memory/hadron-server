@@ -14,7 +14,7 @@ import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
 import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
 import { excludeTeamChat, excludeChannelRoots } from '../../../lib/teamChatLoc.js';
-import { teamSpaceAudienceFilter } from '../../../lib/auth/teamSpace.js';
+import { appsTenantRowFilter, teamSpaceAudienceFilter } from '../../../lib/auth/teamSpace.js';
 import { groupMemberMemoryWhere } from '../../../lib/auth/groupMemberMemory.js';
 import {
   type Context,
@@ -93,12 +93,13 @@ async function myChatsScope(ctx: Context, agentRef: string): Promise<Prisma.Node
       userId: ctx.userId,
       app: { AND: [appInstallationWhere(resolvedAgentId), { deletedAt: null }, participation] },
     },
-    select: { app: { select: { id: true } } },
+    select: { app: { select: { id: true, organizationId: true } } },
   }) : [];
   if (sharedMemberships.length > 0) {
     const sharedMemories = await ctx.db.memory.findMany({
       where: {
-        appId: { in: sharedMemberships.map((m) => m.app.id) },
+        // hadron-internal#92: the App's tenant too, not its id alone.
+        ...appsTenantRowFilter(sharedMemberships.map((m) => m.app)),
         // #1196 (@copilot round 6) — `class: 'app'` alone listed chats in
         // another user's SESSION or a Worker's casting memory, and the
         // first-message lookup below returns transcript CONTENT with no

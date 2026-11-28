@@ -46,6 +46,7 @@ import { resolveActiveOrg, type ActiveOrgResolution } from './auth/activeOrg.js'
 import { isLifecycleActive } from '@hadron-memory/access-control';
 import { LIVE_ORG_MEMBERSHIP } from './auth/liveOrgMembership.js';
 import { forbiddenError } from './refusals.js';
+import { appTenantRowFilter } from './auth/teamSpace.js';
 
 /** The ladder's built-in tokens (D-2026-09-13-002); a scope may not take either name. */
 export const RESERVED_SCOPE_NAMES: ReadonlySet<string> = new Set(['global', 'app']);
@@ -518,7 +519,7 @@ export async function appScopeMemoryIds(db: Context['db'], appId: string): Promi
     }
   }
   const own = await db.memory.findMany({
-    where: { appId, class: 'app', deletedAt: null },
+    where: { ...appTenantRowFilter({ id: appId, organizationId: app.organizationId }), class: 'app', deletedAt: null },
     orderBy: { createdAt: 'asc' },
     select: { id: true },
   });
