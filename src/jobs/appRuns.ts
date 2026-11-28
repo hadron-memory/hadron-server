@@ -61,7 +61,7 @@ import { bootPromptRefusal } from '../lib/bootPrompt/refusal.js';
 import { applyPlatformVariables, applyRecordedVariables } from '../lib/personaDescription.js';
 import type { NextEdgeSelection } from '../lib/runner/selectNextEdge.js';
 import { type OwnerRef, isOwnedBy, orgIdOf, ownerColumns, personalAppRunsEnabled, requireOwnerRefOf } from '../lib/owner.js';
-import { assertRunAiConfigStillOpen, resolveRunAiConfig } from '../lib/runner/runAiConfig.js';
+import { assertRunAiConfigStillOpen, requestedAiConfigName, resolveRunAiConfig } from '../lib/runner/runAiConfig.js';
 import { EdgeConditionEvalError } from '../lib/runner/selectNextEdge.js';
 
 export const RUN_REQUESTED_SUBJECT = 'run.requested.v1';
@@ -981,11 +981,12 @@ async function executeAppRunInner(
   // #5025 (Billing A8, Holger's ruling 3): a person's run on the platform's configuration was admitted only while charging and
   // the credit gate were on. Once either is off it fails at its next hop with the refusal a fresh run would get (NO_AI_CONFIG),
   // checked at the top of every hop BEFORE the automation re-check, and preferred over AUTOMATION_CHANGED wherever a consent
-  // check notices first (the pinned AI identity no longer resolves for the same reason). Null while the level is open.
-  const platformClosedForPerson = (): string | null => {
+  // check notices first (the pinned AI identity no longer resolves for the same reason). Returns the refusal message, or null
+  // while the level is open.
+  const personPlatformRefusal = (): string | null => {
     if (resolved === null) return null;
     try {
-      assertRunAiConfigStillOpen(requireOwnerRefOf(run), run.appId, resolved);
+      assertRunAiConfigStillOpen(requireOwnerRefOf(run), run.appId, resolved, requestedAiConfigName(run.eventData));
       return null;
     } catch (err) {
       if (err instanceof NoAiConfigAvailableError) return err.message;
@@ -993,7 +994,7 @@ async function executeAppRunInner(
     }
   };
   const failPin = (err: AutomationPinError): Promise<RunOutcome> => {
-    const closed = platformClosedForPerson();
+    const closed = personPlatformRefusal();
     return closed !== null ? fail('NO_AI_CONFIG', closed) : fail(err.code, err.message, err.reason);
   };
   const checkConsent = () => deps.checkAutomationEffect ? deps.checkAutomationEffect(run) : deps.verifyAutomation(run, run.curNodeUrn ?? entryAddress);
@@ -1037,7 +1038,7 @@ async function executeAppRunInner(
       if (hop >= MAX_RUN_HOPS) {
         return fail('MAX_HOPS_EXCEEDED', `Flow exceeded ${MAX_RUN_HOPS} hops at "${cur}" (cycle?).`);
       }
-      const closedForPerson = platformClosedForPerson();
+      const closedForPerson = personPlatformRefusal();
       if (closedForPerson !== null) return fail('NO_AI_CONFIG', closedForPerson);
       if (hop > 0) await deps.verifyAutomation(run, cur);
       const hopStartedAt = Date.now();

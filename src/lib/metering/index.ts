@@ -45,7 +45,7 @@ const MTOK = 1_000_000n;
  */
 export const HOST_PRICED_PROVIDERS: ReadonlySet<string> = new Set(['openai-compatible']);
 
-/** FR-006: automatic usage debits are OFF unless explicitly enabled. Parsed in `./switches.ts` (#5025). */
+/** FR-006: automatic usage debits are OFF unless explicitly enabled. Defined in `./switches.ts` and read per call (#5025). */
 export { debitEnabled } from './switches.js';
 
 /** FR-006: markup applied to platform-key cost when debiting; default 0%. */

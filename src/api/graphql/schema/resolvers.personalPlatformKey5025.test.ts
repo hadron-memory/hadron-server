@@ -14,12 +14,16 @@ import { cleanDb, createDbAgentOrgGrant } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import { effectiveChatToolChoice } from '../../../lib/chatbotAiConfig.js';
+import { chatToolChoiceFor } from '../../../lib/llm/chatToolChoice.js';
 import { resolvers, type Context } from './resolvers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 
 const Q = resolvers.Query as any;
 const KEY = 'platform-provider-key-5025';
+// An `AUTO` model, so the platform row's tool-choice decision differs from the publisher organization's `openai` row (`FORCED`):
+// a read that resolved the wrong row would answer a different value, not just a non-null one.
+const PLATFORM_MODEL = 'claude-sonnet-5-5';
 const DEBIT = 'BILLING_DEBIT_ENABLED';
 const GATE = 'BILLING_CREDIT_GATE_ENABLED';
 let org: Organization, owner: User, member: User, orgAdmin: User, platform: User;
@@ -72,7 +76,7 @@ beforeEach(async () => {
   await db.appMember.create({ data: { appId: orgApp.id, userId: orgAdmin.id, role: 'admin' } });
   // The platform's keyed default (the HadronServer level).
   const host = await db.hadronServer.create({ data: { url: `https://a8-${s}.example` } });
-  platformCfg = await db.aiServiceConfig.create({ data: { hadronServerId: host.id, name: 'default', provider: 'anthropic', model: 'platform-model', apiKeyEncrypted: encryptToken(KEY), apiKeyPreview: '…5025', enabled: true } });
+  platformCfg = await db.aiServiceConfig.create({ data: { hadronServerId: host.id, name: 'default', provider: 'anthropic', model: PLATFORM_MODEL, apiKeyEncrypted: encryptToken(KEY), apiKeyPreview: '…5025', enabled: true } });
 });
 afterEach(() => { vi.unstubAllEnvs(); });
 
@@ -89,7 +93,7 @@ describe('#5025 the decrypting query: open to the owner with the switches on, an
     switchesOn();
     for (const { label, args } of personalContexts()) {
       const answer = await decrypt(ctx(owner), args) as { ok?: Record<string, unknown> };
-      expect(answer.ok, label).toMatchObject({ configId: platformCfg.id, ownerType: 'HADRON_SERVER', model: 'platform-model', apiKey: null, params: null });
+      expect(answer.ok, label).toMatchObject({ configId: platformCfg.id, ownerType: 'HADRON_SERVER', model: PLATFORM_MODEL, apiKey: null, params: null });
       expect(JSON.stringify(answer)).not.toContain(KEY);
     }
   });
@@ -170,7 +174,9 @@ describe('#5025 the masked picker and the tool-choice read follow the walk', () 
     switchesOn();
     for (const chat of [
       { appId: mine.id, agentId: null }, { appId: mine.id, agentId: myAgent.id }, { appId: mine.id, agentId: pubAgent.id }, { appId: null, agentId: myAgent.id },
-    ]) expect(await effectiveChatToolChoice(db, { ...chat, storedChoice: null })).not.toBeNull();
+    ]) expect(await effectiveChatToolChoice(db, { ...chat, storedChoice: null })).toBe('AUTO');
+    // the publisher organization's row would have answered FORCED
+    expect(chatToolChoiceFor('openai', 'org-model')).toBe('FORCED');
   });
 });
 

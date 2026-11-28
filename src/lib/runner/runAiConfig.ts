@@ -50,6 +50,21 @@ const personContext = (appId: string): string => `context (app ${appId}, an App 
  * would get (NoAiConfigAvailableError, recorded as NO_AI_CONFIG), and a billable path never becomes free on a toggle. Own-key
  * configurations and organizations' runs are never refused here.
  */
-export function assertRunAiConfigStillOpen(tenant: OwnerRef, appId: string, resolved: ResolvedAiConfig): void {
-  if (personRunRefuses(tenant, resolved)) throw new NoAiConfigAvailableError(resolved.config.name, personContext(appId));
+export function assertRunAiConfigStillOpen(
+  tenant: OwnerRef,
+  appId: string,
+  resolved: ResolvedAiConfig,
+  requested: string | null | undefined,
+): void {
+  // Named as the launch-time refusal names it (the REQUESTED name, else `default`), so the same condition reads the same.
+  if (personRunRefuses(tenant, resolved)) throw new NoAiConfigAvailableError(requested ?? 'default', personContext(appId));
+}
+
+/**
+ * The configuration name a run asks for, read as the run's resolver reads it (`appRunDeps` `resolveConfig`): the trigger's
+ * override (`eventData.__aiConfigName`), else null (the walk's `default`). Used only to NAME the mid-run refusal.
+ */
+export function requestedAiConfigName(eventData: unknown): string | null {
+  if (!eventData || typeof eventData !== 'object') return null;
+  return ((eventData as Record<string, unknown>).__aiConfigName as string | undefined) ?? null;
 }

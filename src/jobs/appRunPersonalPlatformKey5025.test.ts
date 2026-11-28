@@ -28,6 +28,7 @@ import { reloadOwnerDefaultMonthlyGrantForTests, resetPeriodGrantStateForTests }
 import { CREDITS_EXHAUSTED_MESSAGE, resetCreditGateMemoForTests } from '../lib/metering/gate.js';
 import { mintAppRun, executeAppRun, RunLaunchDeniedError, type RunExecutionDeps } from './appRuns.js';
 import { makeProdRunDeps } from './appRunDeps.js';
+import { AutomationPinError } from '../lib/automation/pins.js';
 
 const RUNS = 'PERSONAL_APP_RUNS_ENABLED';
 const DEBIT = 'BILLING_DEBIT_ENABLED';
@@ -220,6 +221,23 @@ describe('#5025 acceptance 5: every organization and server context answers the 
     { label: 'an explicit organization (a job scoped to one)', ctx: { organizationId: f.org.id } },
   ];
 
+  it('the run wrapper, given an organization\'s tenant, answers the same level and configuration on and off (Belinda\'s P2-1 on #5479)', async () => {
+    const f = await orgFixture();
+    const own = await db.app.create({ data: { name: 'other app', urn: 'other5025.test:app', organizationId: (await db.agent.findUniqueOrThrow({ where: { id: f.otherAgent.id } })).organizationId! } });
+    const cells = [
+      { label: 'platform level (Acme has no default)', ctx: { appId: f.orgApp.id, agentId: f.orgAgent.id, tenant: { organizationId: f.org.id } }, level: 'HADRON_SERVER' },
+      { label: 'organization level (Other has its own)', ctx: { appId: own.id, agentId: f.otherAgent.id, tenant: { organizationId: own.organizationId! } }, level: 'ORGANIZATION' },
+    ];
+    const answer = async () => Promise.all(cells.map(async ({ ctx }) => {
+      const r = await resolveRunAiConfig(db, null, ctx);
+      return `${r.ownerType}:${r.config.id}`;
+    }));
+    const off = await answer();
+    switchesOn();
+    expect(await answer()).toEqual(off);
+    cells.forEach((c, i) => expect(off[i], c.label).toMatch(new RegExp(`^${c.level}:`)));
+  });
+
   it('level and configuration id are identical in every cell, switches on versus off', async () => {
     const f = await orgFixture();
     const answer = async () => Promise.all(contexts(f).map(async ({ label, ctx }) => {
@@ -295,6 +313,24 @@ describe('#5025 ruling 3 (Holger, 2026-11-28): a switch turned off mid-run fails
     expect(await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).toMatchObject({ failure: { code: 'NO_AI_CONFIG' } });
   });
 
+  for (const [label, flip] of [['a switch went off first', true], ['the switches stayed on (the control)', false]] as const) {
+    it(`a pin error inside a hop when ${label}: ${flip ? 'NO_AI_CONFIG wins over AUTOMATION_CHANGED' : 'AUTOMATION_CHANGED as before'}`, async () => {
+      switchesOn();
+      const p = await person(flip ? 'a8pinoff' : 'a8pinon');
+      await platformDefault();
+      await fund(p, 1_000_000_000n);
+      const run = await mintFor(p);
+      // the consent check that notices mid-hop (a tool call's re-check) throws the pin error; the switch flips just before it
+      const llm = vi.fn(async () => {
+        if (flip) vi.stubEnv(GATE, 'false');
+        throw new AutomationPinError('AUTOMATION_CHANGED', 'The automation changed');
+      });
+      expect(await executeAppRun(db, run.id, deps(llm))).toBe('failed');
+      const failure = (await db.appRun.findUniqueOrThrow({ where: { id: run.id } })).failure as { code: string };
+      expect(failure.code).toBe(flip ? 'NO_AI_CONFIG' : 'AUTOMATION_CHANGED');
+    });
+  }
+
   it('with the switches staying on, both hops run and both are debited (the control)', async () => {
     switchesOn();
     const p = await person('a8steady');
@@ -312,13 +348,16 @@ describe('#5025 ruling 3 (Holger, 2026-11-28): a switch turned off mid-run fails
     const own = (ownerType: string) => ({ config: { name: 'default' }, ownerType }) as never;
     // switches off: a person on the platform's configuration is refused; an organization's run never is (it keeps the platform
     // level whatever the switches say), and a person's own-key configuration never is
-    expect(() => assertRunAiConfigStillOpen({ userId: 'u' }, 'app', platform)).toThrow(/an App a person owns/);
-    expect(() => assertRunAiConfigStillOpen({ organizationId: 'o' }, 'app', platform)).not.toThrow();
-    for (const t of ['APP', 'AGENT']) expect(() => assertRunAiConfigStillOpen({ userId: 'u' }, 'app', own(t))).not.toThrow();
-    expect(() => assertRunAiConfigStillOpen({ userId: 'u' }, 'app', own('ORGANIZATION'))).toThrow(/an App a person owns/);
+    expect(() => assertRunAiConfigStillOpen({ userId: 'u' }, 'app', platform, null)).toThrow(/an App a person owns/);
+    expect(() => assertRunAiConfigStillOpen({ organizationId: 'o' }, 'app', platform, null)).not.toThrow();
+    for (const t of ['APP', 'AGENT']) expect(() => assertRunAiConfigStillOpen({ userId: 'u' }, 'app', own(t), null)).not.toThrow();
+    expect(() => assertRunAiConfigStillOpen({ userId: 'u' }, 'app', own('ORGANIZATION'), null)).toThrow(/an App a person owns/);
+    // named as the launch-time refusal names it: the REQUESTED name (here 'custom', which fell back to the platform's
+    // 'default'), not the resolved configuration's (Belinda's P3 on #5479)
+    expect(() => assertRunAiConfigStillOpen({ userId: 'u' }, 'app', platform, 'custom')).toThrow(/neither 'custom' nor 'default'/);
     switchesOn();
-    expect(() => assertRunAiConfigStillOpen({ userId: 'u' }, 'app', platform)).not.toThrow();
-    expect(() => assertRunAiConfigStillOpen({ userId: 'u' }, 'app', own('ORGANIZATION'))).toThrow(/an App a person owns/);
+    expect(() => assertRunAiConfigStillOpen({ userId: 'u' }, 'app', platform, null)).not.toThrow();
+    expect(() => assertRunAiConfigStillOpen({ userId: 'u' }, 'app', own('ORGANIZATION'), null)).toThrow(/an App a person owns/);
   });
 });
 

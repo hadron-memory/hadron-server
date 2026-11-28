@@ -26,7 +26,7 @@ export class CreditsExhaustedError extends Error {
   }
 }
 
-/** The deployment switches, parsed once in `./switches.ts` (#5025: the AI configuration walk reads the same predicate). */
+/** The deployment switches, defined in one place (`./switches.ts`) and read per call (#5025: the AI configuration walk reads the same predicate). */
 export { creditGateEnabled, creditGateActive } from './switches.js';
 
 
