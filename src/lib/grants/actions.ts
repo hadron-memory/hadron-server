@@ -13,7 +13,12 @@ import { summaryPlaceholders } from './summary.js';
 export const ACTION_ENFORCEMENT = ['SERVER', 'CREDENTIAL', 'HARNESS_INSTRUCTION', 'RECORDED_ONLY'] as const;
 export type ActionEnforcement = (typeof ACTION_ENFORCEMENT)[number];
 
-export interface ActionParameter { name: string; type: string; refusesWildcard: boolean }
+/**
+ * One declared parameter. `optional` (#5412, hrn:node:hadronmemory.com:specs:cor:acl:140:09, the absent-key form): a grant may leave the
+ * parameter's key out, and a missing key is the parameter's absence, never a value (no `null`, `""`, `[]` or wildcard stands for it).
+ * It is written only when true, so the stored `parameters` of every action without one stay byte-identical.
+ */
+export interface ActionParameter { name: string; type: string; refusesWildcard: boolean; optional?: true }
 
 /**
  * #4162 (cor:acl:140:10, :06): WHO may hold a grant of an action for it to cover a WORKER's act. Ruled per action, so it is a
@@ -147,11 +152,19 @@ export const PLATFORM_ACTIONS: readonly ActionDefinition[] = [
   //  (b) one or more memory ids (a single id or a list, never the wildcard): signed by whoever manages every named memory, so a grant
   //      naming memories of different managers cannot be signed by one person (one grant per manager).
   // Judged at every read, the giver's own read included (src/lib/grants/readGrant.ts). There is no `knowledge.read` (Holger: "is to
-  // unspecific"). The optional branch and one-automation parameters are #5412; `memory.write` is below (#5404).
+  // unspecific"). `memory.write` is below (#5404).
+  // #5412 (cor:acl:140:02, the two Proposed optional parameters; cor:acl:140:09, the absent-key form): `branch`, one loc inside the ONE
+  // memory form (b) names (never with form (a) or a list, the gate's decision), so the grant reads only that loc and below it; and
+  // `automation`, one live schedule or webhook of the App, so the grant reaches only the userless runs whose root trigger it is, never a
+  // key. Absent, each restricts nothing, and the summary writes nothing for it: a grant with neither reads, and reads as, an S1 grant.
   {
     name: 'memory.read', source: 'PLATFORM', tool: null, enforcement: 'SERVER', issuerRule: 'MEMORY_READ_APPROVER',
-    parameters: [{ name: 'memory', type: 'memory-ref', refusesWildcard: true }],
-    summaryTemplate: 'Let {app}, acting with no person behind it, read {memory}, read only',
+    parameters: [
+      { name: 'memory', type: 'memory-ref', refusesWildcard: true },
+      { name: 'branch', type: 'loc-prefix', refusesWildcard: true, optional: true },
+      { name: 'automation', type: 'automation-ref', refusesWildcard: true, optional: true },
+    ],
+    summaryTemplate: 'Let {app}, acting with no person behind it, read {memory}{branch}, read only{automation}',
     reach: 'NO_WORKER', listParameters: ['memory'],
   },
   // #5404 (hrn:node:hadronmemory.com:specs:cor:acl:140:02, Holger 2026-11-27: "the grant should be called `memory.read` or `memory.write`";
@@ -191,6 +204,12 @@ function validate(list: readonly ActionDefinition[]): void {
       if (!p) throw new Error(`action ${a.name}: listParameters names unknown parameter ${n}`);
       // A list on a parameter that is no reference names nothing: the shared check would refuse every act of the action, silently.
       if (!REFERENCE_PARAMETER_TYPES.has(p.type)) throw new Error(`action ${a.name}: listParameters names ${n}, whose type ${p.type} is not a reference type`);
+    }
+    // #5412: `optional` is exactly `true` or absent, so a stored row never carries `optional: false` (which would change the bytes of
+    // every action's stored parameters), and an optional parameter must refuse the wildcard (its absence is the unrestricted form).
+    for (const p of a.parameters) {
+      if ('optional' in p && p.optional !== true) throw new Error(`action ${a.name}: parameter ${p.name} has optional other than true`);
+      if (p.optional && !p.refusesWildcard) throw new Error(`action ${a.name}: optional parameter ${p.name} must refuse the wildcard`);
     }
     for (const [label, v] of [['maxUses', a.maxUses], ['lifetimeSeconds', a.lifetimeSeconds]] as const) {
       if (v !== undefined && (!Number.isSafeInteger(v) || v <= 0 || v > 2147483647)) throw new Error(`action ${a.name}: ${label} must be a positive integer`);

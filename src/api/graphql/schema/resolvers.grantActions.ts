@@ -33,3 +33,8 @@ export const grantActionQueries = {
     return typeof ref === 'string' ? getAction(ctx.db, ref) : null;
   },
 };
+
+/** #5412: a stored parameter carries `optional` only when true (src/lib/grants/actions.ts), so its absence reads as false. */
+export const grantActionParameterResolvers = {
+  optional: (p: { optional?: unknown }) => p.optional === true,
+};

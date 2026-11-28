@@ -230,7 +230,20 @@ export async function summaryFor(ctx: Context, tx: Prisma.TransactionClient, g: 
   if (!action || !g.action_values || typeof g.action_values !== 'object' || Array.isArray(g.action_values)) return null;
   const values = g.action_values as Record<string, unknown>;
   const refs: Record<string, { urn: string }> = {};
+  const automations: Record<string, 'schedule' | 'webhook'> = {};
   for (const p of action.parameters) {
+    if (p.type === 'automation-ref') {
+      // #5412: a live schedule or webhook of the grant's own App shows as its kind and id; a gone or foreign one makes the sentence
+      // unsignable, never a guess. An absent key (the parameter is optional) restricts nothing and names nothing.
+      const id = values[p.name];
+      if (id === undefined) continue;
+      if (typeof id !== 'string') return null;
+      const live = { id, appId: g.app_id, deletedAt: null };
+      const [schedule, webhook] = await Promise.all([tx.agentSchedule.findFirst({ where: live, select: { id: true } }), tx.agentWebhook.findFirst({ where: live, select: { id: true } })]);
+      if ((schedule ? 1 : 0) + (webhook ? 1 : 0) !== 1) return null;
+      automations[id] = schedule ? 'schedule' : 'webhook';
+      continue;
+    }
     if (p.type === 'secret-ref') {
       // #3998: the secret shows as its canonical App secret URN (urn-lib-js 0.0.22). A gone or foreign secret is unsignable.
       const id = values[p.name];
@@ -291,7 +304,7 @@ export async function summaryFor(ctx: Context, tx: Prisma.TransactionClient, g: 
     }
   }
   try {
-    return renderGrantSummary({ action, app: { urn: appUrn }, values, refs });
+    return renderGrantSummary({ action, app: { urn: appUrn }, values, refs, automations });
   } catch (e) {
     if (e instanceof GrantSummaryError) return null;
     throw e;

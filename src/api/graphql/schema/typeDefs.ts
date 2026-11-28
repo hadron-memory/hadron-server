@@ -8497,6 +8497,8 @@ export const typeDefs = `#graphql
     type: String!
     "True when a wildcard value is refused for this parameter."
     refusesWildcard: Boolean!
+    "hadron-server#5412 (hrn:node:hadronmemory.com:specs:cor:acl:140:09): true when a grant may leave this parameter's key out of its values. A missing key is the parameter's absence (it restricts nothing); a present key always holds a value, never null or an empty string."
+    optional: Boolean!
   }
 
   """
@@ -8509,7 +8511,7 @@ export const typeDefs = `#graphql
     source: String!
     "The tool that performs it, if any."
     tool: String
-    "The parameters a grant of this action must supply."
+    "The parameters a grant of this action supplies: every one not marked optional, and an optional one only when it restricts the grant."
     parameters: [GrantActionParameter!]!
     "The enforcement level the action DECLARES: what the platform promises, not an active guarantee. It says nothing about whether a gate enforces it today (schedule.create and webhook.create are not enforced until hadron-server#3483; the boot-prompt actions are checked where the grant is spent)."
     enforcement: String!

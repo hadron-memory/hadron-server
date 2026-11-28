@@ -136,8 +136,11 @@ function valueMatchesType(type: string, value: unknown): boolean {
     const one = (v: unknown) => typeof v === 'string' && NODE_ID_RE.test(v);
     return Array.isArray(value) ? value.length > 0 && value.every(one) : one(value);
   }
-  // #5404: a loc prefix inside one memory (`memory.write`), or the wildcard for the whole of every named memory.
+  // #5404: a loc prefix inside one memory (`memory.write`), or the wildcard for the whole of every named memory. (#5412: `memory.read`'s
+  // `branch` has the same type and refuses the wildcard through its parameter.)
   if (type === 'loc-prefix') return value === WHOLE_MEMORY || isWellFormedLoc(value);
+  // #5412: one schedule or webhook, by its stored id; never a list or the wildcard (judged against the App's live triggers below).
+  if (type === 'automation-ref') return typeof value === 'string' && NODE_ID_RE.test(value);
   if (type === 'https-prefix') return isSecretUsePrefix(value);
   if (type === 'header-name') return isSecretUseHeaderName(value);
   if (type !== 'node-ref') return false;
@@ -161,12 +164,16 @@ interface ActionRow { name: string; parameters: unknown; max_uses: number | null
 interface WorkerRow { id: string; app_id: string; agent_id: string; retired_at: Date | null }
 
 /** The declared parameter names of an action row (the closed list S1b seeds), or null if the row is malformed. */
-function declaredParameters(parameters: unknown): Array<{ name: string; type: string; refusesWildcard: boolean }> | null {
+function declaredParameters(parameters: unknown): Array<{ name: string; type: string; refusesWildcard: boolean; optional: boolean }> | null {
   if (!Array.isArray(parameters)) return null;
-  const out: Array<{ name: string; type: string; refusesWildcard: boolean }> = [];
+  const out: Array<{ name: string; type: string; refusesWildcard: boolean; optional: boolean }> = [];
   for (const p of parameters) {
     if (!p || typeof p !== 'object' || typeof (p as { name?: unknown }).name !== 'string') return null;
-    out.push({ name: (p as { name: string }).name, type: String((p as { type?: unknown }).type ?? ''), refusesWildcard: (p as { refusesWildcard?: unknown }).refusesWildcard === true });
+    out.push({
+      name: (p as { name: string }).name, type: String((p as { type?: unknown }).type ?? ''), refusesWildcard: (p as { refusesWildcard?: unknown }).refusesWildcard === true,
+      // #5412: only the stored `true` makes a parameter optional; anything else (absent, false, a string) is a required one.
+      optional: (p as { optional?: unknown }).optional === true,
+    });
   }
   return out;
 }
@@ -246,11 +253,16 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
 
   const values = args.values;
   if (!values || typeof values !== 'object' || Array.isArray(values)) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', 'values must be an object');
+  // #5412 (cor:acl:140:09, the absent-key form): every key is a declared parameter, every required parameter has its key, and an optional
+  // parameter's key is present only with a value its type admits (no null, "", [] or wildcard stands for its absence; the checks below
+  // refuse each). A missing optional key is that parameter's absence, so the declared list below is narrowed to the keys present.
   const keys = Object.keys(values);
-  if (keys.length !== declared.length || !declared.every((p) => Object.prototype.hasOwnProperty.call(values, p.name))) {
+  const has = (name: string) => Object.prototype.hasOwnProperty.call(values, name);
+  if (!keys.every((k) => declared.some((p) => p.name === k)) || !declared.every((p) => p.optional || has(p.name))) {
     throw new GrantCreateRefusal('GRANT_VALUES_INVALID', 'keys differ from the declared parameters');
   }
-  for (const p of declared) {
+  const present = declared.filter((p) => has(p.name));
+  for (const p of present) {
     const v = (values as Record<string, unknown>)[p.name];
     if (Array.isArray(v) && v.length > MAX_LIST_ENTRIES) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', 'LIST_TOO_LONG');
     if (!valueMatchesType(p.type, v)) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
@@ -260,7 +272,7 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
   // V86 (#4067, ruling 0265, cor:acl:140:07): a grant may name only a node its REQUESTER can read. The signer shows every node as its
   // canonical URN, so an id that resolves to nothing could never be signed. A missing, deleted or unreadable node is the SAME refusal
   // (same code, same detail as a malformed id), so this is no existence oracle. Judged before the insert: a refusal stores nothing.
-  for (const p of declared) {
+  for (const p of present) {
     if (p.type !== 'node-ref') continue;
     const v = (values as Record<string, unknown>)[p.name];
     const ids = [...new Set((Array.isArray(v) ? v : [v]).filter((x): x is string => typeof x === 'string' && x !== '*'))];
@@ -277,7 +289,7 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
   // (no existence oracle, no cross-App naming). The worker rows are locked FOR SHARE, so a retirement that comes next waits for this
   // insert. (A retired HOLDER is reached by nothing, workersReachedByGrant; a retired TARGET named by a live grant is refused by the door as WORKER_RETIRED.)
   // A worker holder may not name itself (a worker never restarts itself, so that term could never be used).
-  for (const p of declared) {
+  for (const p of present) {
     if (p.type !== 'worker-ref') continue;
     const v = (values as Record<string, unknown>)[p.name];
     const ids = [...new Set((Array.isArray(v) ? v : [v]).filter((x): x is string => typeof x === 'string'))];
@@ -290,7 +302,7 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
 
   // #3998: a secret-ref names a secret of THIS App whose kind a model may read (an inject-only kind has no reveal client). A missing,
   // other-App, org, user or inject-only secret is the same refusal as a malformed id, so this is no existence oracle.
-  for (const p of declared) {
+  for (const p of present) {
     if (p.type !== 'secret-ref') continue;
     const secretId = (values as Record<string, unknown>)[p.name] as string;
     // Judge ownership before locking, so a secret of another App is never locked on a requester's say-so.
@@ -323,6 +335,24 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
   // A read grant is held by the App only (the holder rule above refuses every other kind).
   // #5404 (cor:acl:140:02): `memory.write` has no organization form, and its targets are judged by the write rule
   // (memoryWriteTargetRefusal, judged again at every write); a loc `prefix` is allowed only when `memory` names exactly one memory.
+  // #5412 (the gate's decision): `memory.read`'s `branch` only with form (b) naming exactly ONE memory, a single string that is not the
+  // App's organization (form (a)); never with a list. `automation` names a live schedule or webhook of THIS App, exactly one row of the
+  // two (a missing, deleted or other-App trigger is the same refusal as a malformed id: no existence oracle). Both re-judged at every read.
+  if (action.name === MEMORY_READ_ACTION) {
+    const vals = values as Record<string, unknown>;
+    if (has('branch')) {
+      const app = await tx.app.findFirst({ where: { id: appId, deletedAt: null }, select: { organizationId: true } });
+      if (typeof vals.memory !== 'string' || (app?.organizationId != null && vals.memory === app.organizationId)) {
+        throw new GrantCreateRefusal('GRANT_VALUES_INVALID', 'branch is not a loc-prefix');
+      }
+    }
+    if (has('automation')) {
+      const id = vals.automation as string;
+      const live = { id, appId, deletedAt: null };
+      const [schedules, webhooks] = await Promise.all([tx.agentSchedule.count({ where: live }), tx.agentWebhook.count({ where: live })]);
+      if (schedules + webhooks !== 1) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', 'automation is not a automation-ref');
+    }
+  }
   const writes = action.name === MEMORY_WRITE_ACTION;
   if (writes) {
     const m = (values as Record<string, unknown>).memory;
@@ -330,7 +360,7 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
       throw new GrantCreateRefusal('GRANT_VALUES_INVALID', 'prefix is not a loc-prefix');
     }
   }
-  for (const p of declared) {
+  for (const p of present) {
     if (p.type !== 'memory-ref') continue;
     const v = (values as Record<string, unknown>)[p.name];
     const refuse = () => new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);

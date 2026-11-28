@@ -29,6 +29,9 @@ import { grantLiveSql } from './live.js';
 import { keyHoldsScope } from '../appKeyScopes/scopes.js';
 import { LIVE_ORG_MEMBERSHIP } from '../auth/liveOrgMembership.js';
 import { isUserHolding } from '../auth/userHolding.js';
+import { RUN_CLIENT_PREFIX } from '../auth/runPrincipal.js';
+import { rootTriggerOfRun } from '../automation/rootTrigger.js';
+import { grantCoversLoc } from './writeGrant.js';
 
 export const MEMORY_READ_ACTION = 'memory.read';
 /** The App key scope a pure key needs before a `memory.read` grant held by its App reaches it. */
@@ -92,6 +95,30 @@ export async function memoryReadTargetRefusal(db: Db, appId: string, memory: Rea
 
 interface ReadGrantRow { action_values: unknown; issuer_user_id: string | null }
 
+/**
+ * #5412 (cor:acl:140:02, the two Proposed optional parameters; cor:acl:140:09, the absent-key form): a grant row's optional terms. A
+ * missing key restricts nothing. A key that is present but holds anything other than one non-empty string (the creation door admits
+ * nothing else) makes the row reach NOTHING: a malformed restriction is never read as no restriction.
+ */
+function optionalTerms(values: unknown): { branch: string | null; automation: string | null } | null {
+  const v = (values ?? {}) as Record<string, unknown>;
+  const one = (k: string): string | null | undefined => {
+    if (!Object.prototype.hasOwnProperty.call(v, k)) return null;
+    const x = v[k];
+    return typeof x === 'string' && x !== '' && x !== '*' ? x : undefined;
+  };
+  const branch = one('branch');
+  const automation = one('automation');
+  if (branch === undefined || automation === undefined) return null;
+  return { branch, automation };
+}
+
+/** The root trigger id of the principal's run, looked up once per call and only when a row names an automation; null for a key or a manual run. */
+function rootTriggerLookup(db: PrismaClient, runId: string | null): () => Promise<string | null> {
+  let cached: Promise<string | null> | undefined;
+  return () => (cached ??= runId ? rootTriggerOfRun(db, runId).then((r) => r?.id ?? null) : Promise.resolve(null));
+}
+
 /** The App, live and installed, with its organization; null otherwise. */
 async function liveApp(db: PrismaClient, appId: string): Promise<{ id: string; organizationId: string | null } | null> {
   const app = await db.app.findFirst({
@@ -130,30 +157,56 @@ async function giverCounts(
 export async function appReadGrantReach(
   db: PrismaClient,
   appId: string,
-  opts: { run: boolean; onlyMemoryIds?: readonly string[] },
+  opts: { run: boolean; runId?: string | null; onlyMemoryIds?: readonly string[] },
 ): Promise<Set<string>> {
+  return (await appReadGrantReachDetail(db, appId, opts)).whole;
+}
+
+/**
+ * The detail of {@link appReadGrantReach}: `whole`, the memories read whole (by a grant with no `branch`); and `branches`, for a memory
+ * read ONLY through `branch` grants (#5412), the loc prefixes it may be read under. A memory in `whole` is never in `branches`. The
+ * per-memory gates read `whole` only, so a memory opened only in part is unreadable to them (they fail closed); the node surfaces that
+ * honour a branch read `branches` through {@link branchAdmitsLoc}.
+ */
+export async function appReadGrantReachDetail(
+  db: PrismaClient,
+  appId: string,
+  opts: { run: boolean; runId?: string | null; onlyMemoryIds?: readonly string[] },
+): Promise<{ whole: Set<string>; branches: Map<string, string[]> }> {
   const out = new Set<string>();
-  if (opts.onlyMemoryIds && opts.onlyMemoryIds.length === 0) return out;
+  const branches = new Map<string, string[]>();
+  const result = { whole: out, branches };
+  if (opts.onlyMemoryIds && opts.onlyMemoryIds.length === 0) return result;
   // Grants first: most Apps hold none, and this runs for every read of a pure key or a userless run.
   const rows = await db.$queryRaw<ReadGrantRow[]>`
     SELECT g.action_values, g.issuer_user_id FROM grants g
     WHERE g.app_id = ${appId} AND g.grantee_app_id = ${appId} AND g.user_id IS NULL AND g.agent_id IS NULL AND g.worker_id IS NULL
       AND g.action = ${MEMORY_READ_ACTION} AND ${grantLiveSql('g')}`;
-  if (rows.length === 0) return out;
+  if (rows.length === 0) return result;
   const app = await liveApp(db, appId);
-  if (!app) return out;
+  if (!app) return result;
+  const rootTrigger = rootTriggerLookup(db, opts.run ? (opts.runId ?? null) : null);
   const givers = new Map<string, { roles: unknown } | null>();
   const only = opts.onlyMemoryIds ? new Set(opts.onlyMemoryIds) : null;
 
   // Split the rows by form. (a): the value is the App's own organization id, a single string. (b): one or more memory ids.
+  // #5412: a row bound to one automation reaches only a userless run whose live root trigger it is (a key, a manual run, another
+  // automation's run: nothing); a row with a `branch` reaches its one memory under that loc only.
   const orgIssuers: Array<string | null> = [];
-  const byMemory = new Map<string, Array<string | null>>();
+  const byMemory = new Map<string, Array<{ issuer: string | null; branch: string | null }>>();
   for (const r of rows) {
+    const terms = optionalTerms(r.action_values);
+    if (!terms) continue;
+    if (terms.automation !== null && (!opts.run || (await rootTrigger()) !== terms.automation)) continue;
     const v = (r.action_values as { memory?: unknown } | null)?.memory;
-    if (typeof v === 'string' && app.organizationId !== null && v === app.organizationId) { orgIssuers.push(r.issuer_user_id); continue; }
+    if (typeof v === 'string' && app.organizationId !== null && v === app.organizationId) {
+      if (terms.branch === null) orgIssuers.push(r.issuer_user_id); // a branch never rides form (a): such a row reaches nothing
+      continue;
+    }
+    if (terms.branch !== null && typeof v !== 'string') continue; // nor a list
     for (const memoryId of Array.isArray(v) ? v : [v]) {
       if (typeof memoryId !== 'string' || (only && !only.has(memoryId))) continue;
-      byMemory.set(memoryId, [...(byMemory.get(memoryId) ?? []), r.issuer_user_id]);
+      byMemory.set(memoryId, [...(byMemory.get(memoryId) ?? []), { issuer: r.issuer_user_id, branch: terms.branch }]);
     }
   }
 
@@ -162,9 +215,14 @@ export async function appReadGrantReach(
     const memories = await db.memory.findMany({ where: { id: { in: [...byMemory.keys()] } }, select: READ_GRANT_TARGET_SELECT });
     for (const memory of memories) {
       if ((await memoryReadTargetRefusal(db, appId, memory)) !== null) continue;
-      for (const issuer of byMemory.get(memory.id) ?? []) {
-        if (await giverCounts(db, givers, issuer, (g) => readsInOwnRight(db, g.id, g.roles, memory.id))) { out.add(memory.id); break; }
+      const prefixes = new Set<string>();
+      for (const { issuer, branch } of byMemory.get(memory.id) ?? []) {
+        if (branch !== null && prefixes.has(branch)) continue;
+        if (!(await giverCounts(db, givers, issuer, (g) => readsInOwnRight(db, g.id, g.roles, memory.id)))) continue;
+        if (branch === null) { out.add(memory.id); break; }
+        prefixes.add(branch);
       }
+      if (!out.has(memory.id) && prefixes.size > 0) branches.set(memory.id, [...prefixes].sort());
     }
   }
 
@@ -185,10 +243,15 @@ export async function appReadGrantReach(
         },
         select: { id: true },
       });
-      for (const k of knowledge) out.add(k.id);
+      for (const k of knowledge) { out.add(k.id); branches.delete(k.id); }
     }
   }
-  return out;
+  return result;
+}
+
+/** #5412: is `loc` inside one of a memory's branch prefixes (the prefix itself, or below it on a `:` boundary, as `memory.write` judges)? */
+export function branchAdmitsLoc(prefixes: readonly string[] | undefined, loc: string): boolean {
+  return (prefixes ?? []).some((p) => grantCoversLoc(p, loc));
 }
 
 /**
@@ -204,10 +267,27 @@ export async function grantReadReachFor(
   },
   onlyMemoryIds?: readonly string[],
 ): Promise<Set<string>> {
-  if (!isPureAppKeyShape(auth)) return new Set();
+  return (await grantReadReachDetailFor(db, auth, onlyMemoryIds)).whole;
+}
+
+function runIdOf(auth: { clientId?: string | null }): string | null {
+  return isRunPrincipal(auth) ? auth.clientId!.slice(RUN_CLIENT_PREFIX.length) : null;
+}
+
+/**
+ * #5412: {@link grantReadReachFor}'s detail (whole memories and branch-only memories), for the node surfaces that honour a `branch`.
+ * Empty for every shape {@link grantReadReachFor} gives nothing.
+ */
+export async function grantReadReachDetailFor(
+  db: PrismaClient,
+  auth: Parameters<typeof grantReadReachFor>[1],
+  onlyMemoryIds?: readonly string[],
+): Promise<{ whole: Set<string>; branches: Map<string, string[]> }> {
+  const none = { whole: new Set<string>(), branches: new Map<string, string[]>() };
+  if (!isPureAppKeyShape(auth)) return none;
   const run = isRunPrincipal(auth);
   if (!run) {
-    if (!auth.appKeyId || !(await keyHoldsScope(db, { appKeyId: auth.appKeyId, appId: auth.appId! }, GRANT_READ_SCOPE))) return new Set();
+    if (!auth.appKeyId || !(await keyHoldsScope(db, { appKeyId: auth.appKeyId, appId: auth.appId! }, GRANT_READ_SCOPE))) return none;
   }
-  return appReadGrantReach(db, auth.appId!, { run, onlyMemoryIds });
+  return appReadGrantReachDetail(db, auth.appId!, { run, runId: runIdOf(auth), onlyMemoryIds });
 }
