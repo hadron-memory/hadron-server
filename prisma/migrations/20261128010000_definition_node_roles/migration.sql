@@ -211,25 +211,25 @@ ALTER TABLE "nodes" ADD CONSTRAINT "chk_nodes_compiled_boot_prompt_kind" CHECK (
 -- migration that carries the new text. Idempotent.
 
 CREATE OR REPLACE FUNCTION hadron_is_boot_prompt_role(r text) RETURNS boolean
-LANGUAGE sql IMMUTABLE AS $$ SELECT coalesce((r = 'prompt.boot' OR r LIKE 'prompt.boot.%' OR r = 'boot-prompt' OR r LIKE 'boot-prompt.%'), false) $$;
+LANGUAGE sql IMMUTABLE SET search_path = public, pg_temp AS $$ SELECT coalesce((r = 'prompt.boot' OR r LIKE 'prompt.boot.%' OR r = 'boot-prompt' OR r LIKE 'boot-prompt.%'), false) $$;
 
 -- Placed: an Agent's system memory, or an install memory (isInstallMemoryRow).
 CREATE OR REPLACE FUNCTION hadron_boot_prompt_placed(memory text) RETURNS boolean
-LANGUAGE sql STABLE AS $$
+LANGUAGE sql STABLE SET search_path = public, pg_temp AS $$
   SELECT EXISTS (SELECT 1 FROM agents WHERE system_memory_id = memory)
       OR EXISTS (SELECT 1 FROM memories WHERE id = memory AND class = 'system' AND is_install_memory)
 $$;
 
 -- An entry: the row is a placed boot prompt now and was not one (by role or memory) before.
 CREATE OR REPLACE FUNCTION hadron_boot_prompt_entered(op text, old_role text, old_memory text, new_role text, new_memory text)
-RETURNS boolean LANGUAGE sql STABLE AS $$
+RETURNS boolean LANGUAGE sql STABLE SET search_path = public, pg_temp AS $$
   SELECT hadron_is_boot_prompt_role(new_role)
      AND (op = 'INSERT' OR NOT hadron_is_boot_prompt_role(old_role) OR old_memory IS DISTINCT FROM new_memory)
      AND hadron_boot_prompt_placed(new_memory)
 $$;
 
 CREATE OR REPLACE FUNCTION hadron_end_boot_prompt_node_approval() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
   IF NEW.approval_hash IS NOT NULL AND hadron_boot_prompt_entered(
        TG_OP,
@@ -242,7 +242,7 @@ BEGIN
 END $$;
 
 CREATE OR REPLACE FUNCTION hadron_end_boot_prompt_revision_approvals() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
   IF hadron_boot_prompt_entered(
        TG_OP,
@@ -270,7 +270,7 @@ CREATE TRIGGER boot_prompt_approval_entry_revisions
 -- as its system memory (createAgent / updateAgent first-attach), or a memory
 -- becoming an install memory.
 CREATE OR REPLACE FUNCTION hadron_end_boot_prompt_approvals_in(memory text) RETURNS void
-LANGUAGE sql AS $$
+LANGUAGE sql SET search_path = public, pg_temp AS $$
   UPDATE node_revisions SET approval_hash = NULL
    WHERE approval_hash IS NOT NULL
      AND node_id IN (SELECT id FROM nodes WHERE memory_id = memory AND hadron_is_boot_prompt_role(role));
@@ -279,7 +279,7 @@ LANGUAGE sql AS $$
 $$;
 
 CREATE OR REPLACE FUNCTION hadron_end_boot_prompt_approvals_on_agent_attach() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
   IF NEW.system_memory_id IS NOT NULL
      AND (TG_OP = 'INSERT' OR OLD.system_memory_id IS DISTINCT FROM NEW.system_memory_id) THEN
@@ -294,7 +294,7 @@ CREATE TRIGGER boot_prompt_approval_entry_agent
   FOR EACH ROW EXECUTE FUNCTION hadron_end_boot_prompt_approvals_on_agent_attach();
 
 CREATE OR REPLACE FUNCTION hadron_end_boot_prompt_approvals_on_install() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
   IF NEW.class = 'system' AND NEW.is_install_memory
      AND NOT (OLD.class = 'system' AND OLD.is_install_memory) THEN
