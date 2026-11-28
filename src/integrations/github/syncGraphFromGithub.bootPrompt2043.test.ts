@@ -1,4 +1,8 @@
-/** #2043: git sync never writes a compiled boot prompt, and a worker session's sync never touches a boot prompt. */
+/**
+ * #2043: git sync never writes a compiled boot prompt. It also pinned "a worker session's sync never touches a boot
+ * prompt"; #5453 Ask 5 removed that refusal on every door, so those tests are restated: a worker session's sync
+ * mirrors a source like any other node (more in syncGraphFromGithub.workerSession5453.test.ts).
+ */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { join } from 'path';
 import { mkdirSync, writeFileSync } from 'fs';
@@ -96,16 +100,16 @@ describe('git sync and boot prompts (#2043)', () => {
     expect(await db.node.findFirstOrThrow({ where: { memoryId: graph.id, loc: 'rule' } })).toMatchObject({ role: 'boot-prompt.rule' });
   });
 
-  it('a worker session\'s sync that would write a boot-prompt node is refused', async () => {
+  it('a worker session\'s sync that writes a boot-prompt node is admitted (#5453 Ask 5; refused before)', async () => {
     const app = await db.app.create({ data: { id: generateId(), name: 'App', urn: 'test-org:app', organizationId: graph.organizationId! } });
     const agent = await db.agent.create({ data: { id: generateId(), name: 'Agent', urn: 'test-org:agent', organizationId: graph.organizationId! } });
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
     const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
     mirror('source', 'name: Source\nrole: boot-prompt', 'You are a worker.');
     const result = await runAsActor({ workerId: worker.id, agentId: null }, () => syncGraphFromGithub(graph));
-    expect(result.error ?? '').toContain('BOOT_PROMPT_WORKER_SESSION_REFUSED');
-    expect(await db.node.count({ where: { memoryId: graph.id, loc: 'source' } })).toBe(0);
-    // control: the server's own sync (no worker) writes the same source.
+    expect(result.error).toBeUndefined();
+    expect(await db.node.count({ where: { memoryId: graph.id, loc: 'source', role: 'boot-prompt' } })).toBe(1);
+    // control: the server's own sync (no worker) leaves the same source in place.
     expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
     expect(await db.node.count({ where: { memoryId: graph.id, loc: 'source' } })).toBe(1);
   });
@@ -122,30 +126,28 @@ describe('git sync and boot prompts (#2043)', () => {
     expect(await db.node.findUnique({ where: { id: ordinary.id } })).toBeNull();
   });
 
-  it('a worker session\'s sync that would prune a boot-prompt source is refused whole', async () => {
+  it('a worker session\'s sync prunes a boot-prompt source whose file is gone, as the server\'s own sync does (#5453 Ask 5; refused whole before)', async () => {
     const app = await db.app.create({ data: { id: generateId(), name: 'App', urn: 'test-org:app', organizationId: graph.organizationId! } });
     const agent = await db.agent.create({ data: { id: generateId(), name: 'Agent', urn: 'test-org:agent', organizationId: graph.organizationId! } });
     await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
     const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
     const src = await db.node.create({ data: { id: generateId(), memoryId: graph.id, loc: 'boot-source', name: 'Src', content: 'x', role: 'boot-prompt', ownerRepo: 'test/repo' } });
     mirror('other', 'name: Other', 'present');
-    const refused = await runAsActor({ workerId: worker.id, agentId: null }, () => syncGraphFromGithub(graph));
-    expect(refused.error ?? '').toContain('BOOT_PROMPT_WORKER_SESSION_REFUSED');
-    expect(await db.node.findUnique({ where: { id: src.id } })).not.toBeNull();
-    // control: the server's own sync (no worker) prunes the absent source.
-    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    const synced = await runAsActor({ workerId: worker.id, agentId: null }, () => syncGraphFromGithub(graph));
+    expect(synced.error).toBeUndefined();
     expect(await db.node.findUnique({ where: { id: src.id } })).toBeNull();
   });
 
-  it('the saved worker requester survives the system re-entry used by the preflight retry', async () => {
-    const { withSyncCaller, boundWorkerId } = await import('../../lib/bootPrompt.js');
+  it('no worker requester is carried into the sync any more: inside the system scope nothing is bound to a worker (#5453 Ask 5)', async () => {
+    // Until #5453 the requester was saved across the system re-entry (`withSyncCaller`) for the worker-session refusal
+    // alone. The refusal is gone and so is the carrier: the sync runs as the system, whoever asked.
+    const bootPrompt = await import('../../lib/bootPrompt.js');
     const { runAsSystem } = await import('../../lib/requestActor.js');
-    const seen = await runAsActor({ workerId: 'w-1', agentId: null }, () =>
-      withSyncCaller(boundWorkerId(), () => runAsSystem(async () => {
-        const first = boundWorkerId();
-        // the recursive call re-wraps exactly as the exported entry point does
-        return withSyncCaller(boundWorkerId(), () => runAsSystem(async () => [first, boundWorkerId()]));
-      })));
-    expect(seen).toEqual(['w-1', 'w-1']);
+    expect('withSyncCaller' in bootPrompt).toBe(false);
+    const seen = await runAsActor({ workerId: 'w-1', agentId: null }, async () => {
+      const outside = bootPrompt.boundWorkerId();
+      return [outside, await runAsSystem(async () => bootPrompt.boundWorkerId())];
+    });
+    expect(seen).toEqual(['w-1', null]);
   });
 });

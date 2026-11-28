@@ -18,15 +18,24 @@
  * The signer is re-judged when the grant is SPENT, not only when it was signed: the person recorded as the issuer must still be
  * able to make the edit (manage the App; for the Agent's system-memory source, manage the Agent too, V54). A signer who has
  * since lost that standing admits nothing.
+ *
+ * #5453 Ask 5 (Holger, 2026-11-27; decision record
+ * hrn:node:hadronmemory.com:hadron-dev-team-shared:decisions:2026-11-27-holger-rulings-to-bo-system-nodes-and-roles, section 4b):
+ * NEITHER GRANT GATES A WRITE ANY MORE.
+ *
+ *  - The edit grant: a worker session edits a source (and a rule) wherever the memory's own write gate admits it. NO DOOR ASKS FOR
+ *    THIS GRANT AND NONE SPENDS IT: the lift that joined it to the worker-session write refusal (`assertBootPromptWriteAllowedOrGranted`,
+ *    `spendEditGrantFor`) and the door facts that fed it were removed with that refusal. What is left below reads a grant
+ *    ({@link hasUsableEditGrant}), spends one ({@link spendEditGrant}) and names the edit a grant covered ({@link isGrantableEdit});
+ *    nothing in the server calls any of the three, and they stay, with the registered action, only until the follow-up that retires
+ *    the action. A live edit grant runs out its hour unspent.
+ *  - The batch grant: a worker session compiles with no grant (compileBootPrompt.ts judges the memory's write gate instead). The
+ *    batch grant remains for APPROVING the compiled prompts it names, which is the one thing a worker session cannot do without it.
  */
-import { AsyncLocalStorage } from 'node:async_hooks';
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../generated/prisma/index.js';
 import { managesAgent, managesApp } from '../auth/appManagement.js';
-import {
-  assertBootPromptWriteAllowed, boundWorkerId, bootPromptWorkerSessionError,
-  inCompileScope, isBootPromptSourceRole,
-} from '../bootPrompt.js';
+import { isBootPromptSourceRole } from '../bootPrompt.js';
 import { coverableAction, findCoveringGrants, spendGrant } from './cover.js';
 
 export const BOOT_PROMPT_EDIT_ACTION = 'bootprompt.source.edit';
@@ -132,7 +141,7 @@ async function candidates(q: Q, workerId: string, appId: string, action: string,
   return found.map((g) => ({ id: g.id, issuer: g.issuerUserId }));
 }
 
-/** Whether a usable edit grant exists for this worker and node: a read, with no lock and no spend (the fast refusal). */
+/** Whether a usable edit grant exists for this worker and node: a read, with no lock and no spend. Nothing gates on it since #5453. */
 export async function hasUsableEditGrant(q: Q, workerId: string, node: BootPromptNodeFacts): Promise<boolean> {
   const own = await ownBootPromptNode(q, workerId, node, 'source');
   if (!own) return false;
@@ -146,6 +155,7 @@ export async function hasUsableEditGrant(q: Q, workerId: string, node: BootPromp
  * Spend one edit grant for `node`, in the caller's transaction. The candidate rows are locked FOR UPDATE (one statement, in id order), THEN
  * judged on the database clock (a grant that expired, was revoked or was spent while this waited reads dead), and only then
  * is the `USE` event written. This is the LAST lock the edit takes (the node row is already held). False when none is usable.
+ * No door calls it since #5453 Ask 5 (an edit needs no grant, so none is spent).
  */
 export async function spendEditGrant(tx: Q, workerId: string, node: BootPromptNodeFacts): Promise<boolean> {
   const own = await ownBootPromptNode(tx, workerId, node, 'source');
@@ -156,7 +166,7 @@ export async function spendEditGrant(tx: Q, workerId: string, node: BootPromptNo
     if (!(await signerStillEligible(tx, c.issuer, own))) continue;
     // #4163 (cor:acl:140:03): the use is COUNTED, through the shared spend, so the grant reads spent everywhere. A miss after the row was just
     // judged live is the clock edge between the two reads: refuse, so the write rolls back (the guard's rejection aborts the transaction anyway).
-    await spendGrant(tx, c.id, { appId: own.appId, workerId, sessionId: null }, () => bootPromptWorkerSessionError('update'));
+    await spendGrant(tx, c.id, { appId: own.appId, workerId, sessionId: null }, () => new GraphQLError('The edit grant could not be spent; retry.', { extensions: { code: 'CONFLICT' } }));
     return true;
   }
   return false;
@@ -188,32 +198,16 @@ type Next = {
   nodeType?: string | null; role?: string | null; otherFields: readonly string[];
   /** Whether the write supplies text at all: an edit without any would spend the one-use grant on a no-op. */
   hasContent: boolean;
-  /** Whether the write arrived through a door that may carry the lift: `updateNode` or `hadron_update_node`, and no other (Riana F1). */
+  /** Whether the write arrived through a door that could carry the lift: `updateNode` or `hadron_update_node`, and no other (Riana F1). */
   door: boolean;
   /** Where the write says the node is: it must be where it already is (an edit in place never relocates, V46). */
   memoryId?: string; loc?: string;
 };
 
-const updateNodeDoor = new AsyncLocalStorage<true>();
-/** Run `fn` as the `updateNode` mutation: the only GraphQL door whose update writes may spend an edit grant. */
-export function withUpdateNodeDoor<T>(fn: () => Promise<T>): Promise<T> { return updateNodeDoor.run(true, fn); }
-
-/** What a GraphQL write core tells the grant predicate about itself: its door, its location and what it supplies besides text. */
-export function graphqlEditFacts(input: Record<string, unknown> & { memoryId?: string; loc?: string }): Pick<Next, 'otherFields' | 'hasContent' | 'door' | 'memoryId' | 'loc'> {
-  return { otherFields: suppliedNonTextFields(input), hasContent: input.content !== undefined, door: updateNodeDoor.getStore() === true, memoryId: input.memoryId, loc: input.loc };
-}
-
-/** The identifiers and the text itself: the only supplied fields an in-place TEXT edit may carry (V46). `role` and `nodeType` are compared with the prior row's by {@link isGrantableEdit}, not listed here. */
-const TEXT_EDIT_KEYS: ReadonlySet<string> = new Set(['id', 'memoryId', 'loc', 'urn', 'content', 'authoredWith', 'expectedRevision', 'expectedRevSeq', 'reason', 'role', 'nodeType']);
-
-/** The supplied fields of a write that are not its text: every key with a defined value outside {@link TEXT_EDIT_KEYS}. */
-export function suppliedNonTextFields(input: Record<string, unknown>): string[] {
-  return Object.entries(input).filter(([k, v]) => v !== undefined && !TEXT_EDIT_KEYS.has(k)).map(([k]) => k);
-}
-
 /**
  * A grantable edit changes the text of an existing boot-prompt SOURCE in place (V46): the prior row is a source (in the family,
- * not compiled), and the write leaves its role and node type as they are. Anything else is refused as before.
+ * not compiled), and the write leaves its role and node type as they are. It described what the edit grant covered; since
+ * #5453 Ask 5 nothing is refused for falling outside it.
  */
 export function isGrantableEdit(prior: Prior | null | undefined, next: Next): boolean {
   if (!prior || !isBootPromptSourceRole(prior.role)) return false;
@@ -225,29 +219,8 @@ export function isGrantableEdit(prior: Prior | null | undefined, next: Next): bo
   return next.otherFields.length === 0;
 }
 
-/**
- * {@link assertBootPromptWriteAllowed} with the one lift: a worker session's UPDATE that is a grantable edit passes when a usable
- * edit grant exists. A read only; the spend is {@link spendEditGrantFor}, once, in the write's transaction. Not for any other op.
- */
-export async function assertBootPromptWriteAllowedOrGranted(q: Q, prior: Prior | null | undefined, next: Next, op: Parameters<typeof assertBootPromptWriteAllowed>[2]): Promise<void> {
-  const workerId = boundWorkerId();
-  if (op === 'update' && workerId && !inCompileScope() && isGrantableEdit(prior, next) && (await hasUsableEditGrant(q, workerId, prior!))) return;
-  assertBootPromptWriteAllowed(prior, next, op);
-}
-
-/**
- * Spend the grant for a worker session's edit of a boot-prompt source, in the write's own transaction, once the final locked row is
- * known. A no-op for anyone else and for a node that is not a boot prompt. Refuses (the worker-session refusal) when the edit is not
- * grantable or no grant can be spent, so the transaction rolls back and nothing is written.
- */
-export async function spendEditGrantFor(tx: Q, current: Prior | null | undefined, next: Next): Promise<void> {
-  const workerId = boundWorkerId();
-  if (!workerId || inCompileScope() || !current || !isBootPromptSourceRole(current.role)) return;
-  if (!isGrantableEdit(current, next) || !(await spendEditGrant(tx, workerId, current))) throw bootPromptWorkerSessionError('update');
-}
-
 export function bootPromptGrantRequiredError(): GraphQLError {
-  return new GraphQLError('BOOT_PROMPT_GRANT_REQUIRED: this compile would create a compiled node, set a pointer or provision a grant, which a batch grant never covers.', {
+  return new GraphQLError('BOOT_PROMPT_GRANT_REQUIRED: this compile would provision an organisation grant for an Agent, which a worker session\'s compile never does; a person who manages the target compiles it.', {
     extensions: { code: 'BOOT_PROMPT_GRANT_REQUIRED' },
   });
 }

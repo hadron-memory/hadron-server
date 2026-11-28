@@ -5,6 +5,10 @@
  * row inside the write's transaction. The preflight alone makes every ordinary pin green, so a pin that only calls
  * the door cannot tell whether the check under the lock is still there. Each test here switches the door's FIRST
  * check off (the preflight) and asserts the refusal still comes, from the row the transaction locked.
+ *
+ * #5453 PR B: `updateNode`'s preflight used to go through the edit-grant lift (`assertBootPromptWriteAllowedOrGranted`),
+ * which is gone with the worker-session refusal it lifted. Both of the door's checks are now the one guard
+ * (`assertBootPromptWriteAllowed`), so the preflight is the FIRST call of it and the locked-row check the second.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
@@ -19,18 +23,7 @@ vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
 }));
 
 // How many of the next calls to each guard are let through unjudged (the door's preflight), and how many were judged.
-const pierce = vi.hoisted(() => ({ skipGranted: 0, skipAllowed: 0, judged: 0 }));
-vi.mock('../../../lib/grants/bootPromptGrant.js', async (importOriginal) => {
-  const real = await importOriginal<typeof import('../../../lib/grants/bootPromptGrant.js')>();
-  return {
-    ...real,
-    assertBootPromptWriteAllowedOrGranted: (...a: Parameters<typeof real.assertBootPromptWriteAllowedOrGranted>) => {
-      if (pierce.skipGranted > 0) { pierce.skipGranted -= 1; return Promise.resolve(); }
-      pierce.judged += 1;
-      return real.assertBootPromptWriteAllowedOrGranted(...a);
-    },
-  };
-});
+const pierce = vi.hoisted(() => ({ skipAllowed: 0, judged: 0 }));
 vi.mock('../../../lib/bootPrompt.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../../lib/bootPrompt.js')>();
   return {
@@ -57,7 +50,7 @@ const compiled = () => withCompileWrite(() => db.node.create({
 
 beforeEach(async () => {
   await cleanDb(db);
-  pierce.skipGranted = 0; pierce.skipAllowed = 0; pierce.judged = 0;
+  pierce.skipAllowed = 0; pierce.judged = 0;
   const org = await db.organization.create({ data: { id: generateId(), name: 'Recheck Org', urn: 'recheck5453.example' } });
   admin = await db.user.create({ data: { githubId: 545311, githubUsername: 'recheck-admin', handle: 'recheck-admin', roles: [] } });
   await db.orgMember.create({ data: { organizationId: org.id, userId: admin.id, role: 'ADMIN' } });
@@ -67,9 +60,9 @@ beforeEach(async () => {
 describe('#5453: with the preflight off, the check on the locked row still refuses a compiled node', () => {
   it('updateNode: the transaction\'s own check refuses, and nothing is written', async () => {
     const c = await compiled();
-    pierce.skipGranted = 1;
+    pierce.skipAllowed = 1;
     expect(await codeOf(resolvers.Mutation.updateNode(null, { input: { ref: c.id, content: 'edited' } }, ctx()))).toBe('BOOT_PROMPT_COMPILED_WRITE');
-    expect(pierce.skipGranted).toBe(0); // the preflight was the call let through
+    expect(pierce.skipAllowed).toBe(0); // the preflight was the call let through
     expect(pierce.judged).toBeGreaterThan(0);
     expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).content).toBe('You are Basil.');
     expect(await db.nodeRevision.count({ where: { nodeId: c.id } })).toBe(0);
@@ -77,9 +70,10 @@ describe('#5453: with the preflight off, the check on the locked row still refus
 
   it('updateNode: a plain node cannot be given the compiled role past the preflight either', async () => {
     const plain = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'n:plain', name: 'Plain', content: 'p', nodeType: 'system' } });
-    pierce.skipGranted = 1;
+    pierce.skipAllowed = 1;
     expect(await codeOf(resolvers.Mutation.updateNode(null, { input: { ref: plain.id, role: 'boot-prompt.compiled' } }, ctx()))).toBe('BOOT_PROMPT_COMPILED_WRITE');
-    expect(pierce.skipGranted).toBe(0);
+    expect(pierce.skipAllowed).toBe(0);
+    expect(pierce.judged).toBeGreaterThan(0);
     expect((await db.node.findUniqueOrThrow({ where: { id: plain.id } })).role).toBeNull();
   });
 

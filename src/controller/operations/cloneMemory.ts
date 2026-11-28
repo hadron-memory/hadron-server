@@ -1,5 +1,5 @@
 import { lockMemoriesForChannelChange } from '../../lib/channels.js';
-import { NOT_COMPILED_BOOT_PROMPT_WHERE, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
+import { NOT_COMPILED_BOOT_PROMPT_WHERE } from '../../lib/bootPrompt.js';
 import { assertCopiedIncludesWritable, resyncDerivedIncludesForNodes, type ReadableMemoryIds } from '../../lib/includes/writeIncludes.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
@@ -254,8 +254,6 @@ export async function cloneMemoryGraphInTx(
   // cor:dmo:110:04). Their governed edges drop with them below, since an
   // edge is copied only from a cloned source.
   const selectedNodes = await tx.node.findMany({ where: copyableNodeWhere(source.id) });
-  // #2043 (cor:agt:040:11) — a worker session's copy never writes a boot prompt.
-  await assertNoBootPromptRowsForWorkerSession(tx, source.id, 'clone');
   // A raw writer may have changed a stamped source without advancing its
   // revision. Reconcile and refetch stamped rows before the destination
   // insert can certify a stale claim against freshly copied content.

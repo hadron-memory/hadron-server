@@ -134,7 +134,7 @@ describe('#5453 Ask 5: the other generic doors, under a worker session, on a sou
     expect(await codeOf(asWorker(() => M.importNode(null, { input: { memoryRef: plain.id, loc: 'boot:source', content: 'imported text', contentType: 'text/markdown' } }, me())))).toBe('NO_ERROR');
     expect((await db.node.findUniqueOrThrow({ where: { id: s.id } })).content).toBe('imported text');
     expect(await codeOf(asWorker(() => M.mergeNodes(null, { input: { source: other.id, target: s.id } }, me())))).toBe('NO_ERROR');
-    expect((await db.node.findUniqueOrThrow({ where: { id: other.id } })).deletedAt).not.toBeNull();
+    expect((await db.node.findUniqueOrThrow({ where: { id: s.id } })).content).toContain('folded text');
   });
 
   it('a revision restore and an undelete of a source', async () => {

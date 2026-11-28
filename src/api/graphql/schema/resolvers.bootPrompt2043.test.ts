@@ -1,7 +1,12 @@
 /**
- * #2043 (S6, cor:agt:040:05/:11) — the compiled-node write guard and the
- * worker-session boot-prompt refusal. A compiled node is written only by a
- * compile (withCompileWrite); a worker session never edits a boot prompt.
+ * #2043 (S6, cor:agt:040:05/:11) — the compiled-node write guard. A compiled node is written only by a
+ * compile (withCompileWrite).
+ *
+ * This file also held the worker-session boot-prompt refusal ("guard B": a worker session never edits a boot
+ * prompt). #5453 Ask 5 removed that refusal on every door (Holger, 2026-11-27, decision record
+ * hrn:node:hadronmemory.com:hadron-dev-team-shared:decisions:2026-11-27-holger-rulings-to-bo-system-nodes-and-roles,
+ * section 4b). Its tests are kept, each restated to the new rule: what was refused to a worker session is now
+ * written wherever the session's holder may write the memory (here: an organisation ADMIN in its own memory).
  */
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -27,7 +32,6 @@ vi.mock('../../../lib/bootPrompt.js', async (importOriginal) => {
   return {
     ...real,
     assertNoBootPromptMergeCollisions: (...a: Parameters<typeof real.assertNoBootPromptMergeCollisions>) => (preflight.off ? Promise.resolve() : real.assertNoBootPromptMergeCollisions(...a)),
-    assertNoBootPromptRowsForWorkerSession: (...a: Parameters<typeof real.assertNoBootPromptRowsForWorkerSession>) => (preflight.off ? Promise.resolve() : real.assertNoBootPromptRowsForWorkerSession(...a)),
   };
 });
 
@@ -144,43 +148,38 @@ describe('the DB backstop (#2043, replaced by #5453: the compiled mark is the ro
   });
 });
 
-describe('guard B: a worker session never edits a boot prompt (#2043, cor:agt:040:11)', () => {
-  it('refuses update, role removal, reclassification, create and delete; the manager as themselves succeeds', async () => {
+describe('guard B is gone: a worker session writes a boot prompt source where its holder may (#5453 Ask 5; was #2043, cor:agt:040:11)', () => {
+  it('update, role removal, reclassification, create and delete are admitted, each of them refused before #5453', async () => {
     const s = await source();
     const plain = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'n:1', name: 'Plain', content: 'p', role: 'notes' } });
-    const before = await snapshot(s.id);
-    const refused = (fn: () => Promise<unknown>) => asWorker(() => codeOf(fn()));
-    expect(await refused(() => resolvers.Mutation.updateNode(null, { input: { ref: s.id, content: 'edit' } }, ctx())))
-      .toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
-    expect(await refused(() => resolvers.Mutation.updateNode(null, { input: { ref: s.id, role: 'notes' } }, ctx())))
-      .toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
-    expect(await refused(() => resolvers.Mutation.updateNode(null, { input: { ref: plain.id, role: 'boot-prompt' } }, ctx())))
-      .toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
-    expect(await refused(() => resolvers.Mutation.createNode(null, { input: { memoryRef: memory.id, loc: 'b:2', name: 'B', role: 'boot-prompt' } }, ctx())))
-      .toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
-    expect(await refused(() => resolvers.Mutation.deleteNode(null, { nodeRef: s.id }, ctx())))
-      .toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
-    expect(await snapshot(s.id)).toEqual(before);
-    expect(await db.node.count({ where: { memoryId: memory.id, loc: 'b:2' } })).toBe(0);
-    // controls: ordinary node edits by the same session; the manager as themselves.
-    expect(await refused(() => resolvers.Mutation.updateNode(null, { input: { ref: plain.id, content: 'ok' } }, ctx()))).toBe('NO_ERROR');
+    const admitted = (fn: () => Promise<unknown>) => asWorker(() => codeOf(fn()));
+    expect(await admitted(() => resolvers.Mutation.updateNode(null, { input: { ref: s.id, content: 'edit' } }, ctx()))).toBe('NO_ERROR');
+    expect((await db.node.findUniqueOrThrow({ where: { id: s.id } })).content).toBe('edit');
+    expect(await admitted(() => resolvers.Mutation.updateNode(null, { input: { ref: s.id, role: 'notes' } }, ctx()))).toBe('NO_ERROR');
+    expect((await db.node.findUniqueOrThrow({ where: { id: s.id } })).role).toBe('notes');
+    expect(await admitted(() => resolvers.Mutation.updateNode(null, { input: { ref: plain.id, role: 'boot-prompt' } }, ctx()))).toBe('NO_ERROR');
+    expect((await db.node.findUniqueOrThrow({ where: { id: plain.id } })).role).toBe('boot-prompt');
+    expect(await admitted(() => resolvers.Mutation.createNode(null, { input: { memoryRef: memory.id, loc: 'b:2', name: 'B', role: 'boot-prompt' } }, ctx()))).toBe('NO_ERROR');
+    expect(await db.node.count({ where: { memoryId: memory.id, loc: 'b:2', role: 'boot-prompt' } })).toBe(1);
+    expect(await admitted(() => resolvers.Mutation.deleteNode(null, { nodeRef: plain.id }, ctx()))).toBe('NO_ERROR');
+    expect((await db.node.findUniqueOrThrow({ where: { id: plain.id } })).deletedAt).not.toBeNull();
+    expect(await db.nodeRevision.count({ where: { nodeId: s.id, editedByWorkerId: workerId } })).toBeGreaterThan(0);
+    // controls, unchanged: the manager as themselves.
     expect(await codeOf(resolvers.Mutation.updateNode(null, { input: { ref: s.id, content: 'by the manager' } }, ctx()))).toBe('NO_ERROR');
   });
 
-  it('a worker session replace-text skips boot-prompt sources; cloneMemory and mergeMemories refuse whole', async () => {
+  it('a worker session replace-text reaches a boot-prompt source; cloneMemory and mergeMemories carry it', async () => {
     const s = await source();
     await asWorker(() => resolvers.Mutation.searchReplaceInNodes(null, {
       input: { nodeRefs: [s.id], fields: ['content'], oldText: 'You', newText: 'We', dryRun: false },
     }, ctx()));
-    expect((await db.node.findUniqueOrThrow({ where: { id: s.id } })).content).toBe('You are {{worker.name}}.');
+    expect((await db.node.findUniqueOrThrow({ where: { id: s.id } })).content).toBe('We are {{worker.name}}.');
     const target = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'boot-target' }, ctx());
-    const targetBefore = await db.node.count({ where: { memoryId: target.id } });
-    expect(await asWorker(() => codeOf(resolvers.Mutation.cloneMemory(null, { ref: memory.id, targetUrn: `hrn:mem:${memory.urn}-clone` }, ctx()))))
-      .toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+    const clone = await asWorker(() => resolvers.Mutation.cloneMemory(null, { ref: memory.id, targetUrn: `hrn:mem:${memory.urn}-clone` }, ctx())) as { id: string };
+    expect(await db.node.count({ where: { memoryId: clone.id, loc: 'boot:source', role: 'boot-prompt' } })).toBe(1);
     expect(await asWorker(() => codeOf(resolvers.Mutation.mergeMemories(null, { input: { source: memory.id, target: target.id } }, ctx()))))
-      .toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
-    expect(await db.node.count({ where: { memoryId: target.id } })).toBe(targetBefore);
-    expect(await db.node.count({ where: { memoryId: memory.id, loc: 'boot:source' } })).toBe(1);
+      .toBe('NO_ERROR');
+    expect(await db.node.count({ where: { memoryId: target.id, loc: 'boot:source', deletedAt: null } })).toBe(1);
   });
 });
 
@@ -213,25 +212,24 @@ describe('merge and MCP twins (#2043)', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).memoryId).toBe(memory.id);
   });
 
-  it('a worker session over MCP: create, update and delete of a boot prompt are refused', async () => {
+  it('a worker session over MCP: create, update and delete of a boot prompt are admitted (#5453 Ask 5; refused before)', async () => {
     const s = await source();
     const mcp = createTestableMcpServer({ userId: admin.id, roles: [], clientId: `user:${admin.id}` });
     const urn = `hrn:node:${memory.urn}:boot:source`;
     const call = (tool: string, args: Record<string, unknown>) =>
-      asWorker(() => mcp.callToolText(tool, args).catch((e: Error) => e.message));
-    expect(String(await call('hadron_update_node', { urn, content: 'edit' }))).toContain('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+      asWorker(() => mcp.callToolText(tool, args).catch((e: Error) => `ERROR ${e.message}`));
+    expect(String(await call('hadron_update_node', { urn, content: 'edit' }))).not.toMatch(/ERROR|BOOT_PROMPT/);
+    expect((await db.node.findUniqueOrThrow({ where: { id: s.id } })).content).toBe('edit');
     expect(String(await call('hadron_create_node', { urn: `hrn:node:${memory.urn}:boot:new`, name: 'New', role: 'boot-prompt' })))
-      .toContain('BOOT_PROMPT_WORKER_SESSION_REFUSED');
-    expect(String(await call('hadron_delete_node', { urn }))).toContain('BOOT_PROMPT_WORKER_SESSION_REFUSED');
-    expect(await db.node.count({ where: { memoryId: memory.id, loc: 'boot:new' } })).toBe(0);
-    const row = await db.node.findUniqueOrThrow({ where: { id: s.id } });
-    expect(row.content).toBe('You are {{worker.name}}.');
-    expect(row.deletedAt).toBeNull();
+      .not.toMatch(/ERROR|BOOT_PROMPT/);
+    expect(await db.node.count({ where: { memoryId: memory.id, loc: 'boot:new', role: 'boot-prompt' } })).toBe(1);
+    expect(String(await call('hadron_delete_node', { urn }))).not.toMatch(/ERROR|BOOT_PROMPT/);
+    expect(await db.node.findFirst({ where: { id: s.id, deletedAt: null } })).toBeNull();
   });
 });
 
 describe('merge target collisions (#2043, Ruth P2)', () => {
-  it('a merge cannot fold a source node onto a compiled target; a worker session cannot fold onto a boot-prompt target', async () => {
+  it('a merge cannot fold a source node onto a compiled target; a worker session folds onto a boot-prompt target like anyone (#5453 Ask 5)', async () => {
     const target = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'collide-target' }, ctx());
     const tCompiled = await withCompileWrite(() => db.node.create({ data: {
       id: generateId(), memoryId: target.id, loc: 'boot:compiled', name: 'TC', content: 'compiled', role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE,
@@ -243,24 +241,26 @@ describe('merge target collisions (#2043, Ruth P2)', () => {
       .toBe('BOOT_PROMPT_COMPILED_WRITE');
     expect(await snapshot(tCompiled.id)).toEqual(before);
     expect(await db.node.count({ where: { memoryId: memory.id, loc: 'boot:compiled' } })).toBe(1);
-    // worker session: a plain source node colliding with a boot-prompt TARGET source.
+    // worker session: a plain source node colliding with a boot-prompt TARGET source. Refused before #5453; now the
+    // fold is an ordinary write of the target's source, as it always was for a non-session caller.
     await db.node.deleteMany({ where: { memoryId: memory.id, loc: 'boot:compiled' } });
     await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'boot:source', name: 'S2', content: 'plain over boot' } });
-    const beforeSrc = await snapshot(tSource.id);
     expect(await asWorker(() => codeOf(resolvers.Mutation.mergeMemories(null, { input: { source: memory.id, target: target.id } }, ctx()))))
-      .toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
-    expect(await snapshot(tSource.id)).toEqual(beforeSrc);
-    // control: the same collision by a non-session caller on an ordinary-role target is allowed (admin may fold onto a source).
-    expect(await codeOf(resolvers.Mutation.mergeMemories(null, { input: { source: memory.id, target: target.id } }, ctx()))).toBe('NO_ERROR');
+      .toBe('NO_ERROR');
+    expect((await db.node.findUniqueOrThrow({ where: { id: tSource.id } })).deletedAt).toBeNull();
+    // The compiled target was never folded onto.
+    // (A completed merge queues every target node for re-embedding, so the row is compared by what a write would change.)
+    expect(await db.node.findUniqueOrThrow({ where: { id: tCompiled.id } })).toMatchObject({ content: 'compiled', role: BOOT_PROMPT_COMPILED_ROLE, revSeq: before.node.revSeq, deletedAt: null });
+    expect(await db.nodeRevision.count({ where: { nodeId: tCompiled.id } })).toBe(0);
   });
 });
 
 describe('merge batches recheck under their locks (#2043, Jane/Cameron P2)', () => {
-  it('with the preflights pierced, the fold and the relocate batch still refuse boot-prompt rows', async () => {
+  it('with the preflight pierced, the fold batch still refuses a compiled target; a worker session folds onto and relocates a source (#5453 Ask 5)', async () => {
     preflight.off = true;
     try {
       const target = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'late-target' }, ctx());
-      // fold: plain source onto a compiled target, and onto a boot-prompt target under a worker session.
+      // fold: plain source onto a compiled target (refused), and onto a boot-prompt target under a worker session (admitted).
       const tCompiled = await withCompileWrite(() => db.node.create({ data: {
         id: generateId(), memoryId: target.id, loc: 'boot:compiled', name: 'TC', content: 'compiled', role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE,
       } }));
@@ -272,16 +272,18 @@ describe('merge batches recheck under their locks (#2043, Jane/Cameron P2)', () 
       expect(await snapshot(tCompiled.id)).toEqual(before);
       await db.node.deleteMany({ where: { memoryId: memory.id, loc: 'boot:compiled' } });
       await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'boot:source', name: 'S2', content: 'plain over boot' } });
-      const beforeSrc = await snapshot(tSource.id);
       expect(await asWorker(() => codeOf(resolvers.Mutation.mergeMemories(null, { input: { source: memory.id, target: target.id } }, ctx()))))
-        .toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
-      expect(await snapshot(tSource.id)).toEqual(beforeSrc);
-      // relocate: a boot-prompt source with no counterpart is not moved by a worker session.
-      await db.node.deleteMany({ where: { memoryId: memory.id } });
-      const bp = await source('boot:relocate');
-      expect(await asWorker(() => codeOf(resolvers.Mutation.mergeMemories(null, { input: { source: memory.id, target: target.id } }, ctx()))))
-        .toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
-      expect((await db.node.findUniqueOrThrow({ where: { id: bp.id } })).memoryId).toBe(memory.id);
+        .toBe('NO_ERROR');
+      expect((await db.node.findUniqueOrThrow({ where: { id: tSource.id } })).deletedAt).toBeNull();
+      // (A completed merge queues every target node for re-embedding, so the row is compared by what a write would change.)
+      expect(await db.node.findUniqueOrThrow({ where: { id: tCompiled.id } })).toMatchObject({ content: 'compiled', role: BOOT_PROMPT_COMPILED_ROLE, revSeq: before.node.revSeq, deletedAt: null });
+      expect(await db.nodeRevision.count({ where: { nodeId: tCompiled.id } })).toBe(0);
+      // relocate: a boot-prompt source with no counterpart is moved by a worker session's merge, like any other node.
+      const again = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'late-source' }, ctx());
+      const bp = await db.node.create({ data: { id: generateId(), memoryId: again.id, loc: 'boot:relocate', name: 'Source', content: 'You are {{worker.name}}.', role: 'boot-prompt' } });
+      expect(await asWorker(() => codeOf(resolvers.Mutation.mergeMemories(null, { input: { source: again.id, target: target.id } }, ctx()))))
+        .toBe('NO_ERROR');
+      expect((await db.node.findUniqueOrThrow({ where: { id: bp.id } })).memoryId).toBe(target.id);
     } finally {
       preflight.off = false;
     }
@@ -289,18 +291,17 @@ describe('merge batches recheck under their locks (#2043, Jane/Cameron P2)', () 
 });
 
 describe('subtree move (#2043, Jane P2-1)', () => {
-  it('a worker session cannot move a boot-prompt source or its subtree; the manager and ordinary nodes can', async () => {
+  it('a worker session moves a boot-prompt source and its subtree (#5453 Ask 5; refused before), as the manager and ordinary nodes do', async () => {
     const s = await source();
     const child = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'boot:source:child', name: 'Child', content: 'c' } });
     const plain = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'n:move', name: 'Plain', content: 'p' } });
-    const before = await snapshot(s.id);
     const to = (loc: string) => `hrn:node:${memory.urn}:${loc}`;
     expect(await asWorker(() => codeOf(resolvers.Mutation.moveNode(null, { sourceRef: s.id, targetUrn: to('elsewhere:source') }, ctx()))))
-      .toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
-    expect(await snapshot(s.id)).toEqual(before);
-    expect((await db.node.findUniqueOrThrow({ where: { id: child.id } })).loc).toBe('boot:source:child');
+      .toBe('NO_ERROR');
+    expect((await db.node.findUniqueOrThrow({ where: { id: s.id } })).loc).toBe('elsewhere:source');
+    expect((await db.node.findUniqueOrThrow({ where: { id: child.id } })).loc).toBe('elsewhere:source:child');
     expect(await asWorker(() => codeOf(resolvers.Mutation.moveNode(null, { sourceRef: plain.id, targetUrn: to('n:moved') }, ctx())))).toBe('NO_ERROR');
-    expect(await codeOf(resolvers.Mutation.moveNode(null, { sourceRef: s.id, targetUrn: to('elsewhere:source') }, ctx()))).toBe('NO_ERROR');
+    expect(await codeOf(resolvers.Mutation.moveNode(null, { sourceRef: s.id, targetUrn: to('back:source') }, ctx()))).toBe('NO_ERROR');
   });
 });
 

@@ -6,8 +6,9 @@
  * deletes, restores over or copies a `boot-prompt.compiled` node. One pin per door, each on a node that is
  * type `system` (so the old type-keyed guard cannot be what refuses it).
  *
- * The same file pins what PR A must NOT change (guard B's reach): a worker session still writes a rule, now
- * `boot-prompt.rule`, and is still refused a source.
+ * The same file pinned what PR A must NOT change: guard B's reach (a worker session wrote a rule and was refused a
+ * source). PR B (Ask 5) removed guard B, so those three tests are restated at the end: a worker session writes a
+ * rule AND a source, and a compiled node stays out of its reach like anyone's.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
@@ -258,7 +259,7 @@ describe('#5453 the database backstop', () => {
   });
 });
 
-describe('#5453 PR A changes no one\'s write access: guard B reaches a boot prompt itself, never a rule', () => {
+describe('#5453 PR B (Ask 5): guard B is gone. PR A kept its reach (a boot prompt itself, never a rule); a worker session now writes both', () => {
   it('a worker session creates, edits, moves and deletes a boot-prompt.rule node, as it did a boot-prompt-rule one', async () => {
     const ok = (fn: () => Promise<unknown>) => asWorker(() => codeOf(fn()));
     expect(await ok(() => resolvers.Mutation.createNode(null, { input: { memoryRef: memory.id, loc: 'boot:rules:new', name: 'New', nodeType: 'system', role: RULE, content: 'a rule' } }, ctx()))).toBe('NO_ERROR');
@@ -269,21 +270,25 @@ describe('#5453 PR A changes no one\'s write access: guard B reaches a boot prom
     expect((await db.node.findUniqueOrThrow({ where: { id: rule.id } })).deletedAt).not.toBeNull();
   });
 
-  it('a worker session is still refused a source, by leaf and by the bare role, and cannot turn a rule into one', async () => {
-    const refused = (fn: () => Promise<unknown>) => asWorker(() => codeOf(fn()));
+  it('a worker session edits and deletes a source, by leaf and by the bare role, creates one and turns a rule into one (each refused under PR A)', async () => {
+    const admitted = (fn: () => Promise<unknown>) => asWorker(() => codeOf(fn()));
     const leaf = await mk(memory.id, 'boot:source', { nodeType: 'system', role: SOURCE });
     const bare = await mk(memory.id, 'boot:legacy', { role: 'boot-prompt' });
     const rule = await mk(memory.id, 'boot:rules:core', { nodeType: 'system', role: RULE });
     for (const n of [leaf, bare]) {
-      expect(await refused(() => resolvers.Mutation.updateNode(null, { input: { ref: n.id, content: 'edit' } }, ctx()))).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
-      expect(await refused(() => resolvers.Mutation.deleteNode(null, { nodeRef: n.id }, ctx()))).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+      expect(await admitted(() => resolvers.Mutation.updateNode(null, { input: { ref: n.id, content: 'edit' } }, ctx()))).toBe('NO_ERROR');
+      expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).content).toBe('edit');
+      expect(await admitted(() => resolvers.Mutation.deleteNode(null, { nodeRef: n.id }, ctx()))).toBe('NO_ERROR');
+      expect((await db.node.findUniqueOrThrow({ where: { id: n.id } })).deletedAt).not.toBeNull();
     }
-    expect(await refused(() => resolvers.Mutation.createNode(null, { input: { memoryRef: memory.id, loc: 'b:2', name: 'B', role: SOURCE } }, ctx()))).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
-    expect(await refused(() => resolvers.Mutation.updateNode(null, { input: { ref: rule.id, role: SOURCE } }, ctx()))).toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
-    expect((await db.node.findUniqueOrThrow({ where: { id: rule.id } })).role).toBe(RULE);
+    expect(await admitted(() => resolvers.Mutation.createNode(null, { input: { memoryRef: memory.id, loc: 'b:2', name: 'B', role: SOURCE } }, ctx()))).toBe('NO_ERROR');
+    expect(await admitted(() => resolvers.Mutation.updateNode(null, { input: { ref: rule.id, role: SOURCE } }, ctx()))).toBe('NO_ERROR');
+    expect((await db.node.findUniqueOrThrow({ where: { id: rule.id } })).role).toBe(SOURCE);
+    // What it still cannot do: turn either into a compiled node.
+    expect(await admitted(() => resolvers.Mutation.updateNode(null, { input: { ref: rule.id, role: COMPILED } }, ctx()))).toBe('BOOT_PROMPT_COMPILED_WRITE');
   });
 
-  it('a worker session replaces text in a rule and still skips a source; its clone of a memory holding only rules is not refused', async () => {
+  it('a worker session replaces text in a rule and in a source; its clone of a memory holding either is not refused', async () => {
     const rule = await mk(memory.id, 'boot:rules:core', { nodeType: 'system', role: RULE });
     await asWorker(() => resolvers.Mutation.searchReplaceInNodes(null, {
       input: { nodeRefs: [rule.id], fields: ['content'], oldText: 'Basil', newText: 'Eve', dryRun: false },
@@ -294,8 +299,8 @@ describe('#5453 PR A changes no one\'s write access: guard B reaches a boot prom
     await asWorker(() => resolvers.Mutation.searchReplaceInNodes(null, {
       input: { nodeRefs: [src.id], fields: ['content'], oldText: 'Basil', newText: 'Eve', dryRun: false },
     }, ctx()));
-    expect((await db.node.findUniqueOrThrow({ where: { id: src.id } })).content).toBe('You are Basil.');
+    expect((await db.node.findUniqueOrThrow({ where: { id: src.id } })).content).toBe('You are Eve.');
     expect(await asWorker(() => codeOf(resolvers.Mutation.cloneMemory(null, { ref: memory.id, targetUrn: `hrn:mem:${memory.urn}-wclone2` }, ctx()))))
-      .toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
+      .toBe('NO_ERROR');
   });
 });

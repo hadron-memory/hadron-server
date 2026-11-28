@@ -2,10 +2,11 @@
 //
 // The doors that manage an Agent judge the PERSON behind the call (`requireAgentAccess(..., 'ADMIN')`). Under a bound
 // worker session that person is the worker's holder, so without this guard a worker whose holder manages the Agent
-// could edit the Agent's definition. The rule judges the worker instead, as the boot-prompt guard does
-// (`assertNoWorkerSessionBootPromptWrite`, cor:agt:040:11), and no grant path is specified, so the refusal is
-// unconditional. The worker is read from the request's published actor (`boundWorkerId`), which the HTTP session
-// binding, the MCP connection binding and `runAsActor` all fill.
+// could edit the Agent's definition. The rule judges the worker instead, and no grant path is specified, so the
+// refusal is unconditional. (The boot-prompt write guard this was modelled on is gone: since #5453 Ask 5 a worker
+// session writes a boot prompt source and a rule wherever the memory's write gate admits its holder. That ruling is
+// about those nodes; the doors here are unchanged.) The worker is read from the request's published actor
+// (`boundWorkerId`), which the HTTP session binding, the MCP connection binding and `runAsActor` all fill.
 //
 // Callers decide it inside the deciding transaction, right after the person gate's re-check, before any row lock or
 // existence, revision or name check. It is not a pre-check outside the transaction: a holder demoted while the write

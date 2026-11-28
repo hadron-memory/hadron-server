@@ -18,14 +18,18 @@ import { currentActor } from './requestActor.js';
  * Until #5453 the compiled node was told apart by a node type of its own and
  * source and compiled both carried the bare role. That type is retired: the
  * migration 20261128010000_definition_node_roles leaves no row holding it and the
- * CHECK in prisma/boot-prompt-invariants.sql keeps it out. Two guards:
+ * CHECK in prisma/boot-prompt-invariants.sql keeps it out. One guard:
  *
  *  - A: a generic write never produces, edits or strips a compiled node.
  *       Only the compile (S9) writes one, through {@link withCompileWrite}.
- *  - B: a worker session never edits a boot prompt (cor:agt:040:11). Its reach is
- *       the boot prompt ITSELF (source, compiled, the bare role), never a rule: a
- *       rule was outside the family before #5453, and PR A changes no one's write
- *       access.
+ *
+ * There was a second, B: a worker session never wrote a boot prompt (cor:agt:040:11, ruling 0267), on every
+ * door, whatever its holder could write. #5453 Ask 5 removed it (Holger, 2026-11-27: "The workers must be able
+ * to update their boot prompts. [...] The humans then must approve them."; decision record
+ * hrn:node:hadronmemory.com:hadron-dev-team-shared:decisions:2026-11-27-holger-rulings-to-bo-system-nodes-and-roles,
+ * section 4b). A worker session now writes a source and a rule wherever the memory's own write gate admits
+ * it, as it writes any other node there, with no grant. What still holds a worker session back is approval
+ * (src/lib/bootPromptApproval.ts) and guard A, which asks nothing about who is calling.
  */
 
 export const BOOT_PROMPT_ROLE = 'boot-prompt';
@@ -69,8 +73,8 @@ export function isBootPromptRuleRole(role: string | null | undefined): boolean {
 
 /**
  * Whether `role` is the boot prompt ITSELF: in the family and not a rule (a source, a compiled prompt, the bare
- * legacy role, and any sub-kind this code does not know). The checks that cannot mean a rule use it: a base
- * Agent's boot prompt is never inherited (a base's rule is: derived Agents include it), and guard B.
+ * legacy role, and any sub-kind this code does not know). The check that cannot mean a rule uses it: a base
+ * Agent's boot prompt is never inherited (a base's rule is: derived Agents include it).
  */
 export function isBootPromptItselfRole(role: string | null | undefined): boolean {
   return isBootPromptRole(role) && !isBootPromptRuleRole(role);
@@ -115,20 +119,12 @@ export function withCompileWrite<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /**
- * The worker session behind a git sync. The sync itself runs as the system
- * (#1610: its revisions name `system:github-sync`), so the requester is carried
- * here for guard B alone.
+ * The worker session behind this request, from the request's published actor. A Git sync runs as the system
+ * (#1610: its revisions name `system:github-sync`), so nothing inside one is bound to a worker: until #5453 the
+ * requester was carried into the sync for guard B alone, and went with it.
  */
-const syncCallerScope = new AsyncLocalStorage<{ workerId: string | null }>();
-
-/** Run a sync as the system while remembering which worker session asked for it. */
-export function withSyncCaller<T>(workerId: string | null, fn: () => Promise<T>): Promise<T> {
-  return syncCallerScope.run({ workerId }, fn);
-}
-
-/** The worker session behind this request: the actor, else the git sync's saved requester. */
 export function boundWorkerId(): string | null {
-  return currentActor().workerId ?? syncCallerScope.getStore()?.workerId ?? null;
+  return currentActor().workerId ?? null;
 }
 
 /** Whether the caller is inside {@link withCompileWrite}: the compile, and nothing a request can reach. */
@@ -165,35 +161,10 @@ export function assertNotCompiledBootPromptWrite(
   if (was) throw bootPromptCompiledWriteError(op, 'edits');
 }
 
-export function bootPromptWorkerSessionError(op: BootPromptOp): GraphQLError {
-  return new GraphQLError(
-    `BOOT_PROMPT_WORKER_SESSION_REFUSED: a worker session edits a boot prompt (${op}) only under a signed edit grant for its own source; otherwise its manager does it as themselves.`,
-    { extensions: { code: 'BOOT_PROMPT_WORKER_SESSION_REFUSED', op } },
-  );
-}
-
 /**
- * Guard B (cor:agt:040:11). Under a bound worker session, refuse a write whose
- * prior OR requested role is a boot prompt itself ({@link isBootPromptItselfRole}),
- * whatever the holder may write, so a session cannot strip or add the role to edit
- * around the rule. `nextRole` undefined means "unchanged". A rule is outside its
- * reach (#5453 PR A): a worker session wrote a rule before the rename and still does.
- */
-export function assertNoWorkerSessionBootPromptWrite(
-  priorRole: string | null | undefined,
-  nextRole: string | null | undefined,
-  op: BootPromptOp,
-): void {
-  if (inCompileScope()) return;
-  if (!boundWorkerId()) return;
-  if (isBootPromptItselfRole(priorRole) || isBootPromptItselfRole(nextRole === undefined ? priorRole : nextRole)) {
-    throw bootPromptWorkerSessionError(op);
-  }
-}
-
-/**
- * Both guards at one site, for a node's prior row and the requested change. `prior.role` is REQUIRED, not
+ * Guard A at a write site, for a node's prior row and the requested change. `prior.role` is REQUIRED, not
  * optional: the compiled marker is the role now, so a caller that did not read the role does not type-check.
+ * It judges the node and never the caller (#5453 Ask 5): a worker session gets the answer anyone gets.
  */
 export function assertBootPromptWriteAllowed(
   prior: { role: string | null } | null | undefined,
@@ -201,7 +172,6 @@ export function assertBootPromptWriteAllowed(
   op: BootPromptOp,
 ): void {
   assertNotCompiledBootPromptWrite(prior?.role, next.role, op, next.nodeType);
-  assertNoWorkerSessionBootPromptWrite(prior?.role, next.role, op);
 }
 
 /** Prisma `where` for the boot-prompt role family (a rule included). */
@@ -224,8 +194,8 @@ export const NOT_COMPILED_BOOT_PROMPT_WHERE: { OR: [{ role: null }, { role: { no
 type NodeReader = { node: { findMany: (args: any) => Promise<Array<{ role: string | null }>> } };
 
 /**
- * Guard A and B over a set of existing node ids (delete, move, bulk): refuse
- * when any is compiled, or, under a worker session, a boot prompt itself.
+ * Guard A over a set of existing node ids (delete, move, bulk): refuse when any is a compiled boot prompt.
+ * The rows are read by the family and judged by the guard, so the rule stays in one place.
  */
 export async function assertNoBootPromptRows(db: NodeReader, nodeIds: string[], op: BootPromptOp): Promise<void> {
   if (nodeIds.length === 0 || inCompileScope()) return;
@@ -237,29 +207,10 @@ export async function assertNoBootPromptRows(db: NodeReader, nodeIds: string[], 
 }
 
 /**
- * A worker session's whole-memory copy or merge: refused when the source holds
- * any live boot-prompt node, source or compiled (cor:agt:040:11). A rule does not
- * count (guard B's reach). A no-op for any other caller, whose copy simply
- * excludes compiled nodes.
- */
-export async function assertNoBootPromptRowsForWorkerSession(
-  db: NodeReader & { node: { findFirst: (args: any) => Promise<unknown> } },
-  memoryId: string,
-  op: BootPromptOp,
-): Promise<void> {
-  if (!boundWorkerId() || inCompileScope()) return;
-  const hit = await db.node.findFirst({
-    where: { memoryId, deletedAt: null, ...BOOT_PROMPT_ROLE_WHERE, NOT: { role: BOOT_PROMPT_RULE_ROLE } },
-    select: { id: true },
-  });
-  if (hit) throw bootPromptWorkerSessionError(op);
-}
-
-/**
  * A merge folds a source node onto the target node at the same loc. Refuse,
  * before anything commits, when that target is a compiled boot prompt (only a
- * compile writes one) or, under a worker session, a boot-prompt source
- * (cor:agt:040:11). Source-only checks miss this: the written node is the target's.
+ * compile writes one). Source-only checks miss this: the written node is the target's.
+ * A fold onto a source or a rule of the target is an ordinary write of that node (#5453 Ask 5).
  */
 export async function assertNoBootPromptMergeCollisions(
   db: { node: { findFirst: (args: any) => Promise<unknown>; findMany: (args: any) => Promise<Array<{ role: string | null; loc: string }>> } },
@@ -271,8 +222,7 @@ export async function assertNoBootPromptMergeCollisions(
     where: { memoryId: targetMemoryId, deletedAt: null, ...BOOT_PROMPT_ROLE_WHERE },
     select: { role: true, loc: true },
   });
-  const worker = boundWorkerId();
-  const relevant = targets.filter((t) => isCompiledBootPrompt(t) || (worker && isBootPromptItselfRole(t.role)));
+  const relevant = targets.filter((t) => isCompiledBootPrompt(t));
   if (relevant.length === 0) return;
   const collides = await db.node.findFirst({
     where: { memoryId: sourceMemoryId, deletedAt: null, loc: { in: relevant.map((t) => t.loc) }, nodeType: { not: 'comment' }, AND: [NOT_COMPILED_BOOT_PROMPT_WHERE] },
