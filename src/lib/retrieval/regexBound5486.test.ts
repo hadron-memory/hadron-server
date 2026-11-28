@@ -18,7 +18,7 @@ const untilRoom = () => new Promise<void>((r) => setTimeout(r, rateWindowWaitMs(
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
-describe('#5486 SEC10 P2-1: P2-1, P2-2: a leading option that selects the basic, extended or expanded syntax is refused', () => {
+describe('#5486 SEC10 P2-1, P2-2: a leading option that selects the basic, extended or expanded syntax is refused', () => {
   it.each([String.raw`(?b)\(a\)[\]\1`, String.raw`(?bi)\(a\)[\]\1`, '(?e)a', '(?ie)a', '(?x)(a)#[\n\\1]', '(?ix)(a)#[\n\\1]', '***:(?x)(a)#[\n\\1]', '(?x)a#[b\n(a)\\1', '(?x)a b', '***:(?b)a', '(?i)(?b)a'])('refuses %s', (p) => {
     expect(selectsNonAreSyntax(p)).toBe(true);
     expect(() => assertRegexPatternAllowed(p)).toThrow(/basic, extended or expanded/);
@@ -32,6 +32,14 @@ describe('#5486 SEC10 P2-3: an inline (?#...) comment is refused', () => {
     expect(() => assertRegexPatternAllowed(p)).toThrow(/may not contain a comment/);
   });
   it.each([String.raw`\(?#x)`, '[(?#]', '(?:a)', '(?=a)', '(?i)a', 'a?#b'])('allows %s', (p) => expect(hasRegexInlineComment(p)).toBe(false));
+});
+
+describe('#5486 SEC10 P2-4: the control escape \\cX takes three characters, so what follows it is read as the engine reads it', () => {
+  it.each([String.raw`(a)\c[\1]`, String.raw`(a)\c[\1`, String.raw`(a)\c\\1`, String.raw`(a)[\c\]\1]`])('a backreference after %s is refused', (p) => {
+    expect(hasRegexBackreference(p)).toBe(true);
+  });
+  it('a (?# comment hidden behind \\c[ is still seen', () => expect(hasRegexInlineComment(String.raw`\c[(?#x)`)).toBe(true));
+  it.each([String.raw`\cA`, String.raw`(a)\cA\\1`, String.raw`[\cA]`, String.raw`a\c[b]`])('allows %s', (p) => expect(hasRegexBackreference(p)).toBe(false));
 });
 
 describe('#5486 hasRegexBackreference (a scanner, not a substring test)', () => {

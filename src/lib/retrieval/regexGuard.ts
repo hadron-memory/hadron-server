@@ -14,6 +14,18 @@
  * `(?b)` basic syntax, `\1`-`\9` likewise), and a two-digit form (`\10`) begins with such a digit, so it is caught by
  * the same rule. Where the engine might read an escape as a literal instead (a `(?q)` literal pattern), refusing is the
  * conservative side; the options that change how the scanner must read the pattern (`b`, `e`, `x`) are refused up front.
+ *
+ * CLOSURE LIST (SEC10, four desyncs found by review: options b/e, option x, `(?#`, `\cX`). The scanner agrees with the engine
+ * because every construct that changes how characters are consumed is either modelled here or refused up front:
+ *   - leading options `b`, `e`, `x` (basic/extended/expanded syntax): refused (`selectsNonAreSyntax`); the other options
+ *     (`i c n p w s m t`) do not change bracket or escape parsing; `q` (literal) and `***=` only make the scanner over-refuse;
+ *   - the `***:` director: stripped before the option check; options are valid only at the start;
+ *   - the inline comment `(?#...)`: refused outside brackets (`hasRegexInlineComment`); `#` comments exist only under `x`;
+ *   - escapes: `\X` consumes two characters, except `\cX` which takes the next character whatever it is (so three, modelled in
+ *     both skip sites); `\x`, `\u`, `\U`, octal and class/constraint escapes take digits or nothing, so the digits are ordinary;
+ *   - bracket expressions: a leading `^` and a leading `]` are members; `[:..:]`, `[.x.]`, `[=x=]` are skipped whole; a
+ *     backslash escapes inside a bracket (ARE); an unterminated bracket is an engine error anyway.
+ * A new ARE construct that consumes characters differently from these belongs on this list with its handling and a pin.
  */
 import { GraphQLError } from 'graphql';
 
@@ -61,7 +73,7 @@ function scan(pattern: string, find: 'backreference' | 'comment'): boolean {
     if (c === '\\') {
       const next = pattern[i + 1];
       if (find === 'backreference' && next !== undefined && next >= '1' && next <= '9') return true;
-      i += 2; // the escape and the character it escapes (`\\` is one escape)
+      i += next === 'c' ? 3 : 2; // the escape and what it takes: one character, or two for `\cX` (`\\` is one escape)
       continue;
     }
     if (c === '[') {
@@ -83,7 +95,7 @@ function skipBracketExpression(p: string, start: number): number {
   while (i < n) {
     const c = p[i]!;
     if (c === ']') return i + 1;
-    if (c === '\\') { i += 2; continue; } // ARE: a backslash escapes inside brackets
+    if (c === '\\') { i += p[i + 1] === 'c' ? 3 : 2; continue; } // ARE: a backslash escapes inside brackets; `\cX` takes three characters
     if (c === '[' && (p[i + 1] === ':' || p[i + 1] === '.' || p[i + 1] === '=')) {
       const close = p.indexOf(`${p[i + 1]}]`, i + 2);
       if (close === -1) return n;
