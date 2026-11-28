@@ -160,12 +160,31 @@ export async function hostHasOpenSession(
   tx: Prisma.TransactionClient,
   at: { appId: string; hostId: string; now: Date; checkIns: number },
 ): Promise<boolean> {
+  // #5363: the exclusive anchor is held across this read, so it asks for the CANDIDATES that could possibly match, not every open session
+  // of the App. Q4 stays the source of truth: every candidate is still judged by `sessionRunsOn`. The filter is a SUPERSET of what can
+  // match, never a subset: a host-launched session matches only when it was launched on this host; a hand-started one (no launch host)
+  // matches only when its worker's sole live registration is this host, so its worker must have a registration of this host that is not
+  // lost (a stale one is still a candidate: `sessionRunsOn` applies the lapse window). `launchHostId = hostId` alone would drop
+  // the hand-started sessions, which is why the second arm exists.
+  const here = await tx.$queryRaw<{ workerId: string }[]>`
+    SELECT DISTINCT w.worker_id AS "workerId" FROM host_registrations r
+    JOIN host_registration_workers w ON w.registration_id = r.id
+    WHERE r.app_id = ${at.appId} AND r.host_id = ${at.hostId} AND r.lost_at IS NULL`;
   const open = await tx.session.findMany({
-    where: { appId: at.appId, workerId: { not: null }, endedAt: null, deletedAt: null },
+    where: {
+      appId: at.appId, workerId: { not: null }, endedAt: null, deletedAt: null,
+      OR: [{ launchHostId: at.hostId }, { launchHostId: null, workerId: { in: here.map((r) => r.workerId) } }],
+    },
     select: { workerId: true, launchHostId: true },
     orderBy: { id: 'asc' },
   });
+  // A hand-started session's answer depends on its worker alone, so each worker is judged once.
+  const judged = new Set<string>();
   for (const s of open) {
+    if (s.launchHostId === null) {
+      if (judged.has(s.workerId!)) continue;
+      judged.add(s.workerId!);
+    }
     if (await sessionRunsOn(tx, { appId: at.appId, workerId: s.workerId!, hostId: at.hostId, now: at.now, checkIns: at.checkIns }, s)) return true;
   }
   return false;
