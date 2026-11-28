@@ -19,6 +19,23 @@ import { GraphQLError } from 'graphql';
 
 export const REGEX_PATTERN_MAX_CHARS = 200;
 
+/**
+ * #5486 SEC10 P2-1: the scanner reads brackets by the ARE rule (a backslash escapes inside brackets). A leading embedded
+ * option `(?b)` (basic) or `(?e)` (extended) switches the engine to a syntax where a backslash in a bracket is an ordinary
+ * character, so the scanner and the engine would disagree on where a bracket ends and a later backreference would pass.
+ * Embedded options are only valid at the start of the pattern (after an optional `***:` director), so that is the only place
+ * looked at; a pattern that selects `b` or `e` is refused, which keeps the scanner's ARE assumption true.
+ */
+export function selectsNonAreSyntax(pattern: string): boolean {
+  let rest = pattern.startsWith('***:') ? pattern.slice(4) : pattern;
+  for (;;) {
+    const m = /^\(\?([A-Za-z]*)\)/.exec(rest);
+    if (!m) return false;
+    if (/[be]/.test(m[1]!)) return true;
+    rest = rest.slice(m[0].length);
+  }
+}
+
 /** True when `pattern` contains a backreference outside a bracket expression. */
 export function hasRegexBackreference(pattern: string): boolean {
   let i = 0;
@@ -61,11 +78,15 @@ function skipBracketExpression(p: string, start: number): number {
   return n;
 }
 
-/** Refuse an over-long or backreferencing pattern. Run on the trimmed pattern, after the #435 bound, before any search. */
+/** Refuse an over-long, non-ARE-syntax or backreferencing pattern. Run on the trimmed pattern, after the #435 bound, before any search. */
 export function assertRegexPatternAllowed(pattern: string): void {
   if (pattern.length > REGEX_PATTERN_MAX_CHARS) {
     throw new GraphQLError(
       `A regex pattern is too long: at most ${REGEX_PATTERN_MAX_CHARS} characters are allowed. Shorten it; it is never truncated.`,
+      { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  if (selectsNonAreSyntax(pattern)) {
+    throw new GraphQLError('A regex pattern may not select the basic or extended syntax. Remove the leading option.',
       { extensions: { code: 'BAD_USER_INPUT' } });
   }
   if (hasRegexBackreference(pattern)) {

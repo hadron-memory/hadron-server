@@ -95,7 +95,7 @@ export async function checkRateConfiguration(db: PrismaClient): Promise<void> {
   }
 }
 export class RateLimited extends GraphQLError {
-  constructor(fieldClass: FieldClass | typeof REGEX_SEARCH_CLASS, retryAfterSeconds: number) {
+  constructor(fieldClass: EnforcedClass, retryAfterSeconds: number) {
     super('Too many requests.', { extensions: { code: 'RATE_LIMITED', fieldClass, retryAfterSeconds } });
   }
 }
@@ -105,10 +105,11 @@ export class RateLimited extends GraphQLError {
  * its numbers are constants here (Holger 2026-11-28: 10 per minute per caller, plus one in flight) read per call.
  */
 export const REGEX_SEARCH_CLASS = 'REGEX_SEARCH' as const;
+export type EnforcedClass = FieldClass | typeof REGEX_SEARCH_CLASS;
 export const REGEX_SEARCH_WINDOW_SECONDS = 60;
 export const REGEX_SEARCH_PER_WINDOW = 10;
 /** Privacy-bounded metrics only. No subject, token, proof, IP or request text can enter here. */
-function observe(fieldClass: FieldClass, dimension: 'principal'|'key'|'ip'|'store', mode: string) {
+function observe(fieldClass: EnforcedClass, dimension: 'principal'|'key'|'ip'|'store', mode: string) {
   console.info('rate-limit-observation', { fieldClass, dimension, mode });
 }
 /** A disconnected caller transaction cannot be repaired by a savepoint. Keep
@@ -255,7 +256,7 @@ export async function admitRegexSearchRate(db: PrismaClient, identity: RateIdent
       const retry = Math.max(1, Math.ceil((windowStart.getTime() + windowMs - now.getTime()) / 1000));
       const rows = await tx.rateLimitBucket.findMany({ where: { fieldClass: REGEX_SEARCH_CLASS, dimension: dim, subject: { in: aliases }, windowStart }, select: { used: true } });
       const used = rows.reduce((mx, r) => r.used > mx ? r.used : mx, 0n);
-      if (used >= BigInt(REGEX_SEARCH_PER_WINDOW)) { observe(REGEX_SEARCH_CLASS as never, dim, 'ENFORCING'); throw new RateLimited(REGEX_SEARCH_CLASS, retry); }
+      if (used >= BigInt(REGEX_SEARCH_PER_WINDOW)) { observe(REGEX_SEARCH_CLASS, dim, 'ENFORCING'); throw new RateLimited(REGEX_SEARCH_CLASS, retry); }
       for (const subj of aliases) await tx.rateLimitBucket.upsert({
         where: { fieldClass_dimension_subject_windowStart: { fieldClass: REGEX_SEARCH_CLASS, dimension: dim, subject: subj, windowStart } },
         create: { id: generateId(), fieldClass: REGEX_SEARCH_CLASS, dimension: dim, subject: subj, windowStart, used: used + 1n, expiresAt: new Date(windowStart.getTime() + windowMs + RETENTION_MS) },
@@ -263,12 +264,14 @@ export async function admitRegexSearchRate(db: PrismaClient, identity: RateIdent
     });
   } catch (error) {
     if (error instanceof RateLimited || error instanceof RateConfigurationError || !storeUnavailable(error)) throw error;
-    observe(REGEX_SEARCH_CLASS as never, 'store', 'ENFORCING');
+    observe(REGEX_SEARCH_CLASS, 'store', 'ENFORCING');
   }
 }
 
 // One regex statement in flight per caller, per process. A second concurrent attempt is refused (not queued) with the
-// same RATE_LIMITED code; the wait it names is the statement budget, the longest the first can still run.
+// same RATE_LIMITED code; the wait it names is the statement budget, the longest the first can still run. That is true
+// because provider.regexSearch applies `SET LOCAL statement_timeout` of regexSearchTimeoutMs() to its own statement (#415
+// slice 1), so the slot is freed at the budget at the latest.
 const regexInFlight = new Set<string>();
 export async function withRegexSearchSlot<T>(db: PrismaClient, identity: RateIdentity, budgetMs: number, run: () => Promise<T>): Promise<T> {
   const key = identity.principal ?? `ip:${identity.ip ?? ''}`;

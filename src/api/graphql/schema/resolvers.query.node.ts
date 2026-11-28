@@ -1869,9 +1869,9 @@ export const nodeQueries = {
       const q = query!.trim();
       // #435: the raw bound runs before ANY mode work (embed, regex, keyword, hybrid, and the literal fallback, which only sees a q that passed).
       assertQueryLength(q);
-      // #5486: a regex pattern is bounded and may not backreference, judged before any database work.
-      if ((mode ?? 'hybrid') === 'regex') assertRegexPatternAllowed(q);
       const effectiveMode = mode ?? 'hybrid';
+      // #5486: a regex pattern is bounded and may not backreference, judged before the regex statement runs.
+      if (effectiveMode === 'regex') assertRegexPatternAllowed(q);
       const lexFields = (fields ?? undefined) as LexicalField[] | undefined;
       const model = isEmbeddingConfigured() ? getEmbeddingClient().model : null;
       // The keyword leg of a hybrid search over-fetches when structured filters are present. #2772 (ruling 0150,

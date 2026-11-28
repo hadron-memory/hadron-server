@@ -8,15 +8,23 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
-import { assertRegexPatternAllowed, hasRegexBackreference, REGEX_PATTERN_MAX_CHARS } from './regexGuard.js';
-import { REGEX_SEARCH_PER_WINDOW, withRegexSearchSlot } from '../rateLimit/index.js';
+import { assertRegexPatternAllowed, hasRegexBackreference, selectsNonAreSyntax, REGEX_PATTERN_MAX_CHARS } from './regexGuard.js';
+import { REGEX_SEARCH_PER_WINDOW, REGEX_SEARCH_WINDOW_SECONDS, withRegexSearchSlot } from '../rateLimit/index.js';
 import { postgresRetrievalProvider } from './postgres.js';
 import { rateWindowWaitMs, RATE_WINDOW_TEST_TIMEOUT_MS } from '../../test/rateWindow.js';
 
 /** Sleep past the boundary when less than the margin remains in the 60 s window, so a sequence fits in one window. */
-const untilRoom = () => new Promise<void>((r) => setTimeout(r, rateWindowWaitMs(Date.now() % 60_000, 60)));
+const untilRoom = () => new Promise<void>((r) => setTimeout(r, rateWindowWaitMs(Date.now() % (REGEX_SEARCH_WINDOW_SECONDS * 1000), REGEX_SEARCH_WINDOW_SECONDS)));
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
+
+describe('#5486 SEC10 P2-1: a leading option that selects the basic or extended syntax is refused', () => {
+  it.each([String.raw`(?b)\(a\)[\]\1`, String.raw`(?bi)\(a\)[\]\1`, '(?e)a', '(?ie)a', '***:(?b)a', '(?i)(?b)a'])('refuses %s', (p) => {
+    expect(selectsNonAreSyntax(p)).toBe(true);
+    expect(() => assertRegexPatternAllowed(p)).toThrow(/basic or extended/);
+  });
+  it.each(['(?i)abc', '(?x)a b', '***:(?i)a', 'a(?b)', 'abc', '(?q)a.b', '(?s)(?i)x'])('allows %s', (p) => expect(selectsNonAreSyntax(p)).toBe(false));
+});
 
 describe('#5486 hasRegexBackreference (a scanner, not a substring test)', () => {
   it.each([
@@ -73,9 +81,13 @@ describe('#5486 findNodes regex through the resolver', () => {
     spy.mockRestore();
   });
 
-  it('an ordinary pattern still run', async () => {
+  it('an ordinary pattern still runs', async () => {
+    const spy = vi.spyOn(postgresRetrievalProvider, 'regexSearch');
     const r = await find(base('foo.*'), ctxOf(userA));
+    expect(spy).toHaveBeenCalledTimes(1); // the spy is wired to the provider the resolver uses
     expect(r.hits).toHaveLength(1);
+    expect(r.hits[0].node.name).toBe('Doc');
+    spy.mockRestore();
   });
 
   it('refuses the 11th regex search in a window with RATE_LIMITED and a positive retryAfterSeconds; another caller is unaffected', async () => {
@@ -107,6 +119,34 @@ describe('#5486 findNodes regex through the resolver', () => {
     await expect(withRegexSearchSlot(db, { principal: `USER:${userB}`, internal: false }, 5000, async () => 2)).resolves.toBe(2);
     release(); await first;
     await expect(withRegexSearchSlot(db, ident, 5000, async () => 3)).resolves.toBe(3);
+  });
+
+  it('SEC10 P3-1: a second credential of the same principal shares the count and the in-flight slot', async () => {
+    const k1 = { principal: `USER:${userA}`, key: 'USER_KEY:k1', internal: false } as const;
+    const k2 = { principal: `USER:${userA}`, key: 'USER_KEY:k2', internal: false } as const;
+    await untilRoom();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const first = withRegexSearchSlot(db, k1, 5000, () => gate);
+    await new Promise((r) => setTimeout(r, 50));
+    await expect(withRegexSearchSlot(db, k2, 5000, async () => 1)).rejects.toMatchObject({ extensions: { code: 'RATE_LIMITED' } });
+    release(); await first;
+    for (let i = 1; i < REGEX_SEARCH_PER_WINDOW; i++) await withRegexSearchSlot(db, i % 2 ? k2 : k1, 5000, async () => i);
+    await expect(withRegexSearchSlot(db, k2, 5000, async () => 0)).rejects.toMatchObject({ extensions: { code: 'RATE_LIMITED' } });
+    await expect(withRegexSearchSlot(db, k1, 5000, async () => 0)).rejects.toMatchObject({ extensions: { code: 'RATE_LIMITED' } });
+  }, RATE_WINDOW_TEST_TIMEOUT_MS);
+
+  it('through the resolver: a concurrent second regex search of one caller is RATE_LIMITED while the first is held', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const spy = vi.spyOn(postgresRetrievalProvider, 'regexSearch').mockImplementationOnce(async () => { await gate; return []; });
+    const first = find(base('held'), ctxOf(userA));
+    await new Promise((r) => setTimeout(r, 100));
+    const err: any = await find(base('second'), ctxOf(userA)).then(() => null, (e: unknown) => e);
+    expect(err?.extensions?.code).toBe('RATE_LIMITED');
+    expect(err.extensions.retryAfterSeconds).toBe(5);
+    release(); await first;
+    spy.mockRestore();
   });
 
   it('a throw in the statement frees the slot', async () => {
