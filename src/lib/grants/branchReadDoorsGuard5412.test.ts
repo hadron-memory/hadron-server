@@ -97,11 +97,11 @@ const CLOSED_TOOLS = `
   hadron_start_session hadron_sync_graph hadron_unlock_memory hadron_update_edge hadron_update_node hadron_update_node_data
   hadron_update_object hadron_update_review hadron_update_scope hadron_update_task hadron_validate hadron_web_poll_cancel
   hadron_web_poll_list hadron_whoami hadron_withdraw_question hadron_withdraw_signing_request hadron_request_signature
-  hadron_get_signing_request
+  hadron_get_signing_request hadron_create_grant
 `.split(/\s+/).filter(Boolean);
 
 /** Tools registered only in some deployments (feature-gated); classified, but absent from the default registry. */
-const OPTIONAL_TOOLS = new Set(['hadron_request_signature', 'hadron_get_signing_request', 'hadron_withdraw_signing_request']);
+const OPTIONAL_TOOLS = new Set(['hadron_create_grant', 'hadron_request_signature', 'hadron_get_signing_request', 'hadron_withdraw_signing_request']);
 const sorted = (xs: Iterable<string>) => [...new Set(xs)].sort();
 
 describe('#5412 condition 5, part 1: every Query field and MCP tool is classified', () => {
