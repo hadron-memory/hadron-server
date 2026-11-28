@@ -1419,7 +1419,10 @@ export async function canReadMemoryRecord(
   // exists for, and Query.memory out of step with effectiveAccess. AppMember
   // rows hard-delete on removal (no deletedAt column), so existence is
   // liveness. Identity-scoped — never via impersonation (#876 class).
-  if (ctx.userId && memory.appId && !ctx.impersonation) {
+  // #5027 (Holger R1, cor:acl:010:01): a GROUP made in an App is read through its MemoryMembers only, record and
+  // nodes alike, so App membership alone does not open its record (the org-member fast path above skips group the
+  // same way); a member reaches it through the shared gate below.
+  if (ctx.userId && memory.appId && memory.class !== 'group' && !ctx.impersonation) {
     const appMember = await ctx.db.appMember.findUnique({
       where: { appId_userId: { appId: memory.appId, userId: ctx.userId } },
       select: { userId: true },
@@ -3136,7 +3139,10 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, d
   // below (which key on organizationId, ignoring app_id). App-scoped write goes
   // through the App-key/agent path (canWriteToMemory via getAppMemoryAccess); a
   // JWT org contributor who isn't ADMIN gets no write here (codex review, #660).
-  if (memory.appId !== null && (memory.class === 'knowledge' || memory.class === 'group')) {
+  // #5027 (Holger R1): an App-scoped GROUP is written by its MemoryMember writers, so a group row falls through to
+  // the shared writable set below, whose group arm is MemoryMember-only; the org and subscription arms keep
+  // `appId: null` (knowledge only), so an org role still adds nothing.
+  if (memory.appId !== null && memory.class === 'knowledge') {
     throw memoryWriteForbidden();
   }
 

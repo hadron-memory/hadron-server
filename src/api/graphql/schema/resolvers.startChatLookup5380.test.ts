@@ -147,3 +147,17 @@ describe('#5380 controls', () => {
     expect(await homeOf((await startSolo()).chatId)).toBe(fresh);
   });
 });
+
+describe('#5380 the order within one class is deterministic (LOCAL P3-1 on #5382, Babaya; added with #5027)', () => {
+  it('two stamped personal memories: the older one wins even when the newer row was inserted first', async () => {
+    // Inserted newest-first, so heap order alone (an unordered or descending pick) returns the newer row.
+    const personalRow = (urn: string, createdAt: Date) => db.memory.create({ data: {
+      class: 'personal', name: urn, urn: `ann5380:${urn}`, appId, userId: ann, ownerUserId: ann, createdBy: ann,
+      userMemoryOfAgentId: agentId, appUserMemory: true, createdAt,
+    } });
+    const newer = await personalRow('newer', new Date('2026-06-01T00:00:00Z'));
+    const older = await personalRow('older', new Date('2026-01-01T00:00:00Z'));
+    expect(newer.id).not.toBe(older.id);
+    for (let i = 0; i < 2; i++) expect(await homeOf((await start(ann)).chatId)).toBe(older.id);
+  });
+});
