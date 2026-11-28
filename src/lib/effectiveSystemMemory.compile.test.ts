@@ -72,6 +72,18 @@ describe('#2044 compileChain / findCompileNodeIdByLoc', () => {
     expect(hit).toMatchObject({ id: inst.id, fromInstall: true });
   });
 
+  // #5453: a rule is in the boot-prompt family and is still a candidate from a base, as it was under `boot-prompt-rule`.
+  it('#5453: a base\'s rule (boot-prompt.rule) IS a candidate; a base\'s source and compiled node are not', async () => {
+    const f = await fixture();
+    const target = { appId: f.apps[0]!.app.id, agentId: f.child.id };
+    const rule = await node(f.baseMem.id, 'boot:rules:core', { nodeType: 'system', role: 'boot-prompt.rule' });
+    await node(f.baseMem.id, 'boot:source', { nodeType: 'system', role: 'boot-prompt.source' });
+    await node(f.baseMem.id, 'boot:compiled', { nodeType: 'system', role: 'boot-prompt.compiled' });
+    expect((await findCompileNodeIdByLoc(db, target, 'boot:rules:core'))?.id).toBe(rule.id);
+    expect(await findCompileNodeIdByLoc(db, target, 'boot:source')).toBeNull();
+    expect(await findCompileNodeIdByLoc(db, target, 'boot:compiled')).toBeNull();
+  });
+
   it('two Apps with distinct overrides each compile their own, and neither sees the other\'s', async () => {
     const f = await fixture();
     const a = await node(f.apps[0]!.install.id, 'prompts:lane');

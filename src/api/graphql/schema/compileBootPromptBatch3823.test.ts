@@ -87,6 +87,19 @@ describe('compile under a batch grant', () => {
     expect(await snapshot()).toEqual(before);
   });
 
+  // #5453: "compiled" is the role now. A grant that names a node at the compiled address which is NOT compiled (a
+  // source by role, type system) admits no compile: the refusal is the batch one, before anything is assembled, and
+  // not the CONFLICT the write step would raise later.
+  it('#5453: a grant naming a node at the compiled address that is not compiled by role admits no compile', async () => {
+    await source(installId, `boot:workers:${workerId}:source`, 'v1');
+    const squat = await db.node.create({ data: { id: generateId(), memoryId: installId, loc: `boot:workers:${workerId}:compiled`, name: 'Squat', content: 'old', nodeType: BOOT_PROMPT_NODE_TYPE, role: 'boot-prompt.source' } });
+    await grant(squat.id);
+    const before = await snapshot();
+    expect(await codeOf(asWorker(() => M.compileWorkerBootPrompt(null, { workerRef: workerId }, ctx())))).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');
+    expect(await snapshot()).toEqual(before);
+    expect((await db.node.findUniqueOrThrow({ where: { id: squat.id } })).content).toBe('old');
+  });
+
   it('a grant naming the worker\'s compiled node: a new revision, many times, no pointer change, the worker recorded', async () => {
     await source(installId, `boot:workers:${workerId}:source`, 'v1');
     const c = await compiled(installId, `boot:workers:${workerId}:compiled`);
