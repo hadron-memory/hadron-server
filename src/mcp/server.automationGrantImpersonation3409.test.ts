@@ -4,6 +4,9 @@
  * deliberately in-process contexts do not claim an impersonating wire session.
  * The manager's otherwise identical ordinary context must still succeed, so
  * deleting impersonation in ctxOf/ctx cannot hide behind another refusal.
+ *
+ * #5404: the three read-grant tools are retired (Holger, 2026-11-27, "Retire all"): every call, impersonated or by the managing
+ * person, answers the one DOOR_RETIRED refusal before any check and changes nothing. The team snapshot tools are unchanged.
  */
 import { beforeEach, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/client';
@@ -83,10 +86,22 @@ for (const [tool, kind, action] of tools) {
     : action === 'list' ? { app: appId }
     : { app: appId, triggerKind: 'SCHEDULE', triggerId: newTriggerId, ...(kind === 'read' ? { memory: memoryId } : {}) };
 
+  if (kind === 'read') {
+    it(`${tool}: retired (#5404): impersonated and managing-person calls both answer [door_retired], with no grant/event effects`, async () => {
+      for (const impersonating of [true, false]) {
+        const before = await snapshot();
+        const result = await call(tool, args(), impersonating);
+        expect(result).toMatchObject({ isError: true, content: [{ type: 'text', text: expect.stringMatching(/^\[door_retired\] /) }] });
+        expect(await snapshot()).toEqual(before);
+      }
+    });
+    continue;
+  }
+
   it(`${tool}: impersonation is [forbidden] Forbidden with no grant/event effects`, async () => {
     const before = await snapshot();
     const result = await call(tool, args(), true);
-    // All six source-derived FORBIDDEN doors use this exact MCP rendering.
+    // All three live source-derived FORBIDDEN doors use this exact MCP rendering.
     expect(result).toMatchObject({ isError: true, content: [{ type: 'text', text: '[forbidden] Forbidden' }] });
     expect(await snapshot()).toEqual(before);
   });
@@ -96,8 +111,8 @@ for (const [tool, kind, action] of tools) {
     const result = await call(tool, args(), false);
     expect(result.isError).not.toBe(true);
     const after = await snapshot();
-    const rows = kind === 'read' ? after.readGrants : after.teamGrants;
-    const events = kind === 'read' ? after.readEvents : after.teamEvents;
+    const rows = after.teamGrants;
+    const events = after.teamEvents;
     if (action === 'set') {
       expect(rows).toHaveLength(2);
       expect(rows.find(r => r.triggerId === newTriggerId)).toMatchObject({ grantedBy: managerId, revokedAt: null });
@@ -109,7 +124,7 @@ for (const [tool, kind, action] of tools) {
       expect(events).toHaveLength(1);
       expect(events[0]).toMatchObject({ action: 'REVOKE', actorUserId: managerId });
     } else {
-      expect(JSON.stringify(result.content)).toContain(kind === 'read' ? readGrantId : teamGrantId);
+      expect(JSON.stringify(result.content)).toContain(teamGrantId);
       expect(after).toEqual(before);
     }
     expect(after.instructionEvents).toEqual(before.instructionEvents);

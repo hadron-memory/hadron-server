@@ -4,8 +4,9 @@
  * output door, `makeProdRunDeps(db).writeOutput` through `executeAppRun`, whose `data.output.writeTo` resolves the
  * destination and asks `canWriteToMemory(..., { destination: { loc, verb: 'upsert' } })` before `writeNodeCore`.
  *
- * Fixture, disclosed: the grant row on the system memory is seeded DIRECTLY, as it could have been made before #2710
- * (the public `setAppMemoryWriteGrant` refuses it now, and is not weakened here). Every other condition is valid: the App
+ * Fixture, disclosed: the grant on the system memory is seeded DIRECTLY as an ACTIVE signed `memory.write` grant (#5404: ruling
+ * 0083's App write grant is retired; creation refuses a system target, so no door can make this row; the write gate's live
+ * re-judge, memoryWriteTargetRefusal, is what is pinned). Every other condition is valid: the App
  * is live, the run is userless, the flow entry is readable, the destination is in the App's org, the row is live and
  * covers the loc. The ONLY difference between the refused cases and the positive control is the destination's class.
  * The run principal has no on-behalf-of user and no agent memory item on either destination.
@@ -22,6 +23,7 @@ vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromG
 import { mintAppRun, executeAppRun, type RunExecutionDeps } from './appRuns.js';
 import { makeProdRunDeps } from './appRunDeps.js';
 import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
+import { activeMemoryWriteGrant } from '../test/appGrants5404.js';
 
 const ORG_URN = 'sysgrant2716-org';
 const FLOW_URN = `${ORG_URN}:flow`;
@@ -75,8 +77,10 @@ beforeEach(async () => {
   // Read access to the flow memory only: no agent memory item touches either destination.
   await db.agentMemoryItem.create({ data: { agentId: agent.id, memoryId: flowId, role: 'read' } });
   await db.node.create({ data: { id: generateId(), memoryId: flowId, loc: 'flow:report', name: 'report', tags: [], content: 'Produce the report.' } as never });
+  // The giver must still manage the memory at every write (#5404): an org ADMIN manages the shared knowledge memory.
+  await db.orgMember.create({ data: { organizationId: orgId, userId: graniterId, role: 'ADMIN' } });
   for (const memoryId of [systemId, sharedId]) {
-    await db.appMemoryWriteGrant.create({ data: { appId, memoryId, prefix: PREFIX, grantedBy: graniterId } });
+    await activeMemoryWriteGrant(appId, memoryId, { issuerUserId: graniterId, prefix: PREFIX });
   }
 });
 
@@ -119,6 +123,6 @@ describe('#2716 N2: the run-upsert door and a write grant on a class=system memo
     expect(row.userId ?? null).toBeNull();
     expect((await db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc: LOC, memoryId: sharedId } } })).content).toBe('RUN OUTPUT');
     // And the system memory's own refusal is not an artifact of a missing row: its grant is still live.
-    expect(await db.appMemoryWriteGrant.count({ where: { appId, memoryId: systemId, revokedAt: null } })).toBe(1);
+    expect(await db.grant.count({ where: { granteeAppId: appId, action: 'memory.write', revokedAt: null, values: { equals: { memory: systemId, prefix: PREFIX } } } })).toBe(1);
   });
 });

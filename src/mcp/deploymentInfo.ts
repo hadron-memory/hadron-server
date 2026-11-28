@@ -375,7 +375,19 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // impersonation to those gates, as GraphQL always did: an impersonated MCP session is bounded on an organization's run too (its
 // one organization, no own-run arm), where MCP used to judge it as the target user. (0.55.0 is #5411 and 0.56.0 is #5391,
 // both merged first.)
-export const HADRON_SERVER_VERSION = '0.57.0';
+// 0.58.0 — BREAKING (behaviour; SDL deprecations, no removal) (#5404, cor:acl:140:02, cor:agt:010:01): the two UNSIGNED App grants end.
+// (1) Ruling 0083's App write grant (#2484) and #2883's per-automation read grant authorize nothing, and the migration deletes their rows and
+// event rows at deploy (no carry, no re-sign): a userless run that wrote or read through one is refused until the memory's owner signs the
+// replacement. (2) New grant action `memory.write` (ADDITIVE, through `createGrant` and the signing ceremony): an App's userless runs create
+// and edit nodes in the memories it names (`memory`: an id or a list, no wildcard, no organization) under `prefix` (`*`, the whole of
+// every named memory, or one loc when `memory` names exactly one); signed by whoever manages every named memory, its targets judged by
+// 0083's rule at grant and at every write. (3) The six doors (`setAppMemoryWriteGrant`, `revokeAppMemoryWriteGrant`,
+// `appMemoryWriteGrants`, `setAutomationReadGrant`, `revokeAutomationReadGrant`, `automationReadGrants`) and the three MCP
+// `hadron_*_automation_read_grant` tools refuse every call with `DOOR_RETIRED` (`extensions.replacement` names `memory.read` or
+// `memory.write`); they are deprecated in the SDL and removed once a CLI release carrying hadron-cli#3319 ships.
+// `AutomationApproval.readGrants` is always empty (deprecated). (4) A run carrying a user id no longer reads through #2883's grant: a
+// user-backed run reads only what its user reads. (0.56.0 is #5391 and 0.57.0 is #5441, both merged first.)
+export const HADRON_SERVER_VERSION = '0.58.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

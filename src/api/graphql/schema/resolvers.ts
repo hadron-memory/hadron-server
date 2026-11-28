@@ -6,8 +6,7 @@ import { registerRolePickQueries } from './resolvers.registerRolePick.js';
 import { registerRoleCandidateQueries } from './resolvers.registerRoleCandidates.js';
 import { actionRegisterIndexQueries } from './resolvers.actionRegisterIndex.js';
 import { automationPinQueries, automationPinMutations } from './resolvers.automationPin.js';
-import { appWriteGrantQueries, appWriteGrantMutations } from './resolvers.appWriteGrant.js';
-import { automationReadGrantQueries, automationReadGrantMutations } from './resolvers.automationReadGrant.js';
+import { retiredGrantDoorQueries, retiredGrantDoorMutations } from './resolvers.retiredGrantDoors.js';
 // GraphQL resolver map — thin assembler.
 //
 // The implementation was split out of this file (originally ~11k lines) into
@@ -280,8 +279,7 @@ export const resolvers = {
     ...dashboardQueries,
     ...appRunQueries,
     ...automationPinQueries,
-    ...appWriteGrantQueries,
-    ...automationReadGrantQueries,
+    ...retiredGrantDoorQueries,
     ...runTeamSnapshotQueries,
     ...connectionGrantQueries,
     ...principalGrantQueries,
@@ -301,8 +299,7 @@ export const resolvers = {
     ...dashboardMutations,
     ...appRunMutations,
     ...automationPinMutations,
-    ...appWriteGrantMutations,
-    ...automationReadGrantMutations,
+    ...retiredGrantDoorMutations,
     ...meteringMutations,
     ...ownerLimitMutations,
     ...rateLimitMutations,
