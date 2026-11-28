@@ -20,6 +20,7 @@ import { retiredGrantDoorQueries, retiredGrantDoorMutations } from './resolvers.
 // `Context` is re-exported so existing importers (mcp/server.ts + the resolver
 // test suite, ~80 files) keep importing it from './resolvers.js' unchanged.
 import { passkeyQueries } from './resolvers.passkeys.js';
+import { withBranchNodeGuard } from './branchNodeFields.js';
 import { withInstallConcealment } from './installMemory.js';
 import { withInheritedNodeProjection } from './resolvers.inheritedNode.js';
 import { type Context } from './resolvers.helpers.js';
@@ -185,7 +186,7 @@ export const resolvers = {
   // #1885: an inherited node shows its content and nothing of the base
   // tenant's records (resolvers.inheritedNode.ts).
   // #2064: a non-participant's install-memory write response reads empty (installMemory.ts).
-  Node: withInstallConcealment(withInheritedNodeProjection({ ...typeResolvers.Node, ...nodeApprovalFieldResolvers.Node, ...nodeAttributionFieldResolvers.Node, ...commentFieldResolvers.Node, ...signingFieldResolvers.Node })),
+  Node: withInstallConcealment(withBranchNodeGuard(withInheritedNodeProjection({ ...typeResolvers.Node, ...nodeApprovalFieldResolvers.Node, ...nodeAttributionFieldResolvers.Node, ...commentFieldResolvers.Node, ...signingFieldResolvers.Node }))),
   // #1632: signing requests and signatures.
   CreditBalance: meteringTypeResolvers.CreditBalance,
   SigningRequest: signingFieldResolvers.SigningRequest,

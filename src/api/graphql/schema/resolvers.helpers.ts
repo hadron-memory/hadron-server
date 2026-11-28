@@ -1,7 +1,8 @@
 import { registerOwnRightReader } from '../../../lib/appMemoryLinks.js';
 import { registerWriteGrantGiverCheck } from '../../../lib/grants/writeGrant.js';
 import { MANAGED_MEMORY_SELECT, managesGrantMemory } from '../../../lib/grants/memoryManager.js';
-import { grantReadReachFor } from '../../../lib/grants/readGrant.js';
+import { grantReadReachFor, grantReadReachDetailFor } from '../../../lib/grants/readGrant.js';
+import { type BranchScopes, NO_BRANCHES, branchOnly } from '../../../lib/grants/branchRead.js';
 import { currentAgentOrgMember } from '../../../lib/auth/personalOrgAgentInstall.js';
 import { requireOrgRole, isAppParticipant } from '../../../lib/auth/appParticipantRead.js';
 import { endGrantsOfAgentsNoLongerInstalled, importedPairsOfParent } from '../../../lib/grants/agentInstallDeparture.js';
@@ -206,6 +207,8 @@ export interface Context {
   // response's edges overwhelmingly share a few endpoint memories, so each
   // distinct memory is checked once per request (see canReadMemoryCached).
   memoryReadCache?: Map<string, Promise<boolean>>;
+  /** #5412 section 5: the caller's branch-only memories ({@link nodeBranchScopes}), once per request. */
+  branchScopeCache?: Promise<BranchScopes>;
   // Request-scoped memo for the caller's APP-DERIVED memory ids (#1092). The
   // fold costs several queries per App and the node gate runs on nearly every
   // read surface, so it is computed at most once per request. Independent of
@@ -543,6 +546,31 @@ export function isMemoryReadableCached(ctx: Context, memoryId: string): Promise<
     pending.catch(() => { if (cache.get(memoryId) === pending) cache.delete(memoryId); });
   }
   return pending;
+}
+
+/**
+ * #5412 section 5: the memories this caller reads ONLY through `branch` grants, each with its loc prefixes. A memory the caller
+ * also reaches whole (any route of {@link getAccessibleMemoryIds}) is never in it: the whole route wins. These memories are NOT in
+ * the per-memory reach set, so every per-memory gate refuses them; only the node surfaces (point read, listing, search) consult
+ * this map. A node whose memory is a key here is a branch-only node: its derived fields are filtered or empty.
+ */
+export function nodeBranchScopes(ctx: Context): Promise<BranchScopes> {
+  if (ctx.branchScopeCache) return ctx.branchScopeCache;
+  const pending = (async (): Promise<BranchScopes> => {
+    const detail = await grantReadReachDetailFor(ctx.db, ctx);
+    if (detail.branches.size === 0) return NO_BRANCHES;
+    const whole = await getAccessibleMemoryIds(ctx, undefined, { publicTargetIds: [...detail.branches.keys()] });
+    return branchOnly(detail.branches, whole);
+  })();
+  ctx.branchScopeCache = pending;
+  // A rejection is not an answer: drop it so a one-shot fault is not replayed (#1327).
+  pending.catch(() => { if (ctx.branchScopeCache === pending) ctx.branchScopeCache = undefined; });
+  return pending;
+}
+
+/** #5412 section 5: is `memoryId` read only in part by this caller (a branch-only memory)? */
+export async function isBranchOnlyMemory(ctx: Context, memoryId: string): Promise<boolean> {
+  return (await nodeBranchScopes(ctx)).has(memoryId);
 }
 
 /**

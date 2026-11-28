@@ -74,6 +74,8 @@ import { resolveAppRunRef } from '../../../lib/entityRef/appRunRef.js';
 import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 import { resolveGrantRef } from '../../../lib/entityRef/grantRef.js';
 import { getGrantForWorker } from '../../../lib/grants/read.js';
+import { branchAdmitsLoc } from '../../../lib/grants/readGrant.js';
+import { nodeScopeWhere, branchesWithin, branchSqlRows, branchRestrictionWhere, NO_BRANCHES, type BranchScopes } from '../../../lib/grants/branchRead.js';
 import { resolveGrantReader } from './resolvers.grant.js';
 import { requireWorkerProfileAccess } from './resolvers.worker.js';
 import { withReadableTask } from './resolvers.agentTask.js';
@@ -111,6 +113,7 @@ import {
   readAiServiceConfigByUrn,
   aiConfigOwnerOf,
   nonNegativeTake,
+  nodeBranchScopes,
 } from './resolvers.helpers.js';
 import { loadAiConfigOwners, aiConfigOwnerKey } from '../../../lib/aiConfigOwner.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
@@ -192,6 +195,42 @@ export interface FindNodesArgs {
  * who may read what. Returns the gated ids BEFORE system-memory inheritance (`effectiveScope`), which
  * each caller applies itself. An empty list is the one answer for an unreadable, missing or empty scope.
  */
+/**
+ * #5412 section 5: the branch-only memories a `findNodes` call may search, narrowed exactly as {@link resolveNodeReadScopeIds}
+ * narrows the whole ones (named memories, memory classes with system hidden from a broad search, the organization). A
+ * `childrenOf` listing never reaches them (closed, gate condition 5). Kept apart from the shared helper so the loc-segments read,
+ * which also uses that helper, never sees a branch-only memory.
+ */
+async function findNodesBranchScope(
+  ctx: Context,
+  f: { memoryRefs?: string[] | null; memoryClasses?: string[] | null; isRunnable?: boolean | null; childrenOf?: string | null },
+  orgScopeId: string | null,
+): Promise<BranchScopes> {
+  if (f.childrenOf != null) return NO_BRANCHES;
+  const all = await nodeBranchScopes(ctx);
+  if (all.size === 0) return NO_BRANCHES;
+  const explicitIds = !!(f.memoryRefs && f.memoryRefs.length > 0);
+  let ids = [...all.keys()];
+  if (explicitIds) {
+    const requested = new Set((await Promise.all(f.memoryRefs!.map((ref) =>
+      isId(ref) ? Promise.resolve(ref) : resolveMemoryRef(ctx.db, ref).then((r) => r.id).catch(() => null),
+    ))).filter((id): id is string => id !== null));
+    ids = ids.filter((id) => requested.has(id));
+    if (ids.length === 0) return NO_BRANCHES;
+  }
+  const memClassClause: unknown =
+    f.memoryClasses && f.memoryClasses.length > 0 ? { in: f.memoryClasses } : (!explicitIds ? { not: 'system' } : undefined);
+  const rows = await ctx.db.memory.findMany({
+    where: {
+      id: { in: ids }, deletedAt: null,
+      ...(memClassClause ? { class: memClassClause as never } : {}),
+      ...(orgScopeId ? { organizationId: orgScopeId, ...(f.isRunnable === true ? { appId: null } : {}) } : {}),
+    },
+    select: { id: true },
+  });
+  return branchesWithin(all, rows.map((r) => r.id));
+}
+
 export async function resolveNodeReadScopeIds(
   ctx: Context,
   f: { memoryRefs?: string[] | null; memoryClasses?: string[] | null; isRunnable?: boolean | null },
@@ -456,6 +495,12 @@ export async function nodeRevisionsScope(ctx: Context, nodeRef: string) {
  * or userless run, one named memory at a time. A filter without an `in` list
  * fails closed.
  */
+/** The memory ids of a {@link memoryAccessFilter} result; any other shape fails closed (no ids). */
+function accessIdsOf(access: Awaited<ReturnType<typeof memoryAccessFilter>>): string[] {
+  const m = access.memoryId as { in?: unknown } | undefined;
+  return m && typeof m === 'object' && Array.isArray(m.in) ? (m.in as string[]) : [];
+}
+
 async function nodeReadMemoryAllowed(
   ctx: Context,
   access: Awaited<ReturnType<typeof memoryAccessFilter>>,
@@ -1245,6 +1290,11 @@ export const nodeQueries = {
       // Denied ≡ not-found (null) — same non-disclosure the old queries had.
       // #4139: the gate is shared with nodeExport (nodeReadMemoryAllowed).
       const allowed = (memoryId: string): Promise<boolean> => nodeReadMemoryAllowed(ctx, access, memoryId);
+      // #5412 section 5: a memory read only through `branch` grants admits a node inside its branch and nothing else; outside the
+      // branch every form below ends in the same null as a missing node (no inheritance, no other answer).
+      const branches = await nodeBranchScopes(ctx);
+      const admits = async (memoryId: string, loc: string): Promise<boolean> =>
+        (await allowed(memoryId)) || branchAdmitsLoc(branches.get(memoryId), loc);
       // Decrypt + (unless raw) compile Mustache templates — shared tail of
       // every dispatch form. Generic so the full node row type flows through.
       const finish = async <T extends { id: string; loc: string; deletedAt: Date | null; content: string | null; data: unknown; memoryId: string }>(
@@ -1260,7 +1310,8 @@ export const nodeQueries = {
         const current = await withReconciledNodeRead(ctx.db, selected.id, selected.memoryId,
           async (tx, mayReconcile) => {
             const fresh = await (mayReconcile ? liveTxContext : liveReadSnapshotContext)(ctx, tx);
-            return isMemoryReadableCached(fresh, inheritedFrom?.via ?? selected.memoryId);
+            if (await isMemoryReadableCached(fresh, inheritedFrom?.via ?? selected.memoryId)) return true;
+            return !inheritedFrom && branchAdmitsLoc((await nodeBranchScopes(fresh)).get(selected.memoryId), selected.loc);
           },
           (tx) => tx.node.findUnique({ where: { id: selected.id }, include }),
           { timeoutMs: 5_000, maxWaitMs: 2_000 });
@@ -1269,7 +1320,7 @@ export const nodeQueries = {
           current.deletedAt ||
           current.memoryId !== selected.memoryId ||
           current.loc !== selected.loc ||
-          (!inheritedFrom && !(await allowed(current.memoryId)))
+          (!inheritedFrom && !(await admits(current.memoryId, current.loc)))
         ) return null;
         // An inherited selection is re-checked on the version actually served:
         // a base node turned boot prompt, or a child override added, since
@@ -1298,7 +1349,7 @@ export const nodeQueries = {
       // (findUnique can't carry deletedAt in its where, so guard post-fetch).
       if (isId(ref)) {
         const node = await ctx.db.node.findUnique({ where: { id: ref }, include });
-        if (!node || node.deletedAt || !(await allowed(node.memoryId))) return null;
+        if (!node || node.deletedAt || !(await admits(node.memoryId, node.loc))) return null;
         return finish(node);
       }
 
@@ -1335,7 +1386,7 @@ export const nodeQueries = {
           throw e;
         }
         const selected = await ctx.db.node.findUnique({ where: { id }, include });
-        return selected && !selected.deletedAt && (await allowed(selected.memoryId))
+        return selected && !selected.deletedAt && (await admits(selected.memoryId, selected.loc))
           ? finish(selected)
           : null;
       };
@@ -1359,12 +1410,14 @@ export const nodeQueries = {
         // the node-content gate this resolver already computed, so the
         // concealment costs no second authorization round (@copilot, #1350).
         const { id: scopedMemoryId } = await resolveMemoryRef(ctx.db, memoryRef);
-        if (!(await allowed(scopedMemoryId))) throw new MemoryNotFoundError(memoryRef);
+        const branchOnlyScope = branches.has(scopedMemoryId) && !(await allowed(scopedMemoryId));
+        if (!branchOnlyScope && !(await allowed(scopedMemoryId))) throw new MemoryNotFoundError(memoryRef);
         const node = await ctx.db.node.findFirst({
           where: { loc: value, memoryId: scopedMemoryId, deletedAt: null },
           include,
         });
         if (node) return finish(node);
+        if (branchOnlyScope) return null; // #5412: a branch-only memory never reads through to a base
         // #1885 (cor:dmo:050:14) — no node of its own at the loc: a system
         // memory reads through to the nearest base that passes one down.
         const effective = await findEffectiveNodeIdByLoc(ctx.db, scopedMemoryId, value);
@@ -1392,7 +1445,7 @@ export const nodeQueries = {
           select: { id: true },
         });
         if (memory) {
-          if (await allowed(memory.id)) {
+          if ((await allowed(memory.id)) || branches.has(memory.id)) {
             const node = await ctx.db.node.findFirst({
               where: { loc: urnLoc, memoryId: memory.id, deletedAt: null },
               include,
@@ -1412,7 +1465,7 @@ export const nodeQueries = {
       // soft-deleted rows so node(ref:) matches resolveUrn.
       const candidates = await ctx.db.node.findMany({
         // loc-scope-ok: deliberately cross-memory — scoped to the caller's readable set by ...access, then fails loud with AMBIGUOUS_NODE_LOC on >1 (#335)
-        where: { loc: value, ...access, deletedAt: null },
+        where: { loc: value, ...nodeScopeWhere(accessIdsOf(access), branches), deletedAt: null },
         include,
       });
       if (candidates.length === 0) return null;
@@ -1686,7 +1739,11 @@ export const nodeQueries = {
 
       // Shared with the loc-segments read (#3456): one readable-set computation.
       let scopeIds: string[] = await resolveNodeReadScopeIds(ctx, f, orgScopeId);
-      if (scopeIds.length === 0) {
+      // #5412 section 5: the memories this caller reads only through `branch` grants, narrowed by the same memory, class and
+      // organization filters. They join the scope AFTER the inheritance widening (a branch-only memory never reads through to a
+      // base), and every leg below restricts their rows to the branch inside the statement (sqlFilter / structuredWhere).
+      const branchScope = await findNodesBranchScope(ctx, f, orgScopeId);
+      if (scopeIds.length === 0 && branchScope.size === 0) {
         return { hits: [], passages: [], total: 0, reason: null, degraded: null };
       }
       // #1885 (cor:dmo:050:14) — a system memory in the scope reads as its
@@ -1694,7 +1751,10 @@ export const nodeQueries = {
       // URNs and marked inherited, and a base's overridden nodes and boot
       // prompts stay out. Widened only from memories already gated above.
       const inheritance = await effectiveScope(ctx.db, scopeIds);
-      scopeIds = inheritance.memoryIds;
+      // Whole memories only: recovery, `expand` neighbours (closed to a branch-only memory, Xan condition 5).
+      const wholeScopeIds = inheritance.memoryIds;
+      scopeIds = [...wholeScopeIds, ...[...branchScope.keys()].filter((id) => !wholeScopeIds.includes(id))];
+      const branchWhere = branchRestrictionWhere(branchScope);
       const inheritanceExcluded = new Set(inheritance.excludeNodeIds);
       const syntheticCommentMemoryIds = [...inheritance.inheritedFrom.keys()];
       const threadWhere = openThreadsWhere(f.hasOpenThreads, syntheticCommentMemoryIds);
@@ -1704,7 +1764,7 @@ export const nodeQueries = {
       // so query results respect them exactly like the list does.
       const contentScope = effectiveContentScope(f);
       const scopeWhere = contentScopeWhere(contentScope);
-      const recoverableIds = f.includeDeleted ? await recoveryMemoryIds(ctx, scopeIds) : [];
+      const recoverableIds = f.includeDeleted ? await recoveryMemoryIds(ctx, wholeScopeIds) : [];
       const structuredWhere: Record<string, unknown> = {
         ...(f.includeDeleted ? {} : { deletedAt: null }),
         // Explicit nodeType wins; otherwise exclude the unqualified-search
@@ -1737,6 +1797,7 @@ export const nodeQueries = {
         // comments; #1608 (cor:dmo:110:08) — content, comments or both, CONTENT
         // by default. Both ride AND so neither clobbers the nodeType key above.
         AND: [
+          ...(branchWhere ? [branchWhere] : []),
           ...(f.includeDeleted ? [{ OR: [{ deletedAt: null }, { memoryId: { in: recoverableIds }, nodeType: { not: COMMENT_NODE_TYPE } }] }] : []),
           ...(f.minted != null ? [mintedPrismaWhere(f.minted)] : []),
           ...(f.approvalState != null || f.minted != null ? [{ nodeType: { not: COMMENT_NODE_TYPE } }] : []),
@@ -1763,6 +1824,7 @@ export const nodeQueries = {
       // (the Prisma form) but adds the JSONB `where`, which Prisma can't express.
       const sqlFilter: NodeSqlFilter = {
         ...(f.includeDeleted ? { tombstoneMemoryIds: recoverableIds } : {}),
+        ...(branchScope.size > 0 ? { branches: branchSqlRows(branchScope) } : {}),
         nodeType: f.nodeType ?? null,
         nodeTypes,
         objectType: f.objectType ?? null,
@@ -1993,7 +2055,7 @@ export const nodeQueries = {
         if (expandDepth > 0 && pageRows.length > 0) {
           const shown = new Set(pageRows.map((n) => n.id));
           const neighbourIds = (await expandWithNeighbors(
-            ctx.db, pageRows.map((n) => n.id), expandDepth, { memoryIds: scopeIds },
+            ctx.db, pageRows.map((n) => n.id), expandDepth, { memoryIds: wholeScopeIds },
           )).filter((id) => !shown.has(id) && !inheritanceExcluded.has(id));
           if (neighbourIds.length > 0) {
             // Neighbours are deliberately UNFILTERED (appended context), but
@@ -2004,7 +2066,7 @@ export const nodeQueries = {
             // governed edge must not pull it into a content search, or its
             // target into a comments-only one (cor:dmo:110:08).
             const nRows = await ctx.db.node.findMany({
-              where: { id: { in: neighbourIds }, memoryId: { in: scopeIds }, deletedAt: null, ...((scopeWhere || threadWhere) ? { AND: [...(scopeWhere ? [scopeWhere] : []), ...(threadWhere ? [threadWhere] : [])] } : {}) },
+              where: { id: { in: neighbourIds }, memoryId: { in: wholeScopeIds }, deletedAt: null, ...((scopeWhere || threadWhere) ? { AND: [...(scopeWhere ? [scopeWhere] : []), ...(threadWhere ? [threadWhere] : [])] } : {}) },
               include: nodeInclude,
             });
             await decryptNodesBatch(ctx.db, nRows);
@@ -2060,10 +2122,10 @@ export const nodeQueries = {
         if (expandDepth > 0 && pageRows.length > 0) {
           const shown = new Set(pageRows.map((n) => n.id));
           const neighbourIds = (await expandWithNeighbors(
-            ctx.db, pageRows.map((n) => n.id), expandDepth, { memoryIds: scopeIds },
+            ctx.db, pageRows.map((n) => n.id), expandDepth, { memoryIds: wholeScopeIds },
           )).filter((id) => !shown.has(id) && !inheritanceExcluded.has(id));
           if (neighbourIds.length > 0) {
-            const nRows = await ctx.db.node.findMany({ where: { id: { in: neighbourIds }, memoryId: { in: scopeIds }, deletedAt: null, ...((scopeWhere || threadWhere) ? { AND: [...(scopeWhere ? [scopeWhere] : []), ...(threadWhere ? [threadWhere] : [])] } : {}) }, include: nodeInclude }); // #1608
+            const nRows = await ctx.db.node.findMany({ where: { id: { in: neighbourIds }, memoryId: { in: wholeScopeIds }, deletedAt: null, ...((scopeWhere || threadWhere) ? { AND: [...(scopeWhere ? [scopeWhere] : []), ...(threadWhere ? [threadWhere] : [])] } : {}) }, include: nodeInclude }); // #1608
             await decryptNodesBatch(ctx.db, nRows);
             const nById = new Map(nRows.map((n) => [n.id, n]));
             for (const id of neighbourIds) { const n = nById.get(id); if (n) hits.push({ node: n, score: null, vector: null }); }
