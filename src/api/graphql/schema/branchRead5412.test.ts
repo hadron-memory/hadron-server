@@ -181,6 +181,23 @@ describe('listing and search: findNodes', () => {
     for (const h of r.data!.findNodes.hits) expect(h.node.outgoingEdges).toEqual([]);
   });
 
+  it('expand (search neighbours) adds nothing from a branch-only memory, inside or outside the branch (closed)', async () => {
+    const { m, outside } = await branchWorld();
+    for (const expand of [1, 2, 3]) {
+      const r = await gql(`query($mem: [ID!], $expand: Int) { findNodes(query: "marker", mode: keyword, filter: { memoryRefs: $mem }, expand: $expand) {
+        total hits { node { id loc } } } }`, { mem: [m.id], expand });
+      expect(r.errors).toBeUndefined();
+      expect(locs(r)).toEqual(['docs', 'docs:api', 'docs:api:v1']);
+      for (const n of Object.values(outside)) expect(JSON.stringify(r)).not.toContain(n.id);
+    }
+    // The control: with a whole grant beside the branch (the whole route wins), the same query appends the outside neighbour, which
+    // is no keyword hit itself ('marker' is not in its text), so it arrives only through expand.
+    await activeGrant({ memory: m.id });
+    const ctl = await gql(`query($mem: [ID!]) { findNodes(query: "marker", mode: keyword, filter: { memoryRefs: $mem }, expand: 1) {
+      hits { node { id } } } }`, { mem: [m.id] });
+    expect(JSON.stringify(ctl)).toContain(outside.secret.id);
+  });
+
   it('childrenOf never reaches a branch-only memory (closed)', async () => {
     const { m } = await branchWorld();
     expect(locs(await gql(FIND, { mem: [m.id], children: 'docs' }))).toEqual([]);

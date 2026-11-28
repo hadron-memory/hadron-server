@@ -166,6 +166,17 @@ describe('hadron_find_nodes', () => {
     }
   });
 
+  it('expand (graph neighbours) adds nothing from outside the branch', async () => {
+    const w = await branchWorld();
+    for (const expand of [1, 2, 3]) {
+      const out = await call('hadron_find_nodes', { query: 'marker', mode: 'keyword', memoryUrn: w.memUrn, expand });
+      expect(out).toContain(w.inside.api.id);
+      expectNoOutside(out, w);
+    }
+    await activeGrant({ memory: w.m.id });
+    expect(await call('hadron_find_nodes', { query: 'marker', mode: 'keyword', memoryUrn: w.memUrn, expand: 1 })).toContain(w.outside.secret.id);
+  });
+
   it('a keyword only outside the branch finds nothing', async () => {
     const w = await branchWorld();
     expect(await call('hadron_find_nodes', { query: 'SECRET', mode: 'keyword', memoryUrn: w.memUrn })).not.toContain(w.outside.secret.id);

@@ -387,7 +387,16 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // `memory.write`); they are deprecated in the SDL and removed once a CLI release carrying hadron-cli#3319 ships.
 // `AutomationApproval.readGrants` is always empty (deprecated). (4) A run carrying a user id no longer reads through #2883's grant: a
 // user-backed run reads only what its user reads. (0.56.0 is #5391 and 0.57.0 is #5441, both merged first.)
-export const HADRON_SERVER_VERSION = '0.58.0';
+// 0.59.0 — ADDITIVE + behaviour (#5412, cor:acl:140:02, cor:acl:140:09): `memory.read` takes two OPTIONAL parameters, accepted by
+// `createGrant` only while MEMORY_READ_GRANT_OPTIONS_ENABLED is exactly `true` (the read judge honours them whatever the switch says):
+// `branch` (one loc, on the one-memory form only) reads that loc and below it on a `:` boundary, and `automation` (one live schedule or
+// webhook of the App) reaches only the userless runs whose root trigger it is, never a key. An absent key restricts nothing; a present
+// malformed or unknown key makes the grant reach nothing. `GrantActionParameter.optional` (new, non-null) says which parameters may be left
+// out, and the grant sentence names each restriction present. A memory reached ONLY through branch grants is readable only on the node
+// surfaces (GraphQL `node(ref)`, `findNodes`; MCP `hadron_get_node`, `hadron_get_nodes`, `hadron_list_nodes`, `hadron_find_nodes`) and only
+// inside the branch; every other surface treats it as unreadable and memory lists leave it out. Behaviour: `hadron_find_nodes` now carries
+// the App key into its delegated search, so a pure App key's whole-memory read grants also reach MCP search (they already reached GraphQL).
+export const HADRON_SERVER_VERSION = '0.59.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,
