@@ -244,7 +244,6 @@ describe('the chat path', () => {
     const created = await M.createAgent({}, { orgRef: org.id, name: 'chat-agent', visibility: 'ORGANIZATION' }, ctx(admin, ['ADMIN']));
     chatAgent = { id: created.id, systemMemoryId: created.systemMemoryId! };
     for (const [loc, data, content] of [
-      ['conversations', null, null],
       ['conversations:main', { stageOrder: ['s1'] }, null],
       ['conversations:main:s1', {}, 'prompt main/s1'],
     ] as const) {
@@ -253,7 +252,7 @@ describe('the chat path', () => {
     await db.appAgent.create({ data: { appId: app.id, agentId: chatAgent.id } });
     await serveEveryAgent(db);
   });
-  const start = (args: Record<string, unknown>, c: Context = asMember()) => M.startChat(null, { agentRef: chatAgent.id, scope: 'shared', ...args }, c);
+  const start = (args: Record<string, unknown>, c: Context = asMember()) => M.startChat(null, { agentRef: chatAgent.id, appRef: app.id, scope: 'shared', ...args }, c);
 
   // loc-scope-ok: a count over every memory, to prove that a refused start left no chat anywhere.
   const chatCount = () => db.node.count({ where: { loc: { startsWith: 'chats:' }, nodeType: { not: 'message' }, name: { not: 'messages' } } });
@@ -329,9 +328,11 @@ describe('the chat path', () => {
       expect(await counts()).toEqual(before);
     }
     // Retain the no-App refusal leg with a lawful direct manager and no installed App.
+    // #5394: before, the manager's direct route reached the choice check and refused AiServiceConfigNotFoundError. The
+    // route is retired: the start is now refused like an unknown Agent, still before any write.
     await db.appAgent.delete({ where: { appId_agentId: { appId: app.id, agentId: chatAgent.id } } });
     const noAppBefore = await counts();
-    expect(await code(start({ scope: 'private', aiConfigChoice: claude.id }, asAdmin()))).toBe('AiServiceConfigNotFoundError');
+    expect(await code(start({ scope: 'private', aiConfigChoice: claude.id }, asAdmin()))).toBe('AgentNotFoundError');
     expect(await counts()).toEqual(noAppBefore);
     await db.appAgent.create({ data: { appId: app.id, agentId: chatAgent.id } });
     // The AppMember's own config is accepted and the cold start provisions in that App.
@@ -369,11 +370,26 @@ describe('the chat path', () => {
     });
     const absent = generateId();
     const spellings = [orgConfig.id, orgConfig.id.toUpperCase(), orgConfig.id.toLowerCase(), absent]; // no spelling is echoed (#5168)
-    const starts = await Promise.all(spellings.map(id => refusal(id, () => start({ scope: 'private', aiConfigChoice: id }))));
+    // #5394: before, the manager's start with no installed App provisioned a no-App home, and the choice was refused
+    // there. That route is retired: under the named App, which no longer installs the Agent, every spelling is refused
+    // like an unknown Agent, one answer that echoes no spelling and nothing config-derived.
+    const starts = await Promise.all(spellings.map(id => start({ scope: 'private', aiConfigChoice: id }).then(() => null, (e: any) => {
+      expect(e.name).toBe('AgentNotFoundError');
+      const whole = JSON.stringify({ name: e.name, ...(typeof e.toJSON === 'function' ? e.toJSON() : { message: e.message }) });
+      expect(whole).not.toContain(id);
+      for (const derived of [orgConfig.name, orgConfig.model, orgConfig.provider, orgConfig.apiKeyPreview!, KEY]) expect(whole).not.toContain(derived);
+      return whole;
+    })));
     expect(new Set(starts).size).toBe(1);
-    expect(starts[0]).toContain('AiServiceConfigNotFoundError');
+    expect(starts[0]).not.toBeNull();
+    // #5394: the send half still holds for a no-App chat written before the route was retired. Make one the way the
+    // retired route left it (class knowledge, no App, no owner column, ORGANIZATION), from a chat started under the App.
+    await db.appAgent.create({ data: { appId: app.id, agentId: chatAgent.id } });
     const { chatId } = await start({ scope: 'private' });
-    expect((await db.memory.findUniqueOrThrow({ where: { id: (await chatNodeByLocOrThrow(db, chatId)).memoryId } })).appId).toBeNull();
+    const legacyHome = (await chatNodeByLocOrThrow(db, chatId)).memoryId;
+    await db.memory.update({ where: { id: legacyHome }, data: { class: 'knowledge', userId: null, appId: null, visibility: 'ORGANIZATION' } });
+    await db.appAgent.deleteMany({ where: { agentId: chatAgent.id } });
+    expect((await db.memory.findUniqueOrThrow({ where: { id: legacyHome } })).appId).toBeNull();
     const sends = await Promise.all(spellings.map(id => refusal(id, () => M.sendChatMessage(null, { chatId, userMessage: 'x', aiConfigChoice: id }, asMember()))));
     expect(new Set(sends).size).toBe(1);
     expect(sends[0]).toContain('AiServiceConfigNotFoundError');

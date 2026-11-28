@@ -257,6 +257,26 @@ export async function summaryFor(ctx: Context, tx: Prisma.TransactionClient, g: 
       }
       continue;
     }
+    if (p.type === 'memory-ref') {
+      // #5321 (memory.read's two forms): a single value that is the grant's App's own organization shows as that organization's
+      // canonical URN (form (a)); otherwise each named memory shows as its canonical memory URN (form (b)). A memory the prover cannot
+      // read, a gone one, and any other id make the sentence unsignable, never a guess.
+      const value = values[p.name];
+      if (typeof value === 'string') {
+        const org = await tx.organization.findFirst({ where: { id: value, deletedAt: null, apps: { some: { id: g.app_id } } }, select: { urn: true } });
+        if (org) {
+          try { refs[value] = { urn: emitEntityUrnV2('org', org.urn) }; } catch { return null; }
+          continue;
+        }
+      }
+      for (const id of Array.isArray(value) ? value : [value]) {
+        if (typeof id !== 'string' || Object.prototype.hasOwnProperty.call(refs, id)) continue;
+        const memory = await tx.memory.findFirst({ where: { id, deletedAt: null }, select: { urn: true } });
+        if (!memory || !(await isMemoryReadableCached(ctx, id))) return null;
+        try { refs[id] = { urn: emitEntityUrnV2('mem', memory.urn) }; } catch { return null; }
+      }
+      continue;
+    }
     if (p.type !== 'node-ref') continue;
     // A single value or a list of them (a batch grant names several nodes): every entry is resolved behind the prover's read gate,
     // and one the prover cannot read withholds the whole sentence. Anything that is not an id is left for the renderer to refuse.

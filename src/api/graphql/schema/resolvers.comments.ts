@@ -240,7 +240,7 @@ async function mayComment(ctx: Context, memoryId: string): Promise<void> {
 async function mayModerate(ctx: Context, memoryId: string): Promise<void> {
   const memory = await ctx.db.memory.findUniqueOrThrow({
     where: { id: memoryId },
-    select: { class: true, userId: true, organizationId: true, ownerUserId: true },
+    select: { class: true, userId: true, organizationId: true, ownerUserId: true, userMemoryOfAgentId: true, createdBy: true },
   });
   try {
     await requireMemoryManageAccess(ctx, memory, 'ADMIN');

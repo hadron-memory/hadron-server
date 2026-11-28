@@ -32,10 +32,8 @@ async function seed() {
   });
   const team = await db.memory.create({ data: { name: 'team', urn: `${root}:team`, organizationId: org.id, appId: app.id, class: 'app' } });
   const nodes = [
-    { loc: 'conversations', name: 'conversations' },
     { loc: 'conversations:research', name: 'research', data: { stageOrder: ['scope'], isSetup: false } },
     { loc: 'conversations:research:scope', name: 'scope', data: { promptRef: 'prompts:research:scope' } },
-    { loc: 'prompts', name: 'prompts' },
     { loc: 'prompts:research', name: 'research' },
     { loc: 'prompts:research:scope', name: 'scope', content: 'Scope the research.' },
   ];
@@ -117,8 +115,11 @@ describe('#3354 item 3: a userless startChat skips the writable-item lookup and 
     } finally { spy.mockRestore(); }
     expect(await db.agentSubscription.count({ where: { agentId: fixture.agent.id } })).toBe(0);
   });
+  // #5394: this control started through the retired App-less (Agent manager) knowledge home with no App named. Now a
+  // user names the App (appRef) and must take part in it, so the control makes the user an AppMember of the fixture App.
   it('CONTROL: an ordinary user still starts a chat (the lookup is not removed for users)', async () => {
-    const out = await mutations.startChat({}, { agentRef: fixture.agent.id }, fixture.userContext);
+    await db.appMember.create({ data: { appId: fixture.app.id, userId: fixture.user.id, role: 'member' } });
+    const out = await mutations.startChat({}, { agentRef: fixture.agent.id, appRef: fixture.app.id }, fixture.userContext);
     expect(out.chatId).toMatch(/^chats:/);
   });
 });

@@ -1,26 +1,17 @@
 /**
- * #5185 (A3 of #5182; cor:dmo:060:20, Exceptions, "An attached memory"): what an App's links let its key read.
+ * #5185 (A3 of #5182; cor:dmo:060:20, Exceptions, "An attached memory"), narrowed by #5321 (cor:dmo:060:22, cor:acl:140:02): an
+ * App's links are its scope list, and give no access. Since #5321 the App reads outside its own memories only through a
+ * `memory.read` grant (src/lib/grants/readGrant.ts), never through a link; the reach this module once gave a pure key or a
+ * userless run (`linkedMemoryReach`, `linkedReachFor`) is gone.
  *
- * `attachMemoryToApp` writes a row in `app_memory_links` and changes nothing on the memory. This module is the ONE place that
- * judges those rows, at use, for both read surfaces (GraphQL's `getAccessibleMemoryIds` and MCP's `getPrincipalAppMemoryAccess`
- * and `canReadMemoryRow`):
- *
- *  - The reach is READ only, and only for a PURE App key or a userless run of the App: no user (with or without the App
- *    selected), no impersonation, no session-bound key (session isolation stays whole), and no run that carries a user id.
- *  - A link counts only while the App is live and installed, the memory is live and not `system`, and the ATTACHER can read
- *    the memory NOW in their own right (not through any App-derived reach: `holdsContentReadIndependently`, #1349). A row whose
- *    attacher lost read stays, inert; restoring the read restores the reach.
- *  - For `personal` and `private` the link reaches the key only when the memory's owner is the App's owner AND the owner made
- *    the link (a user-owned App whose owner linked their own memory). In an organization's App, or for another person's memory shared with the attacher,
- *    the link grants nothing (Victor's reading of Holger's rulings, Proposed in the spec). A run never reads a `private`
- *    memory, linked or not (#1719 R5a).
- *
- * A link deliberately bypasses the strict-owner folds (`admissibleFoldRows` rules 2 and 3, the `appDerivedMemoryIds` class
- * filter, the `ownerUserId` early return of `canReadMemoryRow`): the attach is the only consent step, and this module is the
- * only judge, so a caller of it must not re-derive the rule.
+ * What stays here: `judgeAppLinks`, which says whether each link is ACTIVE (shown as `AppAttachedMemory.active`): the App is live
+ * and installed, the memory is live and not `system`, and the ATTACHER can read the memory NOW in their own right
+ * (`holdsContentReadIndependently`, #1349, registered by the GraphQL helpers; with none registered every link is inactive, failing
+ * closed). For `personal` and `private` a link is active only when the memory's owner is the App's owner and made the link.
+ * Since #5345 a link to any other USER-OWNED memory (`ownerUserId` set) is inactive too; with #5321 that changes only what
+ * `active` shows, since no link reads. `isPureAppKeyShape` and `readsInOwnRight` are shared with the grant judge.
  */
 import type { PrismaClient } from '../generated/prisma/index.js';
-import { isRunPrincipal } from './auth/runPrincipal.js';
 
 /**
  * "Reads it in their own right" is `holdsContentReadIndependently` (#1349), which lives with the GraphQL read gate. This module
@@ -34,7 +25,18 @@ export function registerOwnRightReader(reader: OwnRightReader | null): void {
   if (reader) warnedNoReader = false;
 }
 
-/** The principal shape the link reach applies to: an App key or a userless run, nothing else. */
+/**
+ * #5321: does `userId` read `memoryId` NOW in their own right (`holdsContentReadIndependently`)? The read-grant judge
+ * (src/lib/grants/readGrant.ts) asks it of a grant's giver at every read. False while the GraphQL helpers have not
+ * registered the reader, and false when the judgement throws (fail closed).
+ */
+export async function readsInOwnRight(db: PrismaClient, userId: string, roles: unknown, memoryId: string): Promise<boolean> {
+  const holds = ownRightReader;
+  if (holds === null) return false;
+  return holds({ db, userId, roles: roles as never }, memoryId).catch(() => false);
+}
+
+/** The principal shape a grant read applies to: an App key or a userless run, nothing else. */
 export function isPureAppKeyShape(auth: {
   appId?: string | null; userId?: string | null; sessionId?: string | null; impersonation?: unknown; sessionBindingRefused?: boolean;
 }): boolean {
@@ -46,8 +48,9 @@ export type JudgedLink = { memoryId: string; attachedBy: string; active: boolean
 
 /**
  * Judge the App's link rows (or those of `onlyMemoryIds`) at use. A row whose App is deleted or uninstalled, whose memory is
- * gone or `system`, whose attacher no longer reads the memory in their own right, or (personal/private) whose memory is not
- * the App owner's is inactive; it is still returned, so a listing can say so.
+ * gone or `system`, whose attacher no longer reads the memory in their own right, (personal/private) whose memory is not
+ * the App owner's, or (#5345) whose memory is user-owned of another class is inactive; it is still returned, so a listing
+ * can say so.
  */
 export async function judgeAppLinks(
   db: PrismaClient,
@@ -60,7 +63,7 @@ export async function judgeAppLinks(
     where: { appId, ...(opts.onlyMemoryIds ? { memoryId: { in: [...opts.onlyMemoryIds] } } : {}) },
     select: {
       memoryId: true, attachedBy: true,
-      memory: { select: { class: true, userId: true, deletedAt: true } },
+      memory: { select: { class: true, userId: true, ownerUserId: true, deletedAt: true } },
       attacher: { select: { roles: true, deletedAt: true } },
     },
   });
@@ -77,6 +80,13 @@ export async function judgeAppLinks(
       // attach of the owner's memory grants the key nothing.
       return app!.ownerUserId !== null && link.memory.userId === app!.ownerUserId && link.attachedBy === app!.ownerUserId;
     }
+    // #5345: a user-owned memory of any other class never reaches a key through a link (cor:dmo:060:22 — attaching gives
+    // no access, the #5258/#5185 interim covering own personal/private only; cor:api:120:03 — a list equals the reads on
+    // every surface). The refusal keys on the tenant-owner axis, not `userId` and not the class. On main the record gate
+    // refused a knowledge/group row (no link arm in its `ownerUserId` branch), but node reads and `findNodes` read the
+    // accessible set, whose link arm is this judge, so they returned its nodes; an app-class row reached every read. This
+    // refusal removes all of those reads. An organization-owned link is unaffected. The row stays, inert like a lapsed one.
+    if (link.memory.ownerUserId !== null) return false;
     return true;
   };
   const holds = ownRightReader;
@@ -107,32 +117,4 @@ export async function judgeAppLinks(
     attachedBy: link.attachedBy,
     active: eligible(link) && (await verdicts.get(`${link.attachedBy}:${link.memoryId}`)) === true,
   })));
-}
-
-/**
- * The ids, among the App's links (or among `onlyMemoryIds`), that its key may read through a link right now. `run`: the
- * principal is a run, which never reads a `private` memory (#1719 R5a), linked or not.
- */
-export async function linkedMemoryReach(
-  db: PrismaClient,
-  appId: string,
-  opts: { onlyMemoryIds?: readonly string[]; run?: boolean } = {},
-): Promise<Set<string>> {
-  const judged = await judgeAppLinks(db, appId, opts);
-  const ids = new Set(judged.filter((l) => l.active).map((l) => l.memoryId));
-  if (opts.run && ids.size > 0) {
-    const privateRows = await db.memory.findMany({ where: { id: { in: [...ids] }, class: 'private' }, select: { id: true } });
-    for (const row of privateRows) ids.delete(row.id);
-  }
-  return ids;
-}
-
-/** Every id the pure-key shape may read through links, for a fold or a listing; empty for any other shape. */
-export async function linkedReachFor(
-  db: PrismaClient,
-  auth: { appId?: string | null; userId?: string | null; sessionId?: string | null; impersonation?: unknown; sessionBindingRefused?: boolean; clientId?: string | null },
-  onlyMemoryIds?: readonly string[],
-): Promise<Set<string>> {
-  if (!isPureAppKeyShape(auth)) return new Set();
-  return linkedMemoryReach(db, auth.appId!, { onlyMemoryIds, run: isRunPrincipal(auth) });
 }

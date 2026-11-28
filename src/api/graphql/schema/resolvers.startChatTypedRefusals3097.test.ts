@@ -22,6 +22,7 @@ const M = resolvers.Mutation as any;
 let admin: { id: string };
 let agent: { id: string };
 let systemMemoryId: string;
+let appId: string;
 
 const ctx = (): Context => ({ db, roles: ['ADMIN'], userId: admin.id }) as Context;
 
@@ -34,7 +35,7 @@ async function seedNode(loc: string, data: object | null = null, content: string
 
 async function expectRefusal(args: Record<string, unknown>, code: string, message: RegExp) {
   const nodesBefore = await db.node.count();
-  const err = await M.startChat(null, { agentRef: agent.id, ...args }, ctx()).then(() => null, (e: unknown) => e);
+  const err = await M.startChat(null, { agentRef: agent.id, appRef: appId, ...args }, ctx()).then(() => null, (e: unknown) => e);
   expect(err).toBeInstanceOf(ChatScopeError);
   expect((err as ChatScopeError).extensions.code).toBe(code);
   expect((err as ChatScopeError).message).toMatch(message);
@@ -50,6 +51,8 @@ beforeEach(async () => {
   const created = await M.createAgent({}, { orgRef: org.id, name: 'chat-agent', visibility: 'ORGANIZATION' }, ctx());
   agent = { id: created.id };
   systemMemoryId = created.systemMemoryId!;
+  // #5394: a start names its App; this one installs the Agent and the user takes part in it.
+  appId = (await db.app.create({ data: { id: generateId(), name: 'app-3097', urn: 'org-3097:app-3097', organizationId: org.id, appAgents: { create: { agentId: created.id } }, members: { create: { userId: admin.id, role: 'member' } } } })).id;
   await serveEveryAgent(db);
 });
 
@@ -59,28 +62,24 @@ describe('#3097: startChat refuses the empty conversation states with a typed co
   });
 
   it('a named conversation that does not exist is CONVERSATION_NOT_FOUND', async () => {
-    await seedNode('conversations');
     await seedNode('conversations:qa', { stageOrder: ['s1'] });
     await expectRefusal({ conversationName: 'missing' }, 'CONVERSATION_NOT_FOUND', /^Conversation not found/); // #5168: the name is not quoted back
   });
 
   it('a conversation with no stages is CONVERSATION_HAS_NO_STAGES', async () => {
-    await seedNode('conversations');
     await seedNode('conversations:qa', { stageOrder: [] });
     await expectRefusal({}, 'CONVERSATION_HAS_NO_STAGES', /"qa" has no stages/);
   });
 
   it('a conversation with no stageOrder at all is also CONVERSATION_HAS_NO_STAGES', async () => {
-    await seedNode('conversations');
     await seedNode('conversations:qa', null);
     await expectRefusal({ conversationName: 'qa' }, 'CONVERSATION_HAS_NO_STAGES', /"qa" has no stages/);
   });
 
   it('CONTROL: a conversation with a stage still starts the chat', async () => {
-    await seedNode('conversations');
     await seedNode('conversations:qa', { stageOrder: ['s1'] });
     await seedNode('conversations:qa:s1', {});
-    const out = await M.startChat(null, { agentRef: agent.id }, ctx());
+    const out = await M.startChat(null, { agentRef: agent.id, appRef: appId }, ctx());
     expect(out.chatId ?? out.id).toBeTruthy();
   });
 });

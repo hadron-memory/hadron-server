@@ -20,7 +20,7 @@ import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveUserRef } from '../../../lib/entityRef/userRef.js';
 import { repointMergedLedgerOwners } from '../../../lib/metering/repointMergedOwners.js';
 import { ownerWhere, type OwnerRef } from '../../../lib/owner.js';
-import { OrganizationNotFoundError } from '../../../lib/entityRef/errors.js';
+import { OrganizationNotFoundError, UserNotFoundError } from '../../../lib/entityRef/errors.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { generateId } from '../../../lib/id.js';
 import {
@@ -31,6 +31,7 @@ import {
   HOST_PRICED_PROVIDERS,
   IdempotencyConflictError,
   InvalidLedgerAmountError,
+  LedgerOwnerDeletedError,
   isServerWrittenSourceType,
   LEDGER_SOURCE_CONFLICT_MESSAGE,
   PRICE_CACHE_TTL_MS,
@@ -55,6 +56,10 @@ import { isReadOnlyImpersonation } from '../impersonationReadOnlyPlugin.js';
 import { ensurePeriodGrant, periodGrantDue } from '../../../lib/metering/periodGrant.js';
 import { safeErrorCode } from '../../../lib/safeErrorCode.js';
 import type { CreditLedgerEntry, AiModelPrice } from '../../../generated/prisma/index.js';
+
+/** #5213: the price-row trigger's refusal of a past-dated row (SQLSTATE 23514), as the query engine renders a model write's error. */
+const PAST_DATED_PRICE_REFUSAL = /PostgresError \{ code: "23514", message: "Price rows are never dated in the past/;
+const isPastDatedPriceRefusal = (err: unknown) => err instanceof Error && PAST_DATED_PRICE_REFUSAL.test(err.message);
 
 const badInput = (message: string) =>
   new GraphQLError(message, { extensions: { code: 'BAD_USER_INPUT' } });
@@ -133,8 +138,15 @@ async function resolveLedgerOwner(
   return { userId };
 }
 
-/** Map the ledger library's typed refusals; anything else propagates. */
-function ledgerRefusal(err: unknown): never {
+/**
+ * Map the ledger library's typed refusals; anything else propagates. #5352: an owner deleted between resolution and the append
+ * (LedgerOwnerDeletedError, nothing written) answers the not-found error resolution gives a deleted owner, for the same ref.
+ */
+function ledgerRefusal(err: unknown, refs: { orgRef?: string | null; userRef?: string | null }): never {
+  if (err instanceof LedgerOwnerDeletedError) {
+    if (refs.orgRef != null) throw new OrganizationNotFoundError(refs.orgRef);
+    if (refs.userRef != null) throw new UserNotFoundError(refs.userRef);
+  }
   if (err instanceof InvalidLedgerAmountError) throw badInput(err.message);
   // Mismatched replay of an existing (sourceType, sourceId): a typed,
   // NON-retryable error. The caller (a payment service) must stop redelivering
@@ -456,6 +468,13 @@ export const meteringMutations = {
           `A price for ${provider}/${model} tier ${tier} at ${effectiveAt.toISOString()} already exists — post a new effectiveAt.`,
         );
       }
+      if (isPastDatedPriceRefusal(err)) {
+        // Only a database clock ahead of this process's by more than the lead gets here: the row is dated in the past by the
+        // database's own clock. Nothing was written; an explicit, later effectiveAt is the way round.
+        throw badInput(
+          `effectiveAt ${effectiveAt.toISOString()} is already in the past by the database's clock: a price is never dated in the past. Pass an effectiveAt further ahead.`,
+        );
+      }
       throw err;
     }
     // #5021: no longer needed for correctness (the lead and the next-row expiry switch every process at the
@@ -517,7 +536,7 @@ export const meteringMutations = {
       });
       return projectLedgerEntry(entry);
     } catch (err) {
-      ledgerRefusal(err);
+      ledgerRefusal(err, input);
     }
   },
 
@@ -564,7 +583,7 @@ export const meteringMutations = {
       });
       return projectLedgerEntry(entry);
     } catch (err) {
-      ledgerRefusal(err);
+      ledgerRefusal(err, input);
     }
   },
 };

@@ -41,11 +41,9 @@ beforeEach(async () => {
   await db.appAgent.create({ data: { appId, agentId } });
   await db.appMember.create({ data: { appId, userId, role: 'member' } });
   for (const row of [
-    { loc: 'conversations', data: {} },
     { loc: 'conversations:flow', data: { stageOrder: ['step', 'other'], isSetup: false } },
     { loc: 'conversations:flow:step', data: { promptRef: 'prompts:step' } },
     { loc: 'conversations:flow:other', data: { promptRef: 'prompts:step' } },
-    { loc: 'prompts', data: {} },
     { loc: 'prompts:step', content: 'LICENSED STAGE', data: {} },
     { loc: 'conversations:next', data: { stageOrder: ['next'] } },
     { loc: 'conversations:next:next', data: { promptRef: 'prompts:step' } },
@@ -84,7 +82,7 @@ async function start(pinned = false) {
     const rev = await M.createRevision({}, { agentRef: agentId }, ctx());
     await M.publishRevision({}, { agentRef: agentId, revisionLoc: rev.revisionLoc }, ctx());
   }
-  return M.startChat({}, { agentRef: agentId, scope: 'private', conversationName: 'flow' }, ctx());
+  return M.startChat({}, { agentRef: agentId, appRef: appId, scope: 'private', conversationName: 'flow' }, ctx());
 }
 
 /** Observe memory-scoped Node/edge reads from the Agent's definition, without replacing results (as #4043's). */

@@ -1,4 +1,5 @@
-import { isPureAppKeyShape, linkedReachFor, registerOwnRightReader } from '../../../lib/appMemoryLinks.js';
+import { registerOwnRightReader } from '../../../lib/appMemoryLinks.js';
+import { grantReadReachFor } from '../../../lib/grants/readGrant.js';
 import { currentAgentOrgMember } from '../../../lib/auth/personalOrgAgentInstall.js';
 import { requireOrgRole, isAppParticipant } from '../../../lib/auth/appParticipantRead.js';
 import { endGrantsOfAgentsNoLongerInstalled, importedPairsOfParent } from '../../../lib/grants/agentInstallDeparture.js';
@@ -53,6 +54,7 @@ import { ROLE_ORDER } from '../../../lib/auth/orgRole.js';
 import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { foreignIdentityScopedMemoryFilter } from '../../../lib/auth/memoryOwnership.js';
+import { isForeignUserHolding, isUserHolding, userHoldingCreatorMayRead } from '../../../lib/auth/userHolding.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
@@ -785,10 +787,17 @@ function userPrincipalOnly(ctx: Context): Context {
  * active App made the reach broader, not narrower.
  */
 export function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<boolean> {
-  const self = userPrincipalOnly(ctx);
-  return getAccessibleMemoryIds(self, memoryId, { excludeAppDerived: true }).then(
-    (ids) => ids.includes(memoryId),
-  );
+  return memoryIdsHeldIndependently(ctx, memoryId).then((ids) => ids.includes(memoryId));
+}
+
+/**
+ * #5393: the memories this caller holds CONTENT-READ on in their own right, enumerated — the set
+ * `holdsContentReadIndependently` asks about one memory at a time. Both go through this one function, so the attachable-memory
+ * picker (`attachableMemories`) and `attachMemoryToApp` read the same judgment and cannot drift
+ * (hrn:node:hadronmemory.com:specs:cor:dmo:060:22). `onlyMemoryId` narrows the lookup to that one row.
+ */
+export function memoryIdsHeldIndependently(ctx: Context, onlyMemoryId?: string): Promise<string[]> {
+  return getAccessibleMemoryIds(userPrincipalOnly(ctx), onlyMemoryId, { excludeAppDerived: true });
 }
 
 // #5185: the link judge (src/lib/appMemoryLinks.ts) asks this question for each attacher; registered here so it imports no resolver.
@@ -1322,9 +1331,8 @@ export async function canReadMemoryRecord(
     if (isStrictOwner(ctx, memory.userId)) return true;
     // No `as never`: the cast is what let a caller omit the fields this reads.
     if (ctx.userId && (await granteeShareAccess(ctx.db, ctx.userId, memory))) return true;
-    // #5185: a pure App key / userless run reads a personal or private memory its App owner linked (the one judge decides,
-    // including that a run never reads `private`), so `memory(ref:)` answers as the node reads and MCP do.
-    if (isPureAppKeyShape(ctx) && (await linkedReachFor(ctx.db, ctx, [memory.id])).has(memory.id)) return true;
+    // #5321: an attachment gives no access (cor:dmo:060:22), and no read grant names a personal or private memory
+    // (src/lib/grants/readGrant.ts memoryReadTargetRefusal), so a pure App key or a userless run reads none here.
     return false;
   }
   // System records follow the installed/licensed Agent or manager audience,
@@ -1369,9 +1377,7 @@ export async function canReadMemoryRecord(
   // (cor:cht:010:02), the same identity the node-access set and the write gate use. It sits ABOVE the platform ADMIN/OWNER
   // short-circuit and the org-member fast path below, so neither can admit it; an impersonated session, an App key and a
   // run principal never read it. App-class records keep their own shape-aware audience (below).
-  if (memory.class !== 'app' && memory.userMemoryOfAgentId != null) {
-    return !!ctx.userId && !ctx.impersonation && !isRunPrincipal(ctx) && memory.createdBy === ctx.userId;
-  }
+  if (isUserHolding(memory)) return userHoldingCreatorMayRead(ctx, memory);
   if (ctx.appId && ctx.sessionId && !ctx.userId) {
     const ids = await accessible();
     return ids.includes(memory.id);
@@ -1413,7 +1419,10 @@ export async function canReadMemoryRecord(
   // exists for, and Query.memory out of step with effectiveAccess. AppMember
   // rows hard-delete on removal (no deletedAt column), so existence is
   // liveness. Identity-scoped — never via impersonation (#876 class).
-  if (ctx.userId && memory.appId && !ctx.impersonation) {
+  // #5027 (Holger R1, cor:acl:010:01): a GROUP made in an App is read through its MemoryMembers only, record and
+  // nodes alike, so App membership alone does not open its record (the org-member fast path above skips group the
+  // same way); a member reaches it through the shared gate below.
+  if (ctx.userId && memory.appId && memory.class !== 'group' && !ctx.impersonation) {
     const appMember = await ctx.db.appMember.findUnique({
       where: { appId_userId: { appId: memory.appId, userId: ctx.userId } },
       select: { userId: true },
@@ -1784,6 +1793,8 @@ export async function requireMemoryManageAccess(
     userId: string | null;
     organizationId: string | null;
     ownerUserId: string | null;
+    userMemoryOfAgentId: string | null;
+    createdBy: string | null;
   },
   required: 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER' = 'ADMIN',
 ): Promise<void> {
@@ -1791,6 +1802,12 @@ export async function requireMemoryManageAccess(
     if (!ctx.impersonation && ctx.userId && memory.userId === ctx.userId) return;
     throw authorizationDenied();
   }
+  // hadron-internal#88: a per-user chat holding is managed by its creator alone, acting as themselves (the read rule's predicate: no
+  // impersonated session, no run principal, no App key). No organisation role and no platform role reaches it through this gate (a
+  // source and a push would publish it, a grant would serve it). Doors that do not call this gate (delete, the source-memory delete of a
+  // merge) keep their own org-admin gates; a sweep of the other direct role checks is hadron-internal#89's residual (a private issue:
+  // the tracker for the management-door class that #88 fixed through this gate).
+  if (isUserHolding(memory) && !userHoldingCreatorMayRead(ctx, memory)) throw authorizationDenied();
   await requireOwnerOrOrgRole(ctx, memory, required);
 }
 
@@ -2455,11 +2472,13 @@ export async function resolveOrgScope(
  * revoked-membership cross-org share can't admit a non-member (which would also
  * expose the org's nested app/key/member objects via `Memory.organization`).
  *
- * Only `personal` is shareable (`private` never is), and agent-scoped personal
- * "holding" memories (`userMemoryOfAgentId` set) are deliberately excluded here
- * — their share additionally requires an active AgentSubscription
- * (resolveMemoryAuthorization step 3c), which this portal surface doesn't model;
- * excluding them is the safe, no-regression direction.
+ * Only `personal` is shareable (`private` never is). #5389: a personal memory
+ * made in an App (`userMemoryOfAgentId` set, which `chk_memory_personal_agent_id`
+ * requires whenever `app_id` is) is shared exactly like a free-standing one: the
+ * share alone admits, at its role, with no AgentSubscription licence
+ * (cor:dmo:060:20 and its S6, "unless the therapist shares it"; cor:acl:010:01;
+ * the specs engineer's read on #5389). Before #5389 such a share was accepted and
+ * listed to its grantor but granted nothing here.
  *
  * @param opts.requireWrite when true, only a `writer` share qualifies.
  */
@@ -2474,7 +2493,7 @@ export async function granteeShareAccess(
   },
   opts?: { requireWrite?: boolean },
 ): Promise<boolean> {
-  if (memory.class !== 'personal' || memory.userMemoryOfAgentId !== null) return false;
+  if (memory.class !== 'personal') return false;
   const share = await db.memoryShare.findUnique({
     where: { memoryId_granteeId: { memoryId: memory.id, granteeId: userId } },
     select: { role: true },
@@ -2672,11 +2691,11 @@ export async function getAccessibleMemoryIds(
     // right, so an attachment gate asking "what does this caller hold?" gets
     // the empty set rather than that App's fold (#1349).
     if (options?.excludeAppDerived) return [];
-    // #5185: plus what the App's links let a pure key / userless run read (judged at use). Added AFTER the strict-owner
-    // class filter above on purpose: the one judge applies its own personal/private rule.
+    // #5321 (cor:acl:140:02, cor:agt:010:01): plus what the App's read grants let a pure key (holding grant:read) or a userless
+    // run read, judged at use by the one judge MCP shares. An attachment adds nothing (cor:dmo:060:22).
     const derived = [...new Set([
       ...await appDerivedMemoryIds(ctx, onlyMemoryId),
-      ...await linkedReachFor(ctx.db, ctx, onlyMemoryId ? [onlyMemoryId] : undefined),
+      ...await grantReadReachFor(ctx.db, ctx, onlyMemoryId ? [onlyMemoryId] : undefined),
     ])];
     // #3306 / ruling 0104: a pure App key or userless run also reads PUBLIC knowledge (App-less, ownerless, live),
     // read-only. One shared predicate with the MCP point gate; reads only (no list surface returns these ids).
@@ -2720,7 +2739,8 @@ export async function getAccessibleMemoryIds(
         deletedAt: null,
         OR: [
           { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
-          { class: 'knowledge', userMemoryOfAgentId: { not: null }, createdBy: ctx.userId },
+          // hadron-internal#88: a run principal carrying the creator's id does not read a holding by virtue of it.
+          ...(isRunPrincipal(ctx) ? [] : [{ class: 'knowledge' as const, userMemoryOfAgentId: { not: null }, createdBy: ctx.userId }]),
           // spec 047: a user-owned memory is readable ONLY by its owner.
           //
           // NON-personal classes, for the reason MCP's `getMemoryAccess` states
@@ -2748,7 +2768,7 @@ export async function getAccessibleMemoryIds(
       select: { id: true },
     });
     // #778 — personal memories shared WITH the caller (they are a grantee).
-    // Only `personal` is shareable; agent-scoped holdings are excluded (see
+    // Only `personal` is shareable, App personal memories included (#5389, see
     // granteeShareAccess). Org-owned shares are additionally membership-gated so
     // a legacy/revoked cross-org share can't admit a non-member — mirrors the
     // create rule and keeps this node-read gate in lockstep with Query.memory.
@@ -2758,7 +2778,6 @@ export async function getAccessibleMemoryIds(
         ...scope,
         deletedAt: null,
         class: 'personal',
-        userMemoryOfAgentId: null,
         shares: { some: { granteeId: ctx.userId } },
         OR: [{ organizationId: null }, { organizationId: { in: memberOrgIds } }],
       },
@@ -3029,7 +3048,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, d
   if (ctx.appId) {
     const memory = await ctx.db.memory.findUnique({
       where: { id: memoryId },
-      select: { id: true, ownerUserId: true, userId: true, class: true, appId: true, organizationId: true, installOfAgentId: true, isInstallMemory: true },
+      select: { id: true, ownerUserId: true, userId: true, class: true, appId: true, organizationId: true, installOfAgentId: true, isInstallMemory: true, userMemoryOfAgentId: true, createdBy: true },
     });
     if (!memory) throw memoryWriteForbidden();
     // #2044: an install memory has its own write audience; no platform-role
@@ -3044,7 +3063,8 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, d
     // reference to the owner's memory in another App is evaluated as that App,
     // with isolation and the subscription check. An inline identity shortcut
     // here (#1500) let GraphQL drift from MCP, so there is no second copy.
-    if (!strictOwner && memory.ownerUserId === null &&
+    // hadron-internal#88: the platform role does not reach another user's chat holding (it would read it back).
+    if (!strictOwner && memory.ownerUserId === null && !isForeignUserHolding(memory, ctx.userId) &&
         !(ctx.appId && ctx.sessionId && !ctx.userId) &&
         (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))) return;
     // A write always names its target: an explicit reference (#1503).
@@ -3102,8 +3122,9 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, d
     throw memoryWriteForbidden();
   }
 
-  // Non-personal/private, org-owned: global ADMIN/OWNER bypass.
-  if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return;
+  // Non-personal/private, org-owned: global ADMIN/OWNER bypass, except another user's chat holding (hadron-internal#88:
+  // it falls through to the creator-only holding rule below, which refuses it).
+  if (!isForeignUserHolding(memory, ctx.userId) && (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))) return;
 
   // The app class contains team, Worker, and session rows with distinct
   // audiences. Use the same shape-aware gate as MCP rather than allowing a
@@ -3118,7 +3139,10 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, d
   // below (which key on organizationId, ignoring app_id). App-scoped write goes
   // through the App-key/agent path (canWriteToMemory via getAppMemoryAccess); a
   // JWT org contributor who isn't ADMIN gets no write here (codex review, #660).
-  if (memory.appId !== null && (memory.class === 'knowledge' || memory.class === 'group')) {
+  // #5027 (Holger R1): an App-scoped GROUP is written by its MemoryMember writers, so a group row falls through to
+  // the shared writable set below, whose group arm is MemoryMember-only; the org and subscription arms keep
+  // `appId: null` (knowledge only), so an org role still adds nothing.
+  if (memory.appId !== null && memory.class === 'knowledge') {
     throw memoryWriteForbidden();
   }
 

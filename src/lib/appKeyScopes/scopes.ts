@@ -10,8 +10,12 @@
 import { GraphQLError } from 'graphql';
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 
-/** The closed list. `host:operate` (#1709) is bound to one host: src/lib/hostOperations/hostKey.ts. */
-export const APP_KEY_SCOPES = ['attention:deliver', 'host:operate'] as const;
+/**
+ * The closed list. `host:operate` (#1709) is bound to one host: src/lib/hostOperations/hostKey.ts. `grant:read` (#5321,
+ * hrn:node:hadronmemory.com:specs:cor:acl:140:02, Holger 2026-11-27 "Only keys whose scopes say so") lets a pure key read
+ * through the `memory.read` grants its App holds: src/lib/grants/readGrant.ts.
+ */
+export const APP_KEY_SCOPES = ['attention:deliver', 'host:operate', 'grant:read'] as const;
 export type AppKeyScopeName = (typeof APP_KEY_SCOPES)[number];
 
 /**
@@ -21,6 +25,7 @@ export type AppKeyScopeName = (typeof APP_KEY_SCOPES)[number];
 export const APP_KEY_SCOPE_CATALOGUE: Record<AppKeyScopeName, { description: string; requiresHostId: boolean }> = {
   'attention:deliver': { description: 'Read and acknowledge due wakes for the App, as a team router does. Takes no host.', requiresHostId: false },
   'host:operate': { description: 'Operate as one named host: register it, collect its operations and report on them. Granted for one host.', requiresHostId: true },
+  'grant:read': { description: 'Read the memories the App holds a memory.read grant for, read only. Without it the key reads through no grant. Takes no host.', requiresHostId: false },
 };
 
 export const isAppKeyScope = (v: unknown): v is AppKeyScopeName =>

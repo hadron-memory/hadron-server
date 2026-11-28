@@ -17,7 +17,8 @@ export const MAX_OPEN_SECRET_CHANGES_PER_REQUESTER = 2;
 export const MAX_OPEN_SECRET_CHANGES_PER_APP = 100;
 export const MAX_OPEN_SECRET_CHANGES_PER_REQUESTER_PER_APP = 20;
 export const SECRET_CHANGE_PATH = '/secret-changes';
-export type ChangeOperation = 'STORE' | 'DELETE' | 'SET_PROTECTED' | 'CLEAR_PROTECTED';
+/** #5335: SET_/CLEAR_DELETE_AFTER_USE set and clear a protected secret's `deleteAfterUse` (cor:sec:060:03, cor:sec:070:02). */
+export type ChangeOperation = 'STORE' | 'DELETE' | 'SET_PROTECTED' | 'CLEAR_PROTECTED' | 'SET_DELETE_AFTER_USE' | 'CLEAR_DELETE_AFTER_USE';
 export interface ChangeRequest {
  id: string; app_id: string; secret_id: string | null; secret_name: string; secret_kind: string;
  protected_result: boolean | null; write_version: boolean;
@@ -32,6 +33,18 @@ export function needsPasskey(extra: Record<string, unknown> = {}): GraphQLError 
 /** Snapshot of all mutable secret terms; a later edit must make the request stale. */
 export function changeSnapshot(secret: { id: string; updatedAt: Date; protected: boolean; metadata: unknown; changeRevision: number }, versionNo: number): string {
  return createHash('sha256').update(JSON.stringify([secret.id, secret.changeRevision, secret.updatedAt.toISOString(), secret.protected, secret.metadata, versionNo])).digest('hex');
+}
+/**
+ * #5335 (blind P2-3 at c2e758a2): the snapshot a request is staged and completed against. The two deleteAfterUse operations take a
+ * snapshot no earlier image computes, so an image that predates them (a rollback target, or the old slot of a blue/green deploy,
+ * conventions:expand-contract-migrations) ends such a request `stale` at its own snapshot check instead of reaching its
+ * protection branch, which would write `protected: false`. Every other operation keeps the plain snapshot, so requests staged
+ * before this deploy still complete.
+ */
+export function changeSnapshotFor(operation: ChangeOperation, secret: Parameters<typeof changeSnapshot>[0], versionNo: number): string {
+ const plain = changeSnapshot(secret, versionNo);
+ return operation === 'SET_DELETE_AFTER_USE' || operation === 'CLEAR_DELETE_AFTER_USE'
+  ? createHash('sha256').update(JSON.stringify(['delete-after-use', plain])).digest('hex') : plain;
 }
 /** The one mint of a change request's ceremony link (#5103): the error extension and `SecretChangeRequest.ceremonyUrl` both call it. No token: the id is the address. */
 export function secretChangeCeremonyUrl(id: string): string {
@@ -103,27 +116,78 @@ export const SECRET_CHANGE_SWEEP_MAX_BATCHES = 20;
 
 /**
  * Clear ONE batch of expired ciphertext; expiry remains enforced independently at every use. The row trigger nulls the ciphertext.
- * The outer UPDATE repeats the predicate as a backstop (the subquery's row locks already hold the rows).
+ * The UPDATE repeats the predicate as a backstop (the batch's row locks already hold the rows).
+ * #5348: the batch is a MATERIALIZED CTE, run once. As an `id IN (subquery)` a nested-loop plan rescanned the LIMIT ... SKIP LOCKED
+ * subquery per outer row, each rescan skipping the rows this statement had just updated and taking the next ones, so one batch
+ * could update the whole backlog (a LIMIT 1 batch cleared 300 rows on a table without statistics), past every row and time bound.
  */
 export async function sweepExpiredSecretChanges(tx: Prisma.TransactionClient, limit: number = SECRET_CHANGE_SWEEP_BATCH): Promise<number> {
- return tx.$executeRaw`UPDATE secret_change_requests SET state='expired',ended_at=(clock_timestamp() AT TIME ZONE 'UTC')
+ return tx.$executeRaw`WITH batch AS MATERIALIZED (SELECT id FROM secret_change_requests
  WHERE state='open' AND expires_at <= (clock_timestamp() AT TIME ZONE 'UTC')
- AND id IN (SELECT id FROM secret_change_requests WHERE state='open' AND expires_at <= (clock_timestamp() AT TIME ZONE 'UTC')
- ORDER BY expires_at, id LIMIT ${limit}::int FOR UPDATE SKIP LOCKED)`;
+ ORDER BY expires_at, id LIMIT ${limit}::int FOR UPDATE SKIP LOCKED)
+ UPDATE secret_change_requests s SET state='expired',ended_at=(clock_timestamp() AT TIME ZONE 'UTC')
+ FROM batch WHERE s.id = batch.id AND s.state='open' AND s.expires_at <= (clock_timestamp() AT TIME ZONE 'UTC')`;
 }
 
-/** Drain expired requests in batches, each its own transaction (an earlier batch stays cleared if a later one fails). Returns the number cleared. */
+/**
+ * #5348: the time bounds of one drain batch (the Proposed sweep-backlog line of hrn:node:hadronmemory.com:specs:cor:sec:070:02;
+ * engineering bounds, like the row bounds above). Postgres cancels the batch statement after STATEMENT_TIMEOUT (a
+ * transaction-local `statement_timeout`, so it never reaches the pooled connection's session); the interactive transaction around
+ * it gets TX_TIMEOUT, the statement bound plus room for the rest, instead of Prisma's 5 s default, which a large backlog on a loaded
+ * database overran on every tick (the batch rolled back each time and the sweep never advanced, defeating S6); MAX_WAIT bounds the
+ * wait for a pooled connection.
+ */
+export const SECRET_CHANGE_SWEEP_STATEMENT_TIMEOUT_MS = 25_000;
+export const SECRET_CHANGE_SWEEP_TX_TIMEOUT_MS = 30_000;
+export const SECRET_CHANGE_SWEEP_TX_MAX_WAIT_MS = 10_000;
+const SWEEP_TX_HEADROOM_MS = SECRET_CHANGE_SWEEP_TX_TIMEOUT_MS - SECRET_CHANGE_SWEEP_STATEMENT_TIMEOUT_MS;
+
+/** Postgres 57014 however Prisma wraps it (a raw query's P2010 carries it in meta or in the message). */
+const isStatementTimeout = (e: unknown): boolean => {
+ if (!(e instanceof Error)) return false;
+ const meta = (e as { meta?: { code?: unknown } }).meta;
+ return String(meta?.code) === '57014' || /(?:Code:\s*`|SQLSTATE[\s:]*)57014\b|canceling statement due to statement timeout/i.test(e.message);
+};
+/**
+ * The batch ran past its bound: a statement timeout, or the interactive transaction expired (P2028). P2028 has a second arm, a
+ * transaction that could not START within maxWait (pool exhaustion): a smaller batch does not help there, so it is not an overrun.
+ */
+const isBatchOverrun = (e: unknown): boolean => isStatementTimeout(e)
+ || (e instanceof Error && (e as { code?: unknown }).code === 'P2028' && !/unable to start a transaction/i.test(e.message));
+
+/**
+ * Drain expired requests in batches, each its own transaction (an earlier batch stays cleared if a later one fails). Returns the
+ * number cleared. #5348: each batch runs under the time bounds above; a batch that overruns them rolls back (nothing cleared, the
+ * rows stay for a later batch) and the next batch of the same run asks for half as many rows, down to one, so a slow database
+ * still makes progress. An overrun spends a batch slot, so a run stays within maxBatches transactions. A single row that still
+ * overruns fails the run (the loop logs it and retries next tick); any other fault fails it at once, as before.
+ */
 export async function drainExpiredSecretChanges(
  db: Pick<PrismaClient, '$transaction'>,
- bounds: { batchSize?: number; maxBatches?: number; shouldStop?: () => boolean } = {},
+ bounds: { batchSize?: number; maxBatches?: number; shouldStop?: () => boolean; statementTimeoutMs?: number } = {},
 ): Promise<number> {
- const batchSize = bounds.batchSize ?? SECRET_CHANGE_SWEEP_BATCH, maxBatches = bounds.maxBatches ?? SECRET_CHANGE_SWEEP_MAX_BATCHES;
+ let batchSize = bounds.batchSize ?? SECRET_CHANGE_SWEEP_BATCH;
+ const maxBatches = bounds.maxBatches ?? SECRET_CHANGE_SWEEP_MAX_BATCHES;
+ const statementMs = bounds.statementTimeoutMs ?? SECRET_CHANGE_SWEEP_STATEMENT_TIMEOUT_MS;
+ const options = { timeout: statementMs + SWEEP_TX_HEADROOM_MS, maxWait: SECRET_CHANGE_SWEEP_TX_MAX_WAIT_MS };
  let total = 0;
  for (let i = 0; i < maxBatches; i++) {
   if (i > 0 && bounds.shouldStop?.()) break;
-  const n = await db.$transaction(tx => sweepExpiredSecretChanges(tx, batchSize));
+  const limit = batchSize;
+  let n: number;
+  try {
+   n = await db.$transaction(async tx => {
+    await tx.$queryRaw`SELECT set_config('statement_timeout', ${String(statementMs)}, true)`;
+    return sweepExpiredSecretChanges(tx, limit);
+   }, options);
+  } catch (e) {
+   if (!isBatchOverrun(e) || limit <= 1) throw e;
+   batchSize = Math.max(1, Math.floor(limit / 2));
+   console.warn(`secret.change_sweep.batch_overrun limit=${limit} next=${batchSize}`);
+   continue;
+  }
   total += n;
-  if (n < batchSize) break;
+  if (n < limit) break;
  }
  return total;
 }
@@ -138,17 +202,22 @@ export const SECRET_CHANGE_RETENTION_STATES = ['completed', 'declined', 'expired
 
 /**
  * Delete ONE batch of ended requests past retention. Only a DELETE: the value is already null on every ended row
- * (chk_secret_change_shape), which the predicate repeats as a backstop. The outer DELETE repeats the predicate as the subquery's
+ * (chk_secret_change_shape), which the predicate repeats as a backstop. The outer DELETE repeats the predicate as the batch's
  * row locks already hold the rows (findings:purge-key-subquery-must-recheck-expiry). Days are counted on the database clock.
+ * #5381: the batch is a MATERIALIZED CTE, run once (the #5348 shape above). As an `id IN (subquery)` a nested-loop plan rescanned
+ * the LIMIT ... SKIP LOCKED subquery per outer row, so one batch could delete the whole backlog, past the batch and per-run bounds
+ * of hrn:node:hadronmemory.com:specs:cor:sec:070:02. For this DELETE that was an oversized batch only (size and lock time), never
+ * a wrong deletion: every row it reached was past retention.
  */
 export async function deleteEndedSecretChanges(tx: Prisma.TransactionClient, limit: number = SECRET_CHANGE_SWEEP_BATCH): Promise<number> {
  const states = [...SECRET_CHANGE_RETENTION_STATES];
- return tx.$executeRaw`DELETE FROM secret_change_requests
+ return tx.$executeRaw`WITH batch AS MATERIALIZED (SELECT id FROM secret_change_requests
  WHERE state = ANY(${states}::text[]) AND staged_value_encrypted IS NULL
  AND ended_at <= (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(days => ${SECRET_CHANGE_RETENTION_DAYS}::int)
- AND id IN (SELECT id FROM secret_change_requests WHERE state = ANY(${states}::text[]) AND staged_value_encrypted IS NULL
- AND ended_at <= (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(days => ${SECRET_CHANGE_RETENTION_DAYS}::int)
- ORDER BY ended_at, id LIMIT ${limit}::int FOR UPDATE SKIP LOCKED)`;
+ ORDER BY ended_at, id LIMIT ${limit}::int FOR UPDATE SKIP LOCKED)
+ DELETE FROM secret_change_requests s USING batch
+ WHERE s.id = batch.id AND s.state = ANY(${states}::text[]) AND s.staged_value_encrypted IS NULL
+ AND s.ended_at <= (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(days => ${SECRET_CHANGE_RETENTION_DAYS}::int)`;
 }
 
 /** Delete ended requests past retention in batches, each its own transaction (same shape and bounds as the expiry drain; its own per-run budget). Returns the number deleted. */

@@ -28,6 +28,8 @@ import {
   MCP_RUN_TOOL_PREFIX,
 } from '../../mcpServers.js';
 import type { RunToolDef } from './types.js';
+import { type OwnerRef, orgIdOf, requireOwnerRefOf } from '../../owner.js';
+import { orgOnlyToolsMessage, orgOnlyToolsRefused } from './orgOnly.js';
 
 /** Cap on the total flattened result text handed to the LLM. The conduit
  *  bounds per-block (200k) and per-count (100); this is core's own ceiling
@@ -46,10 +48,13 @@ export function isMcpRunToolName(name: string): boolean {
  */
 async function loadServers(
   db: PrismaClient,
-  organizationId: string,
+  /** #5077: the run's owner. Registries are an organization's: a person's run has none (no query). */
+  tenant: OwnerRef,
   slugs: string[],
 ): Promise<Map<string, McpServer>> {
   if (slugs.length === 0) return new Map();
+  const organizationId = orgIdOf(tenant);
+  if (organizationId === null) return new Map();
   const rows = await db.mcpServer.findMany({
     where: { organizationId, slug: { in: [...new Set(slugs)] }, enabled: true },
   });
@@ -65,13 +70,13 @@ async function loadServers(
  */
 export async function unknownMcpToolNames(
   db: PrismaClient,
-  organizationId: string,
+  tenant: OwnerRef,
   names: string[],
 ): Promise<string[]> {
   const parsed = names.map((name) => ({ name, parts: parseMcpRunToolName(name) }));
   const servers = await loadServers(
     db,
-    organizationId,
+    tenant,
     parsed.flatMap((p) => (p.parts ? [p.parts.slug] : [])),
   );
   return parsed
@@ -118,7 +123,11 @@ export async function materializeMcpRunTools(
     if (!parts) throw new Error(`Malformed MCP tool name "${name}".`);
     return { name, ...parts };
   });
-  const servers = await loadServers(db, run.organizationId, parsed.map((p) => p.slug));
+  // #5077: the handler's own refusal for a person's run (node load refuses first; this catches any other route).
+  const tenant = requireOwnerRefOf(run);
+  const refused = orgOnlyToolsRefused(tenant, names);
+  if (refused.length > 0) throw new Error(orgOnlyToolsMessage(refused));
+  const servers = await loadServers(db, tenant, parsed.map((p) => p.slug));
 
   const upstreamBySlug = new Map<string, Map<string, { description?: string; inputSchema: Record<string, unknown> }>>();
   // One live tools/list per referenced server, in parallel — a multi-server

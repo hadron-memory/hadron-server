@@ -129,6 +129,7 @@ import type { Request, Response } from 'express';
 import { db } from '../integrations/db/client.js';
 import { foreignEdgeMemoryIds } from '../lib/foreignEdgeMemories.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockLocForWrite, lockNodeForDelete } from '../lib/nodeSubtreeLock.js';
+import { createChatbotContainers, missingChatbotContainers } from '../lib/chatbotAncestors.js';
 import { lockMemoryForChannelChange } from '../lib/channels.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark, SPEC_MINTED_PERMANENT } from '../lib/mintedSpecPermanence.js';
 import { governedAmong, governedRemovalError, lockGovernedRowsIn, lockRemovalRows } from '../lib/governedRemoval.js';
@@ -4666,8 +4667,6 @@ export function createMcpServerInstance(
               ...upsertArgs.update, content,
             });
             if (changes.length === 0) return current.id;
-            // #5019 (cor:dmo:060:19) — the section stores its description as its body too, so both count.
-            assertNodeContentSize(() => resultingNodeContent({ content, description: description ?? null }, currentForDiff));
             sectionChanged = authoredContentChanged(changes);
             // #1328 — a re-save is an update whatever the tool is called
             // (`findings:parent-node-upsert-is-authoring`).
@@ -4675,6 +4674,10 @@ export function createMcpServerInstance(
               priorRole: current.role, priorRunnable: current.isRunnable,
               role: current.role, runnable: current.isRunnable, mintHuman: true, authoredChange: sectionChanged,
             }, attestedAuthoring(recoveryCtx(), authoredWith));
+            // #5019 (cor:dmo:060:19) — the section stores its description as its body too, so both count. #5223: after
+            // the authoring gate — a size refusal counts stored fields, so a writer that gate refuses must not learn
+            // the over/under bit.
+            assertNodeContentSize(() => resultingNodeContent({ content, description: description ?? null }, currentForDiff));
             await createNodeRevision(tx, {
               id: generateId(),
               ...buildNodeRevisionSnapshot(current, editorFromAuth(auth), { changes }),
@@ -4695,7 +4698,10 @@ export function createMcpServerInstance(
           // #5015 (cor:acl:150:04) — only a fresh insert adds a live node here: the upsert leaves a tombstone deleted and
           // a live section is an update. The memory row is held FOR SHARE just above, so the owner read is the one at
           // commit; the owner-limit key is this write's last lock (gate ruling 5).
-          if (!prior) await requireNodeHeadroom(tx, { memoryId, caller: ownerLimitCaller(auth) });
+          // #5390 — a fresh conversation-family section (`prompts:<name>`) also gets its missing container parents, counted with it.
+          const containers = prior ? [] : await missingChatbotContainers(tx, memoryId, [loc]);
+          if (!prior) await requireNodeHeadroom(tx, { memoryId, amount: 1n + BigInt(containers.length), caller: ownerLimitCaller(auth) });
+          await createChatbotContainers(tx, memoryId, containers, auth.clientId ?? null);
           const row = await tx.node.upsert({
             ...upsertArgs,
             update: { ...upsertArgs.update, ...(sectionChanged ? (sectionStamp ?? clearNodeAuthorship()) : {}), revisionContentHash: revisionStateHashRefreshMarker() },
@@ -7138,7 +7144,11 @@ export function createMcpServerInstance(
           // #5015 (cor:acl:150:04) — every write that reaches here adds a live node (a live loc refused above): an insert,
           // or a tombstone revived. The memory row is held FOR SHARE (assertMemoryEncryptionStateForWrite), so the owner
           // read is the one at commit; the owner-limit key is this write's last lock (gate ruling 5).
-          await requireNodeHeadroom(tx, { memoryId, caller: ownerLimitCaller(auth) });
+          // #5390 — parity with writeNodeCore: a conversation, stage or prompt node also gets its missing container parents,
+          // under the ancestor keys held above, counted with it (cor:acl:150:04).
+          const containers = await missingChatbotContainers(tx, memoryId, [loc]);
+          await requireNodeHeadroom(tx, { memoryId, amount: 1n + BigInt(containers.length), caller: ownerLimitCaller(auth) });
+          await createChatbotContainers(tx, memoryId, containers, auth.clientId ?? null);
           const written = await tx.node.upsert({
             ...upsertArgs,
             create: { ...upsertArgs.create, ...(authoredStamp ?? {}), ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
@@ -9760,14 +9770,16 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
    * one and replies with its id. Delegates to GraphQL `appRun(ref:)`
    * (findings:node-write-surface-invariants: MCP tools delegate, never
    * re-implement), so the gate is exactly that resolver's: a platform admin, a
-   * READER in the run's organization, the run's own App key, or a user with a
+   * READER in the run's organization, whoever manages the App a person owns
+   * (#5077: its owner or an owner-role member, never a platform admin, for a
+   * run with no organization), the run's own App key, or a user with a
    * live App relationship for a run on their behalf or a MANUAL run they
    * started (`mayReadAppRunWithoutOrgRole`). A denial reads as not found, the
    * same answer as a missing run, so the tool is no existence oracle.
    */
   server.tool(
     'hadron_get_run',
-    "Read an app run you started (or may read): its status, where it is or stopped (curNodeUrn), why it failed (failure), what it extracted (data, the run envelope) and the path it walked (hops: one entry per completed hop, with the edge it took). Pass the run id or hrn:apprun URN that hadron_run_task printed. Gated like appRun: you may read a run if you are a READER in its organization; if it runs on your behalf or you started it manually, while you keep a live relationship with its App (App member or active subscriber); or if you hold that App's own key. A run you cannot read answers 'not found', the same as one that does not exist. Read-only.",
+    "Read an app run you started (or may read): its status, where it is or stopped (curNodeUrn), why it failed (failure), what it extracted (data, the run envelope) and the path it walked (hops: one entry per completed hop, with the edge it took). Pass the run id or hrn:apprun URN that hadron_run_task printed. Gated like appRun: you may read a run if you are a READER in its organization, or you manage the App a person owns (its owner or an owner-role member); if it runs on your behalf or you started it manually, while you keep a live relationship with its App (App member or active subscriber); or if you hold that App's own key. A run you cannot read answers 'not found', the same as one that does not exist. Read-only.",
     SHAPE_HADRON_GET_RUN,
     async ({ ref }) => {
       if (!auth.userId && !auth.appId) return refusalResult('Not authenticated.');
@@ -9775,7 +9787,11 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
       if (!runRef) return textResult('Pass the run id or hrn:apprun URN that hadron_run_task printed.');
       let run: Record<string, unknown> | null;
       try {
-        run = (await resolvers.Query.appRun({}, { ref: runRef }, chatCtx())) as Record<string, unknown> | null;
+        // #5077 (F3a-2): the read gate refuses an impersonated session and a refused session binding (isRefusedPrincipal) a
+        // person's run, so it must see both, as GraphQL does (Rook, SEC10 on #5441).
+        run = (await resolvers.Query.appRun({}, { ref: runRef }, {
+          ...chatCtx(), ...mcpRequestSessionContext(auth), impersonation: auth.impersonation ?? undefined,
+        })) as Record<string, unknown> | null;
       } catch (e) {
         // A denied read is indistinguishable from a missing run (no oracle).
         if (/^(Forbidden|Unauthenticated)/.test((e as Error)?.message ?? '')) run = null;
@@ -9828,9 +9844,12 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
             userId: auth.userId ?? undefined,
             apiKeyId: auth.apiKeyId ?? undefined, signInId: auth.signInId, // #1868: the shared authorized tx re-checks the presented key
             appId: auth.appId ?? undefined,
-            sessionId: auth.sessionId ?? undefined,
             roles: auth.roles as Context['roles'],
             organizationId: auth.organizationId ?? undefined,
+            // #5077 (F3a-2): the door refuses an impersonated session and a refused session binding (isRefusedPrincipal) on
+            // a person's App, so it must see both, as GraphQL does (Rook, SEC10 on #5441).
+            ...mcpRequestSessionContext(auth),
+            impersonation: auth.impersonation ?? undefined,
           };
           try {
             const runId = await resolvers.Mutation.runTask(

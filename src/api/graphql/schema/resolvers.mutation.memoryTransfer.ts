@@ -18,6 +18,8 @@ import {
   requireCallerIdentity,
 } from './resolvers.helpers.js';
 import { forbiddenError } from '../../../lib/refusals.js';
+import { ownedBy, ownerRefOf } from '../../../lib/owner.js';
+import { isUserHolding, userHoldingCreatorMayRead } from '../../../lib/auth/userHolding.js';
 
 type TransferClass = 'knowledge' | 'group' | 'personal' | 'private';
 type TransferDb = Prisma.TransactionClient;
@@ -46,6 +48,9 @@ function refusal(code: string, message: string): GraphQLError {
 async function authorizeSource(ctx: Context, memory: Memory, ref: string): Promise<void> {
   await concealUnreadableDenial(ctx, memory.id, ref, async () => {
     if (!ctx.userId || ctx.impersonation) throw forbiddenError();
+    // hadron-internal#89 (cor:cht:010:02): a per-user chat holding (the chat of the user it serves, recorded as its creator) is moved by that user alone, acting as themselves. Today even the creator's real move is refused by the dependents check (the Agent scope), so this gate is what keeps the PREVIEW and any future move from a role. A platform or organisation role
+    // that could carry it into its own namespace would read it back (cor:cht:010:02, user only).
+    if (isUserHolding(memory) && !userHoldingCreatorMayRead(ctx, memory)) throw forbiddenError();
     // personal/private's strict owner is separate from the tenant owner. An
     // org ADMIN cannot read, edit, or transfer someone else's private content.
     if (memory.userId !== null) {
@@ -207,8 +212,10 @@ async function transferPreview(
   add('Usage history', await tx.usageEvent.count({ where: { memoryId: id } }), 'CARRY');
   add('Server log history', await tx.serverLogEntry.count({ where: { memoryId: id } }), 'CARRY');
   add('App log history', await tx.appLogEntry.count({ where: { memoryId: id } }), 'CARRY');
-  add('Active runs', sourceOrgId ? await tx.appRun.count({ where: {
-    organizationId: sourceOrgId,
+  // #5077: a person's memory counts its owner's active runs too (a run of a person's App), by both owner columns.
+  const sourceOwner = ownerRefOf(memory);
+  add('Active runs', sourceOwner ? await tx.appRun.count({ where: {
+    ...ownedBy(sourceOwner),
     status: { in: ['PENDING', 'RUNNING'] },
     OR: [...entryRef.OR, ...entryPrefixes.map((prefix) => ({ curNodeUrn: { startsWith: prefix } }))],
   } }) : 0, 'REFUSE');

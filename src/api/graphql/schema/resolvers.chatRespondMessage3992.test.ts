@@ -44,12 +44,13 @@ beforeEach(async () => {
     });
   }
   // #4046: these turn tests start through a licensed App, never an App-less non-manager read.
-  await db.app.create({ data: { name: 'Turn fixture', urn: 'org-3992:chat-app', organizationId: org.id,
-    appAgents: { create: { agentId: agent.id } } } });
+  chatAppId = (await db.app.create({ data: { name: 'Turn fixture', urn: 'org-3992:chat-app', organizationId: org.id,
+    appAgents: { create: { agentId: agent.id } } } })).id;
   await serveEveryAgent(db);
 });
 
-const startChat = () => resolvers.Mutation.startChat({}, { agentRef: agent.id, scope: 'private' }, ctxFor(alice.id));
+let chatAppId: string;
+const startChat = () => resolvers.Mutation.startChat({}, { agentRef: agent.id, scope: 'private', appRef: chatAppId }, ctxFor(alice.id));
 const respond = (chatId: string, toolResponse: Record<string, unknown>) =>
   resolvers.Mutation.processChatResponse({}, { chatId, toolResponse }, ctxFor(alice.id));
 

@@ -4,6 +4,7 @@
  */
 import { Prisma } from '../../generated/prisma/index.js';
 import type { OwnerRef } from '../owner.js';
+import { nodesCountedFor } from './countsFor.js';
 
 export type OwnerLimitKey = 'nodes' | 'memories' | 'agents' | 'apps' | 'assetBytes' | 'nodeBytes';
 /** What a count needs: the plain client or a transaction. */
@@ -29,12 +30,14 @@ async function countOf(db: OwnerCountDb, query: Prisma.Sql): Promise<bigint> {
 }
 
 /**
- * Live nodes in every live memory of the owner, of any class, counted from the rows (#5009). A deleted memory keeps its node rows live, so
- * the memory must be live too. This is the figure the stored one must equal: the fallback, and the reference of every pin.
+ * Live nodes in every live memory the owner is COUNTED FOR, of any class, counted from the rows (#5009). #5434: a user's personal memory
+ * under an Agent counts for the user, not for the Agent's organization (`countsFor.ts`); every other memory counts for its stored owner.
+ * A deleted memory keeps its node rows live, so the memory must be live too. This is the figure the stored one must equal: the fallback,
+ * and the reference of every pin.
  */
 export const countOwnerNodesOnDemand = (db: OwnerCountDb, owner: OwnerRef): Promise<bigint> => countOf(db, Prisma.sql`
   SELECT count(*) AS n FROM nodes n JOIN memories o ON o.id = n.memory_id
-  WHERE ${ownedBy(owner)} AND o.deleted_at IS NULL AND n.deleted_at IS NULL`);
+  WHERE ${nodesCountedFor(owner)} AND o.deleted_at IS NULL AND n.deleted_at IS NULL`);
 
 /**
  * The same figure from the per-memory totals the triggers on `nodes` keep (#5078). The owner and the memory's liveness are joined here, so
@@ -47,7 +50,7 @@ const countOwnerNodesFromTotals = (db: OwnerCountDb, owner: OwnerRef): Promise<b
     SELECT memory_id, live_nodes AS n FROM memory_node_totals
     UNION ALL SELECT memory_id, delta FROM memory_node_pending
   ) f JOIN memories o ON o.id = f.memory_id
-  WHERE ${ownedBy(owner)} AND o.deleted_at IS NULL`);
+  WHERE ${nodesCountedFor(owner)} AND o.deleted_at IS NULL`);
 
 /** Read per call. Only the exact value `on-demand` goes back to counting the rows; anything else reads the totals. */
 const nodesOnDemand = (): boolean => process.env.OWNER_NODE_COUNT_SOURCE === 'on-demand';

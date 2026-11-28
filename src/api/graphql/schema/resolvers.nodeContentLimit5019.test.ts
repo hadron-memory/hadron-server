@@ -2,6 +2,8 @@
  * #5019 (Billing A11, cor:dmo:060:19 Proposed): a write that would leave a node over `NODE_CONTENT_MAX_BYTES` is refused
  * `NODE_CONTENT_TOO_LARGE` on every GraphQL content door, and nothing is written. RED on main: each "refused" case wrote.
  * The "still" cases pass on main and guard against over-refusal.
+ * #5432 (cor:dmo:060:19 Decided, Holger answer A): a revision RESTORE is exempt — see the #5432 cases below; every
+ * other door here still refuses.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApolloServer } from '@apollo/server';
@@ -10,6 +12,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { parseDataKey } from '../../../lib/crypto.js';
+import { decryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 import { encryptWithSecret } from '../../../test/encryptMemoryWithSecret.js';
 import { formatGraphQLError } from '../formatError.js';
 import { typeDefs } from './typeDefs.js';
@@ -154,8 +157,8 @@ describe('#5019 an encrypted memory is measured in plaintext', () => {
   });
 });
 
-describe('#5160 restoreNodeRevision in an encrypted memory', () => {
-  it('is measured in plaintext: 1,000 bytes are restored, 1,001 refused', async () => {
+describe('#5432 restoreNodeRevision in an encrypted memory', () => {
+  it('is exempt from the ceiling: a revision over a lowered cap restores, and round-trips decrypted', async () => {
     const dataKey = Buffer.alloc(32, 7).toString('base64');
     mem = (await db.memory.create({ data: { id: generateId(), name: 'p', urn: 'nc5019-u:p', class: 'private', userId: u, ownerUserId: u, vectorIndexEnabled: false } })).id;
     await encryptWithSecret(null, { memoryRef: mem, dataKey }, { db, userId: u, roles: ['READER'] } as Context);
@@ -170,9 +173,14 @@ describe('#5160 restoreNodeRevision in an encrypted memory', () => {
     const fits = await restorable('fits', 1000);
     const over = await restorable('over', 1001);
     cap(1000);
-    const before = await row(over.n.id);
-    refusedAt(await gql(RESTORE, { ref: over.rev.id }));
-    expect(await row(over.n.id)).toEqual(before);
+    // cor:dmo:060:19 (Decided, Holger answer A): a restore adds nothing new — exempt from the
+    // ceiling, an encrypted memory no less than a plaintext one (the old pin refused 1,001 here).
+    ok(await gql(RESTORE, { ref: over.rev.id }));
+    // The restored body is written as stored (still ciphertext at rest) and decrypts back to
+    // exactly the revision's plaintext — no truncation, no re-measure.
+    const raw = await row(over.n.id);
+    expect(raw.content!.length).toBeGreaterThan(1001);
+    expect(decryptNodeFieldsWithKey({ ...raw }, parseDataKey(dataKey)).content).toBe(a(1001));
     ok(await gql(RESTORE, { ref: fits.rev.id }));
   });
 });
@@ -213,11 +221,14 @@ describe('#5019 the other content doors', () => {
     ok(await gql(UPDATE_DATA, { ref: n.id, data: { first: a(5) } }));
   });
 
-  it('searchReplaceInNodes refuses the whole batch and writes nothing, in a dry run too', async () => {
+  it('searchReplaceInNodes refuses the whole batch and writes nothing; #5223: a dry run previews the over-size change', async () => {
     const small = await node('a-small', { content: 'cat' });
     const big = await node('b-big', { content: `cat${a(990)}` });
     const input = { oldText: 'cat', newText: a(20), nodeRefs: [small.id, big.id], fields: ['content'] };
-    refusedAt(await gql(REPLACE, { input: { ...input, dryRun: true } }));
+    // A dry run cannot run the authoring gate (read-only), so it no longer answers the size bit at all (#5223).
+    const dry = await gql(REPLACE, { input: { ...input, dryRun: true } });
+    expect(dry.errors).toBeUndefined();
+    expect(dry.data!.searchReplaceInNodes.nodesChanged).toBe(2);
     refusedAt(await gql(REPLACE, { input }));
     expect((await row(small.id)).content).toBe('cat');
     expect(await db.nodeRevision.count({ where: { nodeId: { in: [small.id, big.id] } } })).toBe(0);
@@ -233,29 +244,38 @@ describe('#5019 the other content doors', () => {
     expect(await db.nodeRevision.count({ where: { nodeId: t.id } })).toBe(0);
   });
 
-  it('restoreNodeRevision refuses a revision over a lowered ceiling', async () => {
+  it('#5432 a revision over a lowered ceiling restores; the same content as an ordinary update is still refused', async () => {
     cap('');
     const n = await node('n', { content: a(2000) });
     ok(await gql(UPDATE, { input: { ref: n.id, content: 'short' } }));
     const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: n.id } });
     cap(1000);
-    const before = await row(n.id);
-    refusedAt(await gql(RESTORE, { ref: rev.id }));
-    expect(await row(n.id)).toEqual(before);
-    cap(2000);
+    // cor:dmo:060:19 (Decided, Holger answer A): the restore is NOT checked — it is
+    // byte-identical to the revision it came from and adds nothing new, so history stays
+    // recoverable even after the ceiling was lowered below what that version stored.
     ok(await gql(RESTORE, { ref: rev.id }));
+    expect((await row(n.id)).content).toBe(a(2000));
+    // Every OTHER write to the node is still checked: the same body, sent as an ordinary
+    // update, refuses NODE_CONTENT_TOO_LARGE and writes nothing. (One byte different from
+    // the stored a(2000): an UNCHANGED save is not an edit of the content and is admitted
+    // by design — pinned above in the '#5019 create and update' block.)
+    const before = await row(n.id);
+    refusedAt(await gql(UPDATE, { input: { ref: n.id, content: a(2001) } }));
+    expect(await row(n.id)).toEqual(before);
   });
 
-  it('searchReplaceInSpecNodes is refused and writes nothing', async () => {
+  it('searchReplaceInSpecNodes is refused on apply and writes nothing; #5223: a dry run previews the over-size change', async () => {
     const draft = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'specs-draft', draftCorpus: true } as never, { db, roles: ['ADMIN'], userId: admin } as Context) as { id: string };
     const spec = await node('pas:010:01', { content: `cat ${a(990)}`, role: 'spec' }, draft.id);
     const input = { memoryRef: draft.id, nodeRefs: [spec.id], oldText: 'cat', newText: a(20), fields: ['content'], dryRun: true };
     const run = (extra = {}) => resolvers.Mutation.searchReplaceInSpecNodes(null, { input: { ...input, ...extra } } as never, { db, roles: ['ADMIN'], userId: admin } as Context);
     cap('');
-    const { plan } = await run() as { plan: string };
+    const { plan, nodesChanged } = await run() as { plan: string; nodesChanged: number };
     cap(1000);
+    // A dry run cannot run the authoring gate (read-only), so it no longer answers the size bit at all (#5223).
+    const dry = await run() as { nodesChanged: number };
+    expect(dry.nodesChanged).toBe(nodesChanged);
     await expect(run({ dryRun: false, expectedPlan: plan })).rejects.toMatchObject({ extensions: { code: 'NODE_CONTENT_TOO_LARGE', maxBytes: 1000 } });
-    await expect(run()).rejects.toMatchObject({ extensions: { code: 'NODE_CONTENT_TOO_LARGE' } });
     expect((await row(spec.id)).content).toContain('cat');
   });
 

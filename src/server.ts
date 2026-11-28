@@ -1236,7 +1236,7 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // #5022: the default monthly grant; a malformed value refuses boot. The effective amounts on one line (micro-cents).
   const monthlyGrant = loadOwnerDefaultMonthlyGrant();
   console.log(JSON.stringify({
-    event: 'period_grant.config', user: monthlyGrant.user.toString(), organization: monthlyGrant.organization.toString(),
+    event: 'period_grant.config', user: monthlyGrant.user.toString(), organization: '0',
   }));
   // The effective L4 configuration, on one line, so ops can confirm the mode a deploy actually booted with.
   console.log(JSON.stringify({

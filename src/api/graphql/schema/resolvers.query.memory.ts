@@ -29,12 +29,15 @@ import {
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { validateMemoryNodes } from '../../../lib/memoryValidation.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
-import { linkedReachFor } from '../../../lib/appMemoryLinks.js';
+import { grantReadReachFor } from '../../../lib/grants/readGrant.js';
+import { ownAppMemoryIds } from '../../../lib/appOwnMemory.js';
 import { activeAgentInstallLicenseIds, isGrantedAgentMemoryRole } from '../../../lib/appAgent.js';
 import { findInstallMemory, resolveInstallTarget } from './installMemory.js';
 import { listableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
 import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
+import { groupMemberMemoryWhere } from '../../../lib/auth/groupMemberMemory.js';
+import { attachableMemoriesPage } from './resolvers.mutation.appMemory.js';
 
 /** Compose a node URN, tolerating a memory urn the flat v2 shape can't express. */
 function safeCanonicalNodeUrn(memoryUrn: string, loc: string): string | null {
@@ -311,6 +314,13 @@ export const memoryQueries = {
       return memory;
     },
 
+    /** #5393 (cor:dmo:060:22): the attachable-memory picker's search door; judged in `attachableMemoriesPage`. */
+    attachableMemories: (
+      _: unknown,
+      args: { appRef: string; query?: string | null; limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => attachableMemoriesPage(ctx, args),
+
     // #473 — the uniform paginated memory list. Replaces myMemories (the
     // caller's union), publicMemories (filter.visibility: PUBLIC), and
     // orgSystemMemories (orgRef + filter.memoryClasses: [system]).
@@ -469,7 +479,8 @@ export const memoryQueries = {
         return page({
           deletedAt: null,
           class: 'personal',
-          userMemoryOfAgentId: null,
+          // #5389: App personal memories (userMemoryOfAgentId set) are listed to a grantee too, in lockstep with
+          // granteeShareAccess and getAccessibleMemoryIds.
           ...(f.visibility ? { visibility: f.visibility as any } : {}),
           // `shares` is the Prisma relation field on Memory → MemoryShare.
           shares: { some: { granteeId: ctx.userId } },
@@ -553,16 +564,29 @@ export const memoryQueries = {
             memoryMap.set(item.memory.id, item.memory);
           }
         }
-        // #5272 (hrn:node:hadronmemory.com:specs:cor:api:120:03, App-key line): plus every memory the App's links let this
-        // key read, judged at this call by the reads' own judge (`linkedReachFor`, #5185), so a lapsed link leaves the list
-        // when it stops being readable, and an App with no installed Agent still lists its links (as MCP's
-        // `hadron_list_memories` does). The judge decides the reach, so the Agent-item exclusions above are not re-applied;
-        // the filters the caller chose and the record gate are, as for an Agent item. Empty for any caller but a pure App key.
-        const linkedIds = [...(await linkedReachFor(ctx.db, ctx))].filter((id) => !memoryMap.has(id));
+        // #5272 (hrn:node:hadronmemory.com:specs:cor:api:120:03, App-key line), #5321: plus every memory the App's read grants let
+        // this key read, judged at this call by the reads' own judge (`grantReadReachFor`), so a revoked or lapsed grant leaves the
+        // list when it stops allowing, and an App with no installed Agent still lists them (as MCP's `hadron_list_memories` does).
+        // An attachment adds nothing (cor:dmo:060:22). The judge decides the reach, so the Agent-item exclusions above are not
+        // re-applied; the filters the caller chose and the record gate are, as for an Agent item. Empty for any caller but a pure key.
+        const linkedIds = [...(await grantReadReachFor(ctx.db, ctx))].filter((id) => !memoryMap.has(id));
         if (linkedIds.length > 0) {
           const linkedRows = await ctx.db.memory.findMany({ where: { id: { in: linkedIds }, deletedAt: null }, include: MEMORY_INCLUDE });
           for (const memory of linkedRows) {
             if (classSet ? !classSet.has(memory.class) : memory.class === 'system') continue;
+            if (f.visibility && memory.visibility !== f.visibility) continue;
+            if (!(await canReadMemoryRecord(ctx, memory))) continue;
+            memoryMap.set(memory.id, memory);
+          }
+        }
+        // #5398 (cor:api:120:03, App-key line): plus the App's own shared app-class memories, by the one predicate the
+        // reads use (`ownAppMemoryIds`), so the list follows the read. The caller's filters and the record gate apply, as for
+        // the links above. Empty for any caller but a pure App key.
+        const ownIds = [...(await ownAppMemoryIds(ctx.db, ctx))].filter((id) => !memoryMap.has(id));
+        if (ownIds.length > 0) {
+          const ownRows = await ctx.db.memory.findMany({ where: { id: { in: ownIds }, deletedAt: null }, include: MEMORY_INCLUDE });
+          for (const memory of ownRows) {
+            if (classSet && !classSet.has(memory.class)) continue;
             if (f.visibility && memory.visibility !== f.visibility) continue;
             if (!(await canReadMemoryRecord(ctx, memory))) continue;
             memoryMap.set(memory.id, memory);
@@ -647,12 +671,13 @@ export const memoryQueries = {
             // #1208 / cor:acl:010:01 — group records list only through
             // MemoryMember (reader/writer/owner), mirroring the shared read
             // gate exactly: NOT nested under orgIds for ordinary calls (a
-            // cross-org MemoryMember lists theirs), `appId: null` so an
-            // app-scoped group row's metadata stays App-internal (#653,
+            // cross-org MemoryMember lists theirs), an App-scoped group row
+            // included since #5027 (Holger R1: its MemoryMembers read it,
             // record-side parity with the node gate), per-user holdings and
             // user-owned rows excluded (#758). MemoryMember rows hard-delete
             // (FR-038), so `some` is liveness.
-            { class: 'group' as any, appId: null, userMemoryOfAgentId: null, ownerUserId: null, ...(groupOrgBound ? { organizationId: groupOrgBound } : {}), memberships: { some: { userId: ctx.userId } } },
+            // #5027 (Holger R1): the shared group predicate; a group made in an App lists for its MemoryMembers too.
+            groupMemberMemoryWhere(ctx.userId, { restrictToOrgId: groupOrgBound }),
             // GROUP excluded (#3781): a group-subscription row is API-invalid
             // state (createMemorySubscription admits PUBLIC only; group
             // visibility is CHECK-forced to GROUP) — never a listing grant.

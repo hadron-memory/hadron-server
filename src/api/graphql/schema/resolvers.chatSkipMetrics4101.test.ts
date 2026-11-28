@@ -1,13 +1,13 @@
 /** #4101: direct/person mutation callers take the same optional diagnostic path. */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { cleanDb, createDbAppAgent, createDbAppWithKey } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
-let context: Context, agentId: string;
+let context: Context, agentId: string, appId: string;
 beforeEach(async () => {
   await cleanDb(db);
   const org = await db.organization.create({ data: { name: 'SkipMetrics4101', urn: 'skip4101.example' } });
@@ -16,6 +16,9 @@ beforeEach(async () => {
   context = { db, roles: ['ADMIN'], userId: user.id };
   const agent = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Skip fixture', visibility: 'ORGANIZATION' }, context);
   agentId = agent.id; const memoryId = agent.systemMemoryId!;
+  // #5394: a start names the App that supplies the chat; the org ADMIN takes part in this org App.
+  const { app } = await createDbAppWithKey(db, 'skip4101-app', org.id); appId = app.id;
+  await createDbAppAgent(db, app.id, agent.id);
   const ids: Record<string, string> = {};
   for (const [loc, data] of [['config', {}], ['conversations', {}], ['conversations:main', { stageOrder: ['one'] }], ['conversations:main:one', {}], ['conversations:target', { stageOrder: ['arrive'] }], ['conversations:target:arrive', {}]] as const) {
     const node = await db.node.upsert({ where: { loc_memoryId: { loc, memoryId } }, update: { data }, create: { memoryId, loc, name: loc.split(':').pop()!, nodeType: 'system', data } }); ids[loc] = node.id;
@@ -29,7 +32,7 @@ it('counts absent/false/non-boolean direct calls by kind, true routes normally, 
   let now = 1_000_000; vi.spyOn(performance, 'now').mockImplementation(() => now);
   const info = vi.spyOn(console, 'info').mockImplementation(() => {});
   for (const [fields, kind] of [[{}, 'absent'], [{ goal_reached: false }, 'false'], [{ goal_reached: 'SECRET RAW FLAG' }, 'non_boolean'], [{ goal_reached: true }, null]] as const) {
-    const chat = await resolvers.Mutation.startChat({}, { agentRef: agentId, conversationName: 'main' }, context);
+    const chat = await resolvers.Mutation.startChat({}, { agentRef: agentId, conversationName: 'main', appRef: appId }, context);
     info.mockClear(); now += 60_000;
     const result = await resolvers.Mutation.processChatResponse({}, { chatId: chat.chatId, toolResponse: { message: 'PRIVATE ASSISTANT TEXT', ...fields } }, context);
     const signals = info.mock.calls.filter(call => typeof call[0] === 'string' && call[0].includes('chat.on_complete_skipped'));

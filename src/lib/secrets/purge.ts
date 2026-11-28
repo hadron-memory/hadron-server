@@ -61,16 +61,20 @@ export async function purgeSupersededVersions(
   for (let batch = 0; batch < maxBatches; batch++) {
     const n = await db.$transaction(async (tx) => {
       // The name comes back from the deleting statement itself, so an event is never written with a blank one.
+      // #5381: the batch is a MATERIALIZED CTE, so it is scanned once whatever the plan. Postgres 12+ may inline a CTE referenced
+      // once into the outer join, where a nested loop could rescan the LIMIT ... SKIP LOCKED per outer row (the #5348 defect).
+      // Forced-plan EXPLAIN on main showed this one was not inlined (the lock ran once inside the CTE); MATERIALIZED makes that
+      // explicit instead of relying on the planner.
       const gone = await tx.$queryRaw<PurgedVersion[]>`
-        WITH cand AS (
+        WITH batch AS MATERIALIZED (
           SELECT v.id FROM secret_versions v
           WHERE ${purgeable(days)}
           ORDER BY v.secret_id, v.version_no
           LIMIT ${batchSize}::int
           FOR UPDATE OF v SKIP LOCKED
         )
-        DELETE FROM secret_versions v USING cand, secrets s
-        WHERE v.id = cand.id AND s.id = v.secret_id AND ${purgeable(days)}
+        DELETE FROM secret_versions v USING batch, secrets s
+        WHERE v.id = batch.id AND s.id = v.secret_id AND ${purgeable(days)}
         RETURNING v.secret_id, v.version_no, v.app_id, s.name`;
       if (gone.length === 0) return 0;
       await tx.secretEvent.createMany({

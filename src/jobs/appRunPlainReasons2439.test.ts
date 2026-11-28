@@ -1,7 +1,7 @@
 /** #2439: a failed run states its cause, who can fix it and where in plain words, and a finished run exposes its cost. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, createPriceRowForTest } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { serveAgentBootPrompt } from '../test/servedBootPrompt.js';
 import { appRunMutations } from '../api/graphql/schema/resolvers.appRun.js';
@@ -31,10 +31,10 @@ async function fixture() {
   await serveAgentBootPrompt(db, agent.id, 'Test boot prompt.');
   const memory = await db.memory.create({ data: { name: 'Flow', urn: 'plain.test:flow', class: 'knowledge', organizationId: org.id } });
   await db.node.create({ data: { memoryId: memory.id, loc: 'entry', name: 'Entry', isRunnable: true, content: 'approved' } });
-    await db.aiModelPrice.create({ data: { id: generateId(), provider: 'test', model: 'test', tier: 1, inputMicroCentsPerMTok: 300_000_000n, outputMicroCentsPerMTok: 1_500_000_000n, effectiveAt: new Date('2020-01-01') } as never });
+    await createPriceRowForTest(db, { data: { id: generateId(), provider: 'test', model: 'test', tier: 1, inputMicroCentsPerMTok: 300_000_000n, outputMicroCentsPerMTok: 1_500_000_000n, effectiveAt: new Date('2020-01-01') } as never });
   const ctx = { db, userId: user.id, roles: [] };
   const schedule = await appRunMutations.createAgentSchedule({}, { input: { appRef: app.id, name: 'Plain', cron: '* * * * *', entryNodeUrn: 'hrn:node:plain.test:flow:entry', runAsSelf: true } }, ctx);
-  const run = () => mintAppRun(db, { appId: app.id, organizationId: org.id, agentId: agent.id, userId: user.id, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn });
+  const run = () => mintAppRun(db, { appId: app.id, owner: { organizationId: org.id }, agentId: agent.id, userId: user.id, triggerKind: 'SCHEDULE', triggerId: schedule.id, entryNodeUrn: schedule.entryNodeUrn });
   const llm = vi.fn(async () => ({ text: 'ok', tokensIn: 1000, tokensOut: 500, provider: 'test', model: 'test' }));
   const deps: RunExecutionDeps = { ...makeProdRunDeps(db), resolveConfig: vi.fn(async () => ({ config: { provider: 'test', model: 'test' }, ownerType: 'HADRON_SERVER' }) as never), llm, writeOutput: vi.fn(async () => null) };
   return { user, org, app, agent, memory, ctx, schedule, run, deps, llm };
@@ -99,7 +99,7 @@ describe('plain failure reasons', () => {
   it('unadopted: says who adopts and where', async () => {
     const f = await fixture();
     const legacy = await db.agentSchedule.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.user.id, name: 'Legacy', cron: '* * * * *', entryNodeUrn: f.schedule.entryNodeUrn } });
-    const run = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: 'SCHEDULE', triggerId: legacy.id, entryNodeUrn: legacy.entryNodeUrn });
+    const run = await mintAppRun(db, { appId: f.app.id, owner: { organizationId: f.org.id }, agentId: f.agent.id, userId: f.user.id, triggerKind: 'SCHEDULE', triggerId: legacy.id, entryNodeUrn: legacy.entryNodeUrn });
     expect(await executeAppRun(db, run.id, f.deps)).toBe('failed');
     const r = await reasonOf(run.id, f.ctx) as { kind: string; summary: string; whoCanFix: string; nextStep: string };
     expect(r.kind).toBe('NOT_ADOPTED');

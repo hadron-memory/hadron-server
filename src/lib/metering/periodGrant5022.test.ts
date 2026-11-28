@@ -20,6 +20,7 @@ import {
   OWNER_DEFAULT_MONTHLY_GRANT_ERROR,
   PERIOD_GRANT_SOURCE_TYPE,
   ensurePeriodGrant,
+  ownerDefaultMonthlyGrant,
   parseOwnerDefaultMonthlyGrant,
   periodGrantCacheKeysForTests,
   periodGrantDue,
@@ -35,6 +36,7 @@ const MID_DEC = new Date('2026-12-15T12:00:00.000Z');
 const JAN_1 = new Date('2027-01-01T00:00:00.000Z');
 
 let p: string;
+let q: string;
 let orgId: string;
 const grants = (where: Record<string, unknown> = {}) =>
   db.creditLedgerEntry.findMany({ where: { sourceType: PERIOD_GRANT_SOURCE_TYPE, ...where }, orderBy: { createdAt: 'asc' } });
@@ -44,6 +46,7 @@ beforeEach(async () => {
   resetPeriodGrantStateForTests();
   setPeriodGrantWriterForTests(null);
   p = (await db.user.create({ data: { id: generateId(), githubId: 50_220_001, githubUsername: 'pg-p', handle: 'pg-p', roles: ['READER'] } })).id;
+  q = (await db.user.create({ data: { id: generateId(), githubId: 50_220_002, githubUsername: 'pg-q', handle: 'pg-q', roles: ['READER'] } })).id;
   orgId = (await db.organization.create({ data: { id: generateId(), name: 'pg-org', urn: 'pg-org' } })).id;
 });
 
@@ -156,6 +159,7 @@ describe('G8: a malformed setting refuses, in one fixed sentence that echoes not
     '{', '[]', '"1"', 'null', `{"team":"1"}`, `{"${MARKER}":"1"}`, '{"user":"-1"}', '{"user":"1.5"}', '{"user":"x"}',
     `{"user":"${MARKER}"}`, '{"user":1}', '{"user":null}', '{"user":"01"}', '{"user":" 1"}', '{"user":"1e3"}', '{"user":"0x10"}',
     '{"user":"9223372036854775808"}', `{"user":"1","organization":"${MARKER}"}`,
+    '{"organization":"1"}', '{"user":"5","organization":"777"}', '{"organization":"9223372036854775807"}',
   ];
   for (const raw of bad) {
     it(`refuses ${raw}`, () => {
@@ -169,11 +173,12 @@ describe('G8: a malformed setting refuses, in one fixed sentence that echoes not
     });
   }
 
-  it('accepts the 64-bit maximum, zero, and both owner types', () => {
+  it('accepts the 64-bit maximum, zero, and an organization amount of "0" only', () => {
     expect(parseOwnerDefaultMonthlyGrant('{"user":"9223372036854775807","organization":"0"}'))
-      .toEqual({ user: 9223372036854775807n, organization: 0n });
-    expect(parseOwnerDefaultMonthlyGrant(undefined)).toEqual({ user: 0n, organization: 0n });
-    expect(parseOwnerDefaultMonthlyGrant('  ')).toEqual({ user: 0n, organization: 0n });
+      .toEqual({ user: 9223372036854775807n });
+    expect(parseOwnerDefaultMonthlyGrant('{"organization":"0"}')).toEqual({ user: 0n });
+    expect(parseOwnerDefaultMonthlyGrant(undefined)).toEqual({ user: 0n });
+    expect(parseOwnerDefaultMonthlyGrant('  ')).toEqual({ user: 0n });
   });
 });
 
@@ -232,21 +237,30 @@ describe('G11: any other failure is logged, never thrown, and retried next time'
 });
 
 describe('G12: an organization', () => {
-  it('with a non-zero organization amount, one grant on the organization\'s ledger', async () => {
-    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"organization":"777"}' });
+  it('gets no grant entry with a user grant configured, and is owed none (cor:dmo:170:12)', async () => {
+    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"user":"777","organization":"0"}' });
     await ensurePeriodGrant(db, { organizationId: orgId }, MID_NOV);
+    expect(await periodGrantDue(db, { organizationId: orgId }, MID_NOV)).toBe(0n);
+    expect(await grants()).toHaveLength(0);
     await ensurePeriodGrant(db, { userId: p }, MID_NOV);
     const rows = await grants();
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ organizationId: orgId, ownerUserId: null, amountMicroCents: 777n });
+    expect(rows[0]).toMatchObject({ organizationId: null, ownerUserId: p, amountMicroCents: 777n });
+  });
+
+  it('a non-zero organization amount refuses boot and never reaches the kept amounts', () => {
+    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"user":"5"}' });
+    expect(() => reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"user":"9","organization":"1"}' }))
+      .toThrow(OWNER_DEFAULT_MONTHLY_GRANT_ERROR);
+    expect(ownerDefaultMonthlyGrant()).toEqual({ user: 5n });
   });
 });
 
 describe('G13: the per-process set holds only the current month', () => {
   it('after ensures in two months only the second month\'s keys remain', async () => {
-    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"user":"1","organization":"1"}' });
+    reloadOwnerDefaultMonthlyGrantForTests({ OWNER_DEFAULT_MONTHLY_GRANT: '{"user":"1"}' });
     await ensurePeriodGrant(db, { userId: p }, MID_NOV);
-    await ensurePeriodGrant(db, { organizationId: orgId }, MID_NOV);
+    await ensurePeriodGrant(db, { userId: q }, MID_NOV);
     expect(periodGrantCacheKeysForTests()).toHaveLength(2);
     await ensurePeriodGrant(db, { userId: p }, MID_DEC);
     const keys = periodGrantCacheKeysForTests();

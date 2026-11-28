@@ -22,6 +22,7 @@ const SITES: Record<string, Verdict> = {
   'src/api/graphql/schema/resolvers.mutation.app.ts': { n: 2, kind: 'refuses', because: 'createApp: the App and each dependency App ask `apps`', asks: 'apps' },
   'src/api/graphql/schema/resolvers.mutation.appMemory.ts': { n: 2, kind: 'free', because: 'a memory inside an App (app_id set) is not in the `memories` count' },
   'src/api/graphql/schema/installMemory.ts': { n: 1, kind: 'free', because: 'an install memory is not in the `memories` count' },
+  'src/api/graphql/schema/chatHome.ts': { n: 1, kind: 'free', because: 'startChat\'s own personal or private memory in the App (#5027 Ask 3, app_id set) is not in the `memories` count' },
   'src/api/graphql/schema/chat-scope.ts': { n: 1, kind: 'free', because: 'the shared App-class memory (class app) is not in the `memories` count' },
   'src/api/graphql/schema/resolvers.worker.ts': { n: 1, kind: 'free', because: 'a worker memory is App-class and not in the `memories` count' },
   'src/api/graphql/schema/resolvers.mutation.session.ts': { n: 2, kind: 'free', because: 'startAgentSession memories carry app_id (class app/personal inside an App) and are never refused' },
@@ -125,6 +126,7 @@ const INSERTS: Record<string, InsertVerdict> = {
   [`${G}/resolvers.teamWork.ts#teamWorkMutations.recordTeamWork`]: { n: 1, kind: 'counts-not-refused', because: 'a worklog record; never refused' },
   'src/lib/contextReset/contextReset.ts#registerContextResetRecovery': { n: 1, kind: 'counts-not-refused', because: 'a context-reset checkpoint (a session handoff); never refused' },
   'src/lib/agentSkeleton.ts#seedAgentSkeleton': { n: 1, kind: 'counts-not-refused', because: 'an Agent\'s skeleton parents, part of creating the Agent (its own `agents` key is A7c)' },
+  'src/lib/chatbotAncestors.ts#createChatbotContainers': { n: 1, kind: 'counts-not-refused', because: '#5390: the empty container parents of a conversation, stage or prompt node. A door that refuses (writeNodeCore, hadron_create_node, hadron_create_parent_node) counts them in its own `amount` first; the Git sync in its net; the retrofit is a platform write, never refused' },
 };
 
 /**
@@ -139,7 +141,7 @@ const WRITE_NODE_CORE: Record<string, { limits: string[]; size?: string[]; becau
   [`${G}/resolvers.mutation.node.ts#nodeMutations.cloneNode`]: { limits: ['refuse'], size: ['skip'], because: 'cloneNode' },
   [`${G}/resolvers.mutation.importNode.ts#importNode.store`]: { limits: ['refuse'], because: 'importNode (update or upsert)' },
   'src/controller/operations/createAssetReferenceNode.ts#createAssetReferenceNode': { limits: ['refuse'], because: 'an asset\'s reference node' },
-  'src/lib/runner/tools/nodeTools.ts#hadronCreateNode.execute': { limits: ['refuse'], because: 'run tool create; the refusal is returned to the model (ownerLimitToolError)' },
+  'src/lib/runner/tools/nodeTools.ts#hadronCreateNode.execute': { limits: ['refuse'], because: 'run tool create; the refusal is returned to the model (createRefusalToolError)' },
   'src/lib/runner/tools/storeTools.ts#hadronStoreFile.execute': { limits: ['refuse'], because: 'hadron_store_file\'s reference node; returned to the model, asset row and object removed' },
   [`${G}/resolvers.specCorpus.ts#specCorpusMutations.reserveSpecCitation`]: { limits: ['refuse'], size: ['skip'], because: 'a reserved spec citation' },
   [`${G}/resolvers.specCorpus.ts#specCorpusMutations.allocateSpecNode`]: { limits: ['refuse'], size: ['skip'], because: 'an allocated spec node' },
@@ -263,7 +265,7 @@ const CONTENT_WRITES: Record<string, { n: number; checks: number; because: strin
   'src/api/graphql/schema/resolvers.comments.ts': { n: 3, checks: 0, because: 'comments have their own cap, COMMENT_BODY_MAX (gate, section 11 ruling 5)' },
   'src/api/graphql/schema/resolvers.mutation.chat.ts': { n: 10, checks: 0, because: 'chat roots, messages, replies and summaries: conversation the platform writes (plan decision k)' },
   'src/api/graphql/schema/resolvers.mutation.memory.ts': { n: 3, checks: 0, because: 'memory-level operations (soft delete, re-encryption of stored rows): no new content' },
-  'src/api/graphql/schema/resolvers.mutation.node.ts': { n: 11, checks: 6, because: 'the core writer (create, revive, update), searchReplaceInNodes, mergeNodes and restoreNodeRevision check; the rest are placeholder fill, revSeq, deletes' },
+  'src/api/graphql/schema/resolvers.mutation.node.ts': { n: 11, checks: 5, because: 'the core writer (create, revive, update), searchReplaceInNodes and mergeNodes check; restoreNodeRevision does NOT check (cor:dmo:060:19, Holger answer A: a restore is byte-identical to the revision it restores and adds nothing new, so history stays recoverable over a lowered ceiling; every other write to the node is still checked); the rest are placeholder fill, revSeq, deletes' },
   'src/api/graphql/schema/resolvers.mutation.session.ts': { n: 6, checks: 0, because: 'Agent snapshot and its restore (platform copy of nodes, section 11 ruling 7), revision publish and delete' },
   'src/api/graphql/schema/resolvers.questions.ts': { n: 1, checks: 0, because: 'question text has its own limits (LONG_TEXT_MAX)' },
   'src/api/graphql/schema/resolvers.recovery.ts': { n: 1, checks: 0, because: 'restoreNode un-deletes a stored node: no new content' },
@@ -278,6 +280,7 @@ const CONTENT_WRITES: Record<string, { n: number; checks: number; because: strin
   'src/integrations/github/syncGraphFromGithub.ts': { n: 3, checks: 1, because: 'each file is judged before its row is touched; over the ceiling it is skipped and reported' },
   'src/jobs/embedNodes.ts': { n: 3, checks: 0, because: 'embedding bookkeeping columns only' },
   'src/lib/agentSkeleton.ts': { n: 1, checks: 0, because: 'an Agent\'s skeleton parents, composed by the platform' },
+  'src/lib/chatbotAncestors.ts': { n: 1, checks: 0, because: '#5390: empty container parents (a name and a fixed description), composed by the platform' },
   'src/lib/channels.ts': { n: 10, checks: 0, because: 'channel roots and their revival or deletion, composed by the platform' },
   'src/lib/chatRoot.ts': { n: 3, checks: 0, because: 'a chat\'s engine state, written by the platform' },
   'src/lib/comments/lifecycle.ts': { n: 2, checks: 0, because: 'comment thread deletion and restore: no content' },

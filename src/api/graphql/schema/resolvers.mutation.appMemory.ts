@@ -34,6 +34,8 @@ import { resolveAppInstallation, listAppInstallations } from '../../../lib/appIn
 import { GraphQLError } from 'graphql';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { admitOperationRate } from '../../../lib/rateLimit/index.js';
+import { transportRateIdentity } from '../../../lib/rateLimit/identity.js';
 import { generateId } from '../../../lib/id.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { Prisma, type EmbeddingSource } from '../../../generated/prisma/index.js';
@@ -54,7 +56,7 @@ import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
-import { type Context, holdsContentReadIndependently, requireOrgRole, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches, deriveMemorySlug } from './resolvers.helpers.js';
+import { type Context, holdsContentReadIndependently, memoryIdsHeldIndependently, clampListTake, requireOrgRole, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches, deriveMemorySlug } from './resolvers.helpers.js';
 
 /** App-associable memory classes (the DB CHECK forbids app_id only on system). */
 type AppMemoryClass = 'app' | 'knowledge' | 'personal' | 'private';
@@ -204,7 +206,7 @@ async function requireAppMemoryCreator(ctx: Context, app: { organizationId: stri
 
 
 /** #5183: a collision answer for a personal/private memory carries no URN: the holder may not be the caller's. */
-function conflictWithoutUrn(): GraphQLError {
+export function conflictWithoutUrn(): GraphQLError {
   return new GraphQLError('That memory name is taken. Try again.', { extensions: { code: 'MEMORY_URN_CONFLICT' } });
 }
 
@@ -229,11 +231,12 @@ async function reclaimAllOrKeep(tx: Prisma.TransactionClient, ids: string[], use
 }
 
 /** A P2002 whose violated unique is the memory URN (Prisma reports the column list, or the index name, in meta.target). */
-function isUrnUniqueViolation(err: unknown): boolean {
+export function isUrnUniqueViolation(err: unknown): boolean {
   if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') return false;
   const target = err.meta?.target;
   const names = Array.isArray(target) ? target.map(String) : [String(target ?? '')];
-  return names.some((n) => n === 'urn' || n.includes('urn'));
+  // Exactly the memories.urn unique: the column list or its index name. A substring match would also take another constraint (e.g. a legacy_urn one).
+  return names.some((n) => n === 'urn' || n === 'memories_urn_key');
 }
 
 type UrnBlocker = { id: string; userId: string | null; appId: string | null; class: string; deletedAt: Date | null };
@@ -255,6 +258,41 @@ async function findUrnBlockers(tx: Prisma.TransactionClient, urn: string): Promi
   const aliased = viaAlias.length > 0 ? await tx.memory.findMany({ where: { id: { in: viaAlias } }, select }) : [];
   // An alias whose memory row no longer exists (hard-deleted, e.g. reclaimed) resolves to nothing: it is not a holder.
   return [...direct, ...aliased];
+}
+
+/**
+ * #5183 (cor:dmo:060:20): the derived address of a person's personal or private memory in an App: the first free
+ * `<handle>:<app>-<handle>-<class>[-n]` whose only holders, if any, are the person's OWN soft-deleted memory of this App
+ * and class (reclaimed to make room, R6). Run inside the authority transaction after the caller's app_members row is
+ * locked and the one-per-class count is judged, so a handle or App rename that won the race is seen. Shared by
+ * createMemoryInApp and, #5027, startChat's Agent default home. No free tail is the URN-free conflict answer.
+ */
+export async function mintAppUserMemoryAddress(
+  tx: Prisma.TransactionClient,
+  appId: string,
+  userId: string,
+  klass: 'personal' | 'private',
+): Promise<{ urn: string; name: string }> {
+  const lockedApp = await tx.app.findUniqueOrThrow({ where: { id: appId }, select: { urn: true } });
+  const owner = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { handle: true } });
+  const appSlug = lockedApp.urn.split(':').pop()!;
+  for (let n = 1; n <= APP_USER_MEMORY_MAX_TAIL; n++) {
+    const candidate = appUserMemorySlug({ appSlug, handle: owner.handle, memoryClass: klass }, n);
+    const urn = `${owner.handle}:${candidate}`;
+    const blockers = await findUrnBlockers(tx, urn);
+    if (blockers.length > 0) {
+      // Taken, unless every holder is the caller's OWN soft-deleted memory of this App and class (R6): that row is
+      // removed to make room. Any other holder (another user's tombstone included) is taken, and nothing of it is touched.
+      const ownTombstones = blockers.filter((b) =>
+        b.deletedAt !== null && b.userId === userId && b.appId === appId && b.class === klass);
+      if (ownTombstones.length !== blockers.length) continue;
+      // A tombstone the reclaim refuses to remove keeps its address: that candidate is taken and the next tail is
+      // tried, so a name collision never refuses (R2).
+      if (!(await reclaimAllOrKeep(tx, ownTombstones.map((b) => b.id), userId))) continue;
+    }
+    return { urn, name: candidate };
+  }
+  throw conflictWithoutUrn();
 }
 
 export const appMemoryMutations = {
@@ -495,30 +533,8 @@ export const appMemoryMutations = {
                 { extensions: { code: 'APP_USER_MEMORY_ALREADY_EXISTS', memoryClass: klass } },
               );
             }
-            // After every wait: the App's slug and the caller's handle are both in the name and the URN root.
-            const lockedApp = await tx.app.findUniqueOrThrow({ where: { id: app.id }, select: { urn: true } });
-            const owner = await tx.user.findUniqueOrThrow({ where: { id: ctx.userId! }, select: { handle: true } });
-            const appSlug = lockedApp.urn.split(':').pop()!;
-            for (let n = 1; n <= APP_USER_MEMORY_MAX_TAIL; n++) {
-              const candidate = appUserMemorySlug({ appSlug, handle: owner.handle, memoryClass: memoryClass2 }, n);
-              const urn = `${owner.handle}:${candidate}`;
-              const blockers = await findUrnBlockers(tx, urn);
-              if (blockers.length > 0) {
-                // Taken, unless every holder is the caller's OWN soft-deleted memory of this App and class (R6):
-                // that row is removed to make room. Any other holder (another user's tombstone included) is
-                // taken, and nothing of it is touched.
-                const ownTombstones = blockers.filter((b) =>
-                  b.deletedAt !== null && b.userId === ctx.userId && b.appId === app.id && b.class === klass);
-                if (ownTombstones.length !== blockers.length) continue;
-                // A tombstone the reclaim refuses to remove keeps its address: that candidate is taken and the next
-                // tail is tried, so a name collision never refuses (R2).
-                if (!(await reclaimAllOrKeep(tx, ownTombstones.map((b) => b.id), ctx.userId!))) continue;
-              }
-              return createRow(tx, {
-                urn, name: candidate, organizationId: null, ownerUserId: ctx.userId!, appUserMemory: true,
-              });
-            }
-            throw conflictWithoutUrn();
+            const own = await mintAppUserMemoryAddress(tx, app.id, ctx.userId!, memoryClass2);
+            return createRow(tx, { ...own, organizationId: null, ownerUserId: ctx.userId!, appUserMemory: true });
           }));
         } catch (err) {
           // Only a collision on the URN is a name collision: any other unique violation is a real fault.
@@ -747,6 +763,64 @@ export const appMemoryMutations = {
     );
   },
 };
+
+/** Classes the attachable-memory picker never offers: `system` (refused by attach) and `app` (R3, Decided; cor:dmo:060:22). */
+const UNATTACHABLE_CLASSES = ['system', 'app'] as const;
+
+/**
+ * #5393 (hrn:node:hadronmemory.com:specs:cor:dmo:060:22; envelope hrn:node:hadronmemory.com:specs:cor:api:120:02): the
+ * attachable-memory picker's search door, `attachableMemories(appRef, query, limit, offset)`. One page of the memories the
+ * caller could attach to the App with `attachMemoryToApp`.
+ *
+ * Judged in `attachMemoryToApp`'s own order with its own predicates, so the door has no gate of its own to drift:
+ *   person only (UNAUTHENTICATED / one FORBIDDEN for an App key, worker session, impersonation or run; these read nothing)
+ *   -> one FAN_OUT_READS admission (the #1793 findNodes pattern; a refused call reads nothing) -> `resolveAttachApp`
+ *   (unknown, deleted or not a member: one FORBIDDEN; uninstalled: APP_UNINSTALLED).
+ * Candidates are `memoryIdsHeldIndependently`, the enumeration `holdsContentReadIndependently` judges one row of, minus deleted
+ * rows, classes `system` and `app`, and every memory with ANY link row for this App (any attacher, active or inactive: a
+ * surface never offers a memory as attachable while its attachment exists). `query` is a case-insensitive contains over the
+ * name or the URN (a leading `hrn:mem:` is ignored for the URN, which is stored without it); blank means no text filter.
+ * Ordered by name then id; limit default 20, cap 200, 0 = count only.
+ */
+export async function attachableMemoriesPage(
+  ctx: Context,
+  { appRef, query, limit, offset }: { appRef: string; query?: string | null; limit?: number | null; offset?: number | null },
+) {
+  // The principal checks read nothing, so they precede the admission (findNodes' order: side-effect-free checks first).
+  if (!ctx.userId) {
+    throw new GraphQLError('Listing attachable memories requires a signed-in user.', { extensions: { code: 'UNAUTHENTICATED' } });
+  }
+  if (ctx.appKeyId || ctx.sessionId || ctx.sessionBindingRefused || ctx.impersonation || isRunPrincipal(ctx)) {
+    throw authorizationDenied();
+  }
+  await admitOperationRate(ctx, ctx.db, 'FAN_OUT_READS', ctx.limiterIdentity ?? transportRateIdentity(ctx));
+  const app = await resolveAttachApp(ctx, appRef);
+  const take = clampListTake(limit);
+  const skip = Math.max(0, offset ?? 0);
+  const ids = await memoryIdsHeldIndependently(ctx);
+  // Prisma's `contains` puts the value between `%` unescaped, so the LIKE metacharacters are escaped here: the query is
+  // matched literally, never as a pattern.
+  const literal = (text: string) => text.replace(/[\\%_]/g, (c) => `\\${c}`);
+  const raw = query?.trim() ?? '';
+  const needle = literal(raw);
+  const urnNeedle = literal(raw.replace(/^hrn:mem:/i, ''));
+  const where: Prisma.MemoryWhereInput = {
+    id: { in: ids },
+    deletedAt: null,
+    class: { notIn: [...UNATTACHABLE_CLASSES] },
+    appLinks: { none: { appId: app.id } },
+    ...(raw
+      ? { OR: [{ name: { contains: needle, mode: 'insensitive' } }, { urn: { contains: urnNeedle, mode: 'insensitive' } }] }
+      : {}),
+  };
+  const [total, items] = await Promise.all([
+    ctx.db.memory.count({ where }),
+    take === 0
+      ? Promise.resolve([])
+      : ctx.db.memory.findMany({ where, include: MEMORY_INCLUDE, orderBy: [{ name: 'asc' }, { id: 'asc' }], skip, take }),
+  ]);
+  return { items, total };
+}
 
 /** The attach target: unknown or deleted App, or a caller who is not a member, are ONE refusal; an uninstalled App then answers APP_UNINSTALLED. */
 async function resolveAttachApp(ctx: Context, appRef: string) {

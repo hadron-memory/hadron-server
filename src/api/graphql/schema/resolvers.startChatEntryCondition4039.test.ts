@@ -45,7 +45,7 @@ function conv(name: string, opts: { seq?: number | null; condition?: unknown; fl
 }
 
 async function seed(seeds: Seed[], path: 'live' | 'snapshot' = 'live') {
-  const all: Seed[] = [{ loc: 'conversations', data: null }, ...seeds];
+  const all: Seed[] = [...seeds];
   if (path === 'live') {
     for (const s of all) {
       await db.node.create({ data: {
@@ -90,7 +90,7 @@ beforeEach(async () => {
 afterEach(() => sessionKeyCache.clear()); // the cache is process-wide: a failing pin must not leak a key into the next test
 
 const startShared = (userId: string, args: Record<string, unknown> = {}) =>
-  M.startChat({}, { agentRef: agentId, scope: 'shared', ...args }, ctxFor(userId));
+  M.startChat({}, { agentRef: agentId, scope: 'shared', appRef: appId, ...args }, ctxFor(userId));
 const opened = async (userId: string, args: Record<string, unknown> = {}) => (await startShared(userId, args)).conversationName as string;
 async function refusal(userId: string, args: Record<string, unknown> = {}) {
   const err = await startShared(userId, args).then(() => null, (e: unknown) => e) as { extensions?: Record<string, any> } | null;
@@ -309,7 +309,7 @@ describe('#4039 refusals judged before any write', () => {
       userId: bob.id, userMemoryOfAgentId: agentId, appId, createdBy: alice.id,
     } });
     const before = await footprint();
-    const err = await M.startChat({}, { agentRef: agentId }, ctxFor(alice.id)).then(() => null, (e: any) => e);
+    const err = await M.startChat({}, { agentRef: agentId, appRef: appId }, ctxFor(alice.id)).then(() => null, (e: any) => e);
     expect(err?.extensions).toMatchObject({ code: 'ENTRY_CONDITION_FAILED', reason: 'MEMORY_UNREADABLE', messageId: 'chat-start.error.memory_unreadable', detail: {} });
     expect(await footprint()).toEqual(before);
     expect((await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).deletedAt).toBeNull();

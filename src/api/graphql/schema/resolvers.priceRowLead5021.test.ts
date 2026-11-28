@@ -12,7 +12,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
-import { clearPriceCache } from '../../../lib/metering/index.js';
+import { clearPriceCache, PRICE_CACHE_TTL_MS } from '../../../lib/metering/index.js';
 
 const server = new ApolloServer<Context>({ typeDefs, resolvers });
 async function gql(query: string, ctx: Partial<Context>, variables?: Record<string, unknown>) {
@@ -22,16 +22,19 @@ async function gql(query: string, ctx: Partial<Context>, variables?: Record<stri
 }
 const SET_PRICE = `mutation($input: SetAiModelPriceInput!) { setAiModelPrice(input: $input) { id effectiveAt } }`;
 const priceInput = { provider: 'anthropic', model: 'claude-lead', inputMicroCentsPerMTok: '30000000', outputMicroCentsPerMTok: '150000000' };
-const LEAD_MS = 60_000;
+const LEAD_MS = PRICE_CACHE_TTL_MS;
 
 let admin: string;
 const adminCtx = (): Partial<Context> => ({ userId: admin, roles: ['ADMIN'] });
-const NOW = new Date('2026-11-25T12:00:00.000Z');
+// #5213: the database refuses a past-dated row by ITS clock, so the frozen app clock starts at the real now (a fixed
+// date would put every accepted row in the past).
+let NOW = new Date();
 
 beforeEach(async () => {
   await cleanDb(db);
   clearPriceCache();
   admin = (await db.user.create({ data: { id: generateId(), githubId: 50221, githubUsername: 'lead-admin', roles: ['ADMIN'] } })).id;
+  NOW = new Date(Math.floor(Date.now() / 1000) * 1000); // per test: a slow run must not age the frozen clock past the DB's
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(NOW);
 });
@@ -88,4 +91,12 @@ describe('#5021 setAiModelPrice: strict ISO effectiveAt (gate ruling 7)', () => 
       expect([r.code, r.rows]).toEqual(['BAD_USER_INPUT', 0]);
     },
   );
+
+  it('pin 6 (#5213): a database clock more than the lead ahead of the app clock refuses a default insert as BAD_USER_INPUT, writing nothing', async () => {
+    vi.setSystemTime(new Date(NOW.getTime() - 2 * LEAD_MS)); // the app's clock runs two lead-lengths behind the database's
+    const res = await gql(SET_PRICE, adminCtx(), { input: priceInput });
+    expect(res.errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
+    expect(res.errors?.[0]?.message).toMatch(/past by the database's clock/);
+    expect(await db.aiModelPrice.count()).toBe(0);
+  });
 });

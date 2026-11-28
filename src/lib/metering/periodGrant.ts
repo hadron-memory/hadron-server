@@ -2,7 +2,7 @@
  * The default monthly grant (hadron-server#5022, Billing A9; hrn:node:hadronmemory.com:specs:cor:dmo:170:12).
  *
  * A deployment may give every owner a free grant each UTC calendar month: env `OWNER_DEFAULT_MONTHLY_GRANT`, JSON
- * `{ "user": "<micro-cents>", "organization": "<micro-cents>" }`, each amount a base-10 string (every money field is one; a
+ * `{ "user": "<micro-cents>" }` (an `organization` key is accepted only as "0"; a non-zero one refuses boot, cor:dmo:170:12), the amount a base-10 string (every money field is one; a
  * JSON number would lose precision past 2^53). A missing owner type, an unset or blank value, and an amount of zero all
  * mean no grant, today's behaviour. Anything else refuses boot with one fixed sentence that never echoes the value (gate
  * ruling 2).
@@ -19,17 +19,18 @@ import { createHash } from 'node:crypto';
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { ownerId, ownerType, sameOwner, type OwnerRef, type OwnerType } from '../owner.js';
 import { safeErrorCode } from '../safeErrorCode.js';
-import { grantCredits, IdempotencyConflictError } from './index.js';
+import { grantCredits, IdempotencyConflictError, LedgerOwnerDeletedError } from './index.js';
 
 export const PERIOD_GRANT_SOURCE_TYPE = 'period-grant';
 /** Who wrote the grant (gate ruling 4; the `system:gc` and A4 `system:credit-expiry` precedent), never the reader. */
 export const PERIOD_GRANT_ACTOR = 'system:period-grant';
 
-export type OwnerDefaultMonthlyGrant = Readonly<Record<OwnerType, bigint>>;
+/** Only a person gets a monthly grant: an organization gets none (cor:dmo:170:12, Decided), so the type carries no organization amount. */
+export type OwnerDefaultMonthlyGrant = Readonly<{ user: bigint }>;
 
 export const OWNER_DEFAULT_MONTHLY_GRANT_ERROR =
-  'OWNER_DEFAULT_MONTHLY_GRANT must be a JSON object with the optional keys "user" and "organization", each a non-negative ' +
-  'whole number of micro-cents written as a base-10 string within the 64-bit range; refusing to boot.';
+  'OWNER_DEFAULT_MONTHLY_GRANT must be a JSON object with the optional key "user", a non-negative ' +
+  'whole number of micro-cents written as a base-10 string within the 64-bit range; organizations get no monthly grant; refusing to boot.';
 
 const INT8_MAX = 2n ** 63n - 1n;
 const AMOUNT = /^(0|[1-9][0-9]*)$/;
@@ -37,7 +38,7 @@ const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v ===
 
 /** Parse the raw value, or throw the one fixed sentence (no part of the value, and no `cause`: a JSON parse error quotes its input). */
 export function parseOwnerDefaultMonthlyGrant(raw: string | undefined): OwnerDefaultMonthlyGrant {
-  const out: Record<OwnerType, bigint> = { user: 0n, organization: 0n };
+  const out = { user: 0n };
   if (raw === undefined || raw.trim() === '') return out;
   const bad = () => new Error(OWNER_DEFAULT_MONTHLY_GRANT_ERROR);
   let parsed: unknown;
@@ -52,7 +53,12 @@ export function parseOwnerDefaultMonthlyGrant(raw: string | undefined): OwnerDef
     if (typeof value !== 'string' || !AMOUNT.test(value)) throw bad();
     const amount = BigInt(value);
     if (amount > INT8_MAX) throw bad();
-    out[type] = amount;
+    // cor:dmo:170:12: organizations get no grant. "0" stays accepted (backward compatible); anything else refuses boot.
+    if (type === 'organization') {
+      if (amount !== 0n) throw bad();
+      continue;
+    }
+    out.user = amount;
   }
   return out;
 }
@@ -74,6 +80,9 @@ export function ownerDefaultMonthlyGrant(): OwnerDefaultMonthlyGrant {
 export function reloadOwnerDefaultMonthlyGrantForTests(env: Record<string, string | undefined>): void {
   loadOwnerDefaultMonthlyGrant(env as NodeJS.ProcessEnv);
 }
+
+/** The month's amount for `owner`: the configured user amount for a person, always zero for an organization (cor:dmo:170:12). */
+const amountFor = (owner: OwnerRef): bigint => (ownerType(owner) === 'user' ? ownerDefaultMonthlyGrant().user : 0n);
 
 /** `YYYY-MM` of `now` in UTC (cor:dmo:170:12: the period is the UTC calendar month). */
 const utcMonth = (now: Date): string =>
@@ -163,7 +172,7 @@ async function ownerDeleted(db: PrismaClient, owner: OwnerRef): Promise<boolean>
  * reader. The caller must not call it for an impersonated (read-only) session (cor:dmo:170:12 S4).
  */
 export async function ensurePeriodGrant(db: PrismaClient, owner: OwnerRef, now: Date): Promise<void> {
-  const amount = ownerDefaultMonthlyGrant()[ownerType(owner)];
+  const amount = amountFor(owner);
   if (amount <= 0n) return;
   const key = doneKey(owner, utcMonth(now));
   if (done.has(key)) return;
@@ -197,6 +206,9 @@ export async function ensurePeriodGrant(db: PrismaClient, owner: OwnerRef, now: 
       conflict();
       return;
     }
+    // #5352: the owner was deleted between the check above and the append, which refused and wrote nothing. Not a failure to
+    // retry, and not cached as done (as the deleted-owner return above).
+    if (err instanceof LedgerOwnerDeletedError) return;
     console.error('period_grant.failed', { ...logOwner(owner), code: safeErrorCode(err) });
   }
 }
@@ -208,7 +220,7 @@ export async function ensurePeriodGrant(db: PrismaClient, owner: OwnerRef, now: 
  * would. A stored entry with the pair counts as the grant whatever its amount: the owner keeps the first grant of the month.
  */
 export async function periodGrantDue(db: PrismaClient | Prisma.TransactionClient, owner: OwnerRef, now: Date): Promise<bigint> {
-  const amount = ownerDefaultMonthlyGrant()[ownerType(owner)];
+  const amount = amountFor(owner);
   if (amount <= 0n) return 0n;
   if (await ownerDeleted(db as PrismaClient, owner)) return 0n;
   return (await storedGrant(db as PrismaClient, owner, now)) ? 0n : amount;

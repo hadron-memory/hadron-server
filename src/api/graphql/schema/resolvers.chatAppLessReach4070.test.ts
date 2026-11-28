@@ -36,10 +36,8 @@ beforeEach(async () => {
   await db.appMember.create({ data: { appId, userId: consumerId, role: 'member' } });
   await db.appMember.create({ data: { appId, userId: managerId, role: 'member' } });
   for (const row of [
-    { loc: 'conversations', data: {} },
     { loc: 'conversations:flow', data: { stageOrder: ['step'], isSetup: false } },
     { loc: 'conversations:flow:step', data: { promptRef: 'prompts:step' } },
-    { loc: 'prompts', data: {} },
     { loc: 'prompts:step', content: 'LICENSED STAGE', data: {} },
     { loc: 'conversations:next', data: { stageOrder: ['next'] } },
     { loc: 'conversations:next:next', data: { promptRef: 'prompts:step' } },
@@ -59,7 +57,7 @@ beforeEach(async () => {
  *  - `'production'`: `detachAppOwnerMemories`, which clears BOTH `appId` and the pointer, as deleting or replacing an App does.
  * `{ keepApp: true }` leaves the home App-bearing, still attached to App L. */
 async function retainedHome(who: Context, { keepApp = false, detach = 'legacy' }: { keepApp?: boolean; detach?: 'legacy' | 'production' } = {}) {
-  const started = await M.startChat({}, { agentRef: agentId, scope: 'private', conversationName: 'flow' }, who);
+  const started = await M.startChat({}, { agentRef: agentId, appRef: appId, scope: 'private', conversationName: 'flow' }, who);
   const root = await chatNodeByLocOrThrow(db, started.chatId);
   if (!keepApp) {
     if (detach === 'production') await db.$transaction(tx => detachAppOwnerMemories(tx, [appId]));
@@ -178,8 +176,16 @@ describe('#4105 the knowledge-home shape', () => {
     const agentOrgId = (await db.agent.findUniqueOrThrow({ where: { id: agentId } })).organizationId!;
     await db.orgMember.create({ data: { organizationId: agentOrgId, userId: loneId, role: 'ADMIN' } });
     const loneCtx = (): Context => ({ db, userId: loneId, roles: ['READER'] });
-    const started = await M.startChat({}, { agentRef: agentId, scope: 'private', conversationName: 'flow' }, loneCtx());
+    // #5394: before, startChat provisioned this home through the Agent manager's no-App route. That route is retired (a
+    // start with no App identified is CHAT_APP_NOT_IDENTIFIED, pinned here), so the home is now the retained pre-#5394 row:
+    // started under App L, then given the knowledge-home shape that route wrote (App-less, class knowledge, ORGANIZATION).
+    const direct = await M.startChat({}, { agentRef: agentId, scope: 'private', conversationName: 'flow' }, loneCtx()).then(() => null, (e: any) => e);
+    expect(direct?.extensions?.code, 'the retired no-App route').toBe('CHAT_APP_NOT_IDENTIFIED');
+    await db.appMember.create({ data: { appId, userId: loneId, role: 'member' } });
+    const started = await M.startChat({}, { agentRef: agentId, appRef: appId, scope: 'private', conversationName: 'flow' }, loneCtx());
+    await db.appMember.delete({ where: { appId_userId: { appId, userId: loneId } } });
     const root = await chatNodeByLocOrThrow(db, started.chatId);
+    await db.memory.update({ where: { id: root.memoryId }, data: { class: 'knowledge', userId: null, appId: null, visibility: 'ORGANIZATION' } });
     const memory = await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } });
     expect([memory.class, memory.appId], 'the knowledge-home shape').toEqual(['knowledge', null]);
     await db.node.create({ data: { memoryId: memory.id, loc: 'data', name: 'data', nodeType: 'data', data: { kept: 'old' } } });

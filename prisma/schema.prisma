@@ -199,6 +199,16 @@ enum AgentLifecycle {
   SHORT_LIVED
 }
 
+/// #5027 (hrn:node:hadronmemory.com:specs:cor:acl:030:01, D-2026-11-26-008) — where a chat goes when its starter names no
+/// home memory. APP_SHARED: the App's shared memory, found or created as a `shared` chat's is. PERSONAL and PRIVATE: the
+/// caller's own memory of that class in the App (one per class, hrn:node:hadronmemory.com:specs:cor:dmo:060:20). GROUP is
+/// not a value: a group home needs a named memory.
+enum ChatHome {
+  APP_SHARED
+  PERSONAL
+  PRIVATE
+}
+
 /// #4291 (S14 of #4229; decision record run-settings-are-not-worker-identity, settled A) — the generic effort scale
 /// of a
 /// run. LOW..MAX are requests the launcher maps to the family's own values (hadron-cli#2199); UNSET is the family's
@@ -469,6 +479,8 @@ model User {
   // App/Agent/Memory). `ownedMemories` above is the personal/private strict
   // owner (Memory.userId) — a DIFFERENT relation from `tenantMemories` here.
   ownedApps                     App[]                       @relation("AppOwner")
+  /// #5077: the runs of the Apps this person owns (`app_runs.owner_user_id`).
+  ownedAppRuns                  AppRun[]                    @relation("AppRunOwner")
   ownedAgents                   Agent[]                     @relation("AgentOwner")
   tenantMemories                Memory[]                    @relation("MemoryTenantOwner")
   agentSubscriptions            AgentSubscription[]         @relation("UserAgentSubscriptions")
@@ -2258,10 +2270,10 @@ model UsageEvent {
   keyOwnerType     String?   @map("key_owner_type")
   /// Provider cost snapshot in micro-cents (1e-8 USD), computed from the
   /// AiModelPrice row effective at event time. NULL = no price known (or the
-  /// event carries no tokens). Never recomputed — prices change (FR-003).
+  /// unit predates the column). Never recomputed — prices change (FR-003).
   costMicroCents   BigInt?   @map("cost_micro_cents")
   /// #5021 (hrn:node:hadronmemory.com:specs:cor:dmo:170:06): the AiModelPrice row that priced this unit. Null when
-  /// the unit is unpriced (no row in force, a host-priced provider, no tokens) and on every unit recorded before the
+  /// the unit is unpriced (no row in force or a host-priced provider; a unit with zero tokens still records the row in force, at cost 0) and on every unit recorded before the
   /// column: it is never filled in by matching effective dates. Price rows are never deleted (the relation restricts).
   priceRowId       String?   @map("price_row_id")
   /// #5021 (hrn:node:hadronmemory.com:specs:cor:dmo:170:06): the markup applied to this unit's charge, in basis
@@ -2433,6 +2445,10 @@ model Agent {
   /// LONG_LIVED Agent that its host reports idle is reset (`worker.reset-context`), at most once an hour. Null (the default)
   /// is no cap. Written by whoever manages the Agent, like `usesTasks`. `chk_agents_context_cap` keeps it at 1 or more.
   contextCap            Int?            @map("context_cap")
+  /// #5027 (hrn:node:hadronmemory.com:specs:cor:acl:030:01) — the home a chat takes when `startChat` names neither
+  /// `memoryRef` nor `scope`. Null (the default) keeps today's behaviour. Written by whoever manages the Agent
+  /// (hrn:node:hadronmemory.com:specs:cor:dmo:050:13), like `usesTasks`.
+  defaultChatHome       ChatHome?       @map("default_chat_home")
   organizationId        String?         @map("organization_id")
   /// User owner of a user-owned Agent (rooted on the bare `<handle>` — #697 v2,
   /// no `@` sigil). The org/owner XOR is ENFORCED — `chk_agent_owner_xor` in
@@ -3897,6 +3913,12 @@ model Secret {
   /// Only meaningful for App rows (`chk_secret_protected_app_only`). A protected App secret changes only through the
   /// requester's passkey ceremony (hrn:node:hadronmemory.com:specs:cor:sec:070:02).
   protected      Boolean  @default(false)
+  /// #5335: the owner's consent that a read client's auto-delete mark may delete this secret after its use
+  /// (hrn:node:hadronmemory.com:specs:cor:sec:060:03). Needed only on a protected secret: without it a mark is refused at
+  /// issuance there, and the sweep and the last read delete nothing. On a protected secret it changes only through the
+  /// requester's passkey ceremony (hrn:node:hadronmemory.com:specs:cor:sec:070:02), and turning protection on clears it, so a
+  /// protected secret is armed only by that ceremony. App rows only (`chk_secret_delete_after_use_app_only`).
+  deleteAfterUse Boolean  @default(false) @map("delete_after_use")
   versions       SecretVersion[]
 
   // Hard delete by design (registry-row posture): a deleted secret makes
@@ -6105,7 +6127,12 @@ enum AppRunTriggerKind {
 /// #538, #832, #1719, #2047, #2438, #2439. Background (history, not law): the Spec Kit specs 040 and 049.
 model AppRun {
   id                   String               @id
-  organizationId       String               @map("organization_id")
+  /// #5077 (Billing F3a): the run's owner is copied from its App when the row is written, never taken from a caller:
+  /// exactly one of `organizationId` and `ownerUserId` is set (`chk_app_run_owner_xor`). `organizationId` has no foreign
+  /// key; `ownerUser` cascades, though account deletion keeps the user row and deletes the runs itself.
+  organizationId       String?              @map("organization_id")
+  ownerUserId          String?              @map("owner_user_id")
+  ownerUser            User?                @relation("AppRunOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
   appId                String               @map("app_id")
   /// #3689 (hrn:node:hadronmemory.com:specs:cor:agt:010:01 rev 45): every run names an existing Agent. The DATABASE
   /// guarantees it: NOT NULL with a foreign key; an Agent hard delete removes its runs (gate R4). Mint refuses an
@@ -6234,6 +6261,7 @@ model AppRun {
   @@index([agentId])
   @@index([parentRunId]) // spawn completion checks + child listings (plan-spawn)
   @@index([organizationId, createdAt])
+  @@index([ownerUserId, createdAt])
   @@index([organizationId, durationMs])
   @@map("app_runs")
 }
@@ -10511,7 +10539,14 @@ model ChatRootCounter {
   messageCount Int @default(0) @map("message_count")
   lastMessageAt DateTime? @map("last_message_at")
   updatedAt DateTime @updatedAt @map("updated_at")
+  /// #5027 (Ask 6): the Agent the chat was started with, written by startChat for every new chat. Read first by the
+  /// turn lookup (`resolveChatHomeAgent`) and by `myChats`, because a named home (a group, a private memory, another
+  /// Agent's personal memory) carries no per-Agent pointer. Null for chats started before it existed: they read
+  /// exactly as before. Not a foreign key, so deleting an Agent leaves the chat's record as it was (the turn lookup
+  /// treats a deleted Agent as today's pointer does). Never encrypted.
+  agentId String? @map("agent_id")
   chatRoot Node @relation(fields: [chatRootNodeId], references: [id], onDelete: Cascade)
+  @@index([agentId])
   @@map("chat_root_counters")
 }
 

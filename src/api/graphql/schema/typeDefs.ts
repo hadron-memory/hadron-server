@@ -2311,7 +2311,7 @@ export const typeDefs = `#graphql
     key: String!
     "The limit in force, a base-10 integer string: the owner's own limit, else the deployment default for that kind of owner. Null means unlimited."
     limit: String
-    "How much the owner holds now, a base-10 integer string, counted when asked for. A total only."
+    "How much the owner holds now, a base-10 integer string, counted when asked for. A total only. For nodes (hadron-server issue 5434): the nodes a person writes in their personal memory made under an Agent count for that person, not for the Agent's organization."
     used: String!
   }
 
@@ -3687,6 +3687,8 @@ export const typeDefs = `#graphql
     #5185 — the memories linked to this App with 'attachMemoryToApp'. You see only entries whose memory you can read in your
     own right; others are absent and not counted. 'active' is whether the link counts right now (its attacher still reads the
     memory in their own right, the App is installed, and a personal or private memory is the App owner's and was linked by the owner).
+    #5345: a user-owned memory of any other class is never active for the App's key — the record gate refuses it, so the link
+    grants the key nothing (it stays listed, inert, until detached).
     """
     attachedMemories: [AppAttachedMemory!]!
     "The App's members. null means WITHHELD from this caller (#2089): an impersonated caller, or one who reaches a user-owned App only by an outer-object route. Never read null as an empty roster. The App's owning user, a current owner-role member of a user-owned App (ruling 0260, #3765), and callers of an org-owned App get the real list (a real empty list included)."
@@ -4281,7 +4283,7 @@ export const typeDefs = `#graphql
     hostUsesPage(limit: Int, offset: Int): HostKeyUsePage!
   }
 
-  "#1749 — a scope an App key holds. A closed list: attention:deliver, and (#1709) host:operate."
+  "#1749 — a scope an App key holds. A closed list: attention:deliver, (#1709) host:operate, and (#5321) grant:read, which lets a pure key read through the memory.read grants its App holds (hrn:node:hadronmemory.com:specs:cor:acl:140:02)."
   type AppKeyScope {
     scope: String!
     grantedAt: DateTime!
@@ -5392,6 +5394,8 @@ export const typeDefs = `#graphql
     for it, and a SHORT_LIVED Agent's workers ignore it. Set by whoever manages the Agent.
     """
     contextCap: Int
+    "#5027 (hrn:node:hadronmemory.com:specs:cor:acl:030:01): the home a chat takes when startChat names neither memoryRef nor scope. Null (the default) keeps the behaviour from before this field existed. Set by whoever manages the Agent (hrn:node:hadronmemory.com:specs:cor:dmo:050:13), like usesTasks."
+    defaultChatHome: ChatHome
     type: AgentType!
     surfaces: [String!]!
     # #928/#974 persona dressing (cor:agt:020:01): universal metadata that
@@ -5632,7 +5636,7 @@ export const typeDefs = `#graphql
   }
 
   type AiServiceConfigTestError {
-    "NO_API_KEY | KEY_UNREADABLE (the stored key cannot be decrypted here; re-enter it) | CONFIG_INVALID (the config cannot be built at all, e.g. a malformed Bedrock key; no call made) | QUOTA_EXCEEDED (a platform-funded test with the org's daily token allowance used up; no call made) | LLM_CALL_FAILED (the provider call failed or timed out; see transient)"
+    "NO_API_KEY | KEY_UNREADABLE (the stored key cannot be decrypted here; re-enter it) | CONFIG_INVALID (the config cannot be built at all, e.g. a malformed Bedrock key; no call made) | QUOTA_EXCEEDED (a platform-funded test with the org's daily token allowance used up; no call made) | CREDITS_EXHAUSTED (a test on the platform's own key whose billable account has no AI credit left; no call made) | LLM_CALL_FAILED (the provider call failed or timed out; see transient)"
     code: String!
     "Provider error text, scrubbed of the key and truncated."
     message: String!
@@ -5942,9 +5946,14 @@ export const typeDefs = `#graphql
     createdAt: DateTime!
     lastMessageAt: DateTime
     """
-    017-chat-visibility-and-personal-memory.
+    017-chat-visibility-and-personal-memory. #5027: a label derived from the home memory's class (personal, private or
+    knowledge reads private; app or group reads shared), kept for installed clients.
     """
-    scope: ChatScope!
+    scope: ChatScope! @deprecated(reason: "Use homeMemoryClass and homeMemoryUrn (#5027).")
+    "#5027 (hrn:node:hadronmemory.com:specs:cor:acl:030:01, R2: every surface shows the host memory's own kind plus its URN): the class of the memory this chat lives in. scope is kept for installed clients and is a label derived from this class."
+    homeMemoryClass: MemoryClass!
+    "#5027 (hrn:node:hadronmemory.com:specs:cor:acl:030:01): the URN of the memory this chat lives in, in the same form Memory.urn returns (hrn:mem:...)."
+    homeMemoryUrn: String!
     """
     The chat's author (chat-root node's createdBy). Null for legacy
     chats predating createdBy persistence. Surfaces who started a
@@ -6936,7 +6945,7 @@ export const typeDefs = `#graphql
     id: ID!
     """The effective state, with expiry judged on the server clock: open, completed, declined (the requester declined on the ceremony page), expired, withdrawn (the requester withdrew it) or stale (the secret changed first)."""
     state: String!
-    """The requested operation: STORE, DELETE, SET_PROTECTED or CLEAR_PROTECTED. STORE is staged by createSecret and updateSecret (a create, a new value version, a metadata edit or a protection change); DELETE by deleteSecret; the protection pair by setSecretProtected."""
+    """The requested operation: STORE, DELETE, SET_PROTECTED, CLEAR_PROTECTED, SET_DELETE_AFTER_USE or CLEAR_DELETE_AFTER_USE. STORE is staged by createSecret and updateSecret (a create, a new value version, a metadata edit or a protection change); DELETE by deleteSecret; the protection pair by setSecretProtected; the deleteAfterUse pair by updateSecret(deleteAfterUse:) on a protected secret."""
     operation: String!
     """Creation time."""
     createdAt: DateTime!
@@ -6972,7 +6981,7 @@ export const typeDefs = `#graphql
     "USE requires a signed HTTPS origin and path prefix and an auth header name."
     bindingPrefix: String
     bindingHeader: String
-    "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget. Refusals, in the order they are judged: holderKind APP in REVEAL mode (GRANT_HOLDER_NOT_ALLOWED); an unreadable startsAt or expiresAt (BAD_USER_INPUT); a marked request without a window or a read budget (SECRET_AUTO_DELETE_NEEDS_LIMIT); a caller who is neither an App manager nor the writer of the secret's current version (SECRET_AUTO_DELETE_NOT_ALLOWED, where an unmarked request would get FORBIDDEN or SECRET_READ_CLIENT_SUPERSEDED)."
+    "Delete the secret at the client's last read or when its window ends. Needs a window or a read budget. Refusals, in the order they are judged: holderKind APP in REVEAL mode (GRANT_HOLDER_NOT_ALLOWED); an unreadable startsAt or expiresAt (BAD_USER_INPUT); a marked request without a window or a read budget (SECRET_AUTO_DELETE_NEEDS_LIMIT); a caller who is neither an App manager nor the writer of the secret's current version (SECRET_AUTO_DELETE_NOT_ALLOWED, where an unmarked request would get FORBIDDEN or SECRET_READ_CLIENT_SUPERSEDED); then a protected secret without deleteAfterUse (SECRET_AUTO_DELETE_NOT_ALLOWED, hrn:node:hadronmemory.com:specs:cor:sec:060:03)."
     autoDelete: Boolean! = false
     startsAt: DateTime
     expiresAt: DateTime
@@ -7042,6 +7051,8 @@ export const typeDefs = `#graphql
     updatedBy: String
     "Whether changes need a person's change request. App secrets only; always false for org and user secrets."
     protected: Boolean!
+    "Whether a read client's auto-delete mark may delete this secret after its use (hrn:node:hadronmemory.com:specs:cor:sec:060:03). Needed only on a protected secret: without it a mark is refused there, and none deletes it. Turning protection on (updateSecret(protected: true) or setSecretProtected) clears it, so a protected secret is armed only through the passkey ceremony. App secrets only; always false for org and user secrets."
+    deleteAfterUse: Boolean!
     "The newest version's number. App secrets only; null for org and user secrets (they have no versions)."
     currentVersion: Int
     "An App secret's kept versions, newest first: numbers, sizes and authorship, never a value. Paged (hrn:node:hadronmemory.com:specs:cor:api:120:04): default 20, cap 200, limit 0 counts only. Empty for org and user secrets."
@@ -7075,7 +7086,7 @@ export const typeDefs = `#graphql
     secretId: ID!
     secretName: String!
     versionNo: Int
-    "STORE | VERSION | METADATA | DELETE | PROTECT | UNPROTECT | REVEAL | PURGE (a superseded version removed by retention or the kept-versions cap)."
+    "STORE | VERSION | METADATA | DELETE | PROTECT | UNPROTECT | DELETE_AFTER_USE_ON | DELETE_AFTER_USE_OFF | REVEAL | PURGE (a superseded version removed by retention or the kept-versions cap)."
     kind: String!
     outcome: String!
     actorUserId: String
@@ -7882,7 +7893,7 @@ export const typeDefs = `#graphql
   enum AppRunTriggerKind { SCHEDULE WEBHOOK MANUAL INTEGRATION SPAWN }
 
   type AppRunFailureReason {
-    "Stable category: NOT_ADOPTED, MEMORY_UNREADABLE, CHANGED, OVER_BUDGET, POLICY_DENIED, NO_AI_CONFIG, TIMED_OUT, CANCELLED or OTHER."
+    "Stable category: NOT_ADOPTED, MEMORY_UNREADABLE, CHANGED, OVER_BUDGET, POLICY_DENIED, NO_AI_CONFIG, TIMED_OUT, CANCELLED, OUT_OF_CREDIT or OTHER."
     kind: String!
     "What happened, in plain words."
     summary: String!
@@ -7901,7 +7912,10 @@ export const typeDefs = `#graphql
     id: ID!
     "Computed grammar-v2 URN hrn:apprun:<root>:<app>:<run-id> (#696). Null for the rare multi-segment App URN the flat shape cannot express."
     urn: String
-    organizationId: ID!
+    "The organization that owns the run's App, copied at mint; null when a person owns the App (#5077, hrn:node:hadronmemory.com:specs:cor:dmo:050:12). Exactly one of organizationId and ownerUserId is set."
+    organizationId: ID
+    "The person who owns the run's App, copied at mint; null when an organization owns it (#5077, hrn:node:hadronmemory.com:specs:cor:dmo:050:12)."
+    ownerUserId: ID
     appId: ID!
     agentId: ID
     "On-behalf-of user (cor:agt:010:01). Null = pure App service identity."
@@ -9356,6 +9370,8 @@ export const typeDefs = `#graphql
   aiconf (#3857) the org that owns it or
   its App or Agent (null for a server-owned config or a user-owned App or
   Agent) — both are the extra ids those resources' canonical routes require.
+  An app run of an App a person owns (#5077) has no organization: its
+  \`organizationId\` is null.
   """
   type UrnResolution {
     kind:           String!
@@ -11270,9 +11286,9 @@ export const typeDefs = `#graphql
     (2) memories their member orgs own, (3) memories their member orgs
     subscribe to, (4) their OWN per-user Agent memories (#5026,
     hrn:node:hadronmemory.com:specs:cor:api:120:03: listed to their owner like
-    any other user-owned memory, and to nobody else, not even through
-    filter.sharedWithMe, which still omits them: a share grant on a per-user
-    memory surfaces nothing in either list).
+    any other user-owned memory, and to nobody else in this default list; a
+    personal one its owner shared appears in the grantee's
+    filter.sharedWithMe slice like any other share, #5389).
     App-key callers get the union of their installed Agents' memory items.
     A pure App key's list also holds every memory its App's links let it read
     (#5272, hrn:node:hadronmemory.com:specs:cor:api:120:03), judged at the call
@@ -11293,6 +11309,28 @@ export const typeDefs = `#graphql
     limit: 0 -> count only.
     """
     memories(filter: MemoryFilter, orgRef: ID, limit: Int, offset: Int): MemoriesPage!
+
+    """
+    #5393: the attachable-memory picker's search, one page of the memories the caller could
+    attach to this App with attachMemoryToApp (hrn:node:hadronmemory.com:specs:cor:dmo:060:20).
+
+    Who may call: the callers attachMemoryToApp admits, refused the same way. No signed-in user:
+    UNAUTHENTICATED. An App key, worker session, impersonation or run: FORBIDDEN. An unknown or
+    deleted App, or a caller who is not a member of it: the same FORBIDDEN. A member of an
+    uninstalled App: APP_UNINSTALLED. A call past the caller checks takes one
+    FAN_OUT_READS rate admission before it reads anything.
+
+    Candidates: the memories the caller reads in their own right (the same judgment attach applies,
+    so never a memory reached only through an App), except deleted ones, class system, class app,
+    and any memory already linked to this App by anyone, including a link that is inactive.
+
+    query: case-insensitive "contains" on the name or the URN (a leading hrn:mem: is ignored for
+    the URN); omitted, empty or blank applies no text filter.
+
+    Paging per hrn:node:hadronmemory.com:specs:cor:api:120:02: name ascending, id tiebreak;
+    limit default 20, cap 200; limit: 0 returns only the total. Accepts the App's ID or URN.
+    """
+    attachableMemories(appRef: ID!, query: String, limit: Int, offset: Int): MemoriesPage!
 
     "#772 — the caller's placed dashboard widgets, ordered by position. Empty for a non-user (App-key) caller."
     dashboardWidgets: [DashboardWidget!]!
@@ -11622,15 +11660,21 @@ export const typeDefs = `#graphql
     #2421, #5284: an optional phrase ranks only runnable effective-chain tasks
     with non-empty abstracts, by the vector similarity of the abstract (score),
     best first; with no embedding available, by keyword on the abstract, with
-    score null. limit defaults to 3 and may be at most 10; an empty phrase or a
-    limit outside 1 to 10 is BAD_USER_INPUT. Without a phrase the list is
-    unchanged and limit is ignored. matchedBy says which retrievers found a task.
+    score null. limit defaults to 3 and may be at most 10; an empty phrase, one
+    over 512 characters (the one bound every search surface shares, #5360), or a
+    limit outside 1 to 10 is BAD_USER_INPUT — judged on the arguments before the
+    Agent is read (#5360), so it wins over AGENT_NOT_FOUND. Without a phrase the
+    list is unchanged and limit is ignored. matchedBy says which retrievers
+    found a task.
     """
     agentTaskList(ref: ID!, phrase: String, limit: Int): [AgentListedTask!]!
     """
     #5284 (hrn:node:hadronmemory.com:specs:cor:dmo:050:24) - the role task to follow, with its body, or that no
     task fits. Give a phrase, an eventCode or both; eventCode needs appRef. With an eventCode, the App's register
-    answers first (register), and a mapped task is MATCHED by REGISTER. Otherwise the phrase ranks the Agent's
+    answers first (register), and a mapped task is MATCHED by REGISTER — but an entry that maps while its task is
+    not in the Agent's list (a stale mapping) never matches by REGISTER: it falls through, so with no phrase the
+    answer is NO_MATCH with the register still MAPPED and with a phrase the search arm decides as usual — the
+    mapping is still reported, the task never invented (#5360). Otherwise the phrase ranks the Agent's
     agentTaskList tasks on their abstracts, and the tasks scoring at or above the no-match floor (default 0.45,
     TASK_MATCH_MIN_SCORE) are MATCHED by SEARCH, best first, at most 3, with the body of the first only. With no
     embedding available nothing can reach the floor, so the answer is NO_MATCH with the keyword hits as nearest.
@@ -11638,7 +11682,9 @@ export const typeDefs = `#graphql
     omitted: your own Agent (a bound worker's, or a run's) is used, and a caller with none gets BAD_USER_INPUT.
     Without appRef the Agent is read as agentTaskList reads it; with appRef you must take part in the App and the
     Agent must be installed or cast there. Refused as APP_NOT_FOUND or AGENT_NOT_FOUND, alike for unknown and
-    unreadable. A phrase is 1 to 500 characters. Nothing is recorded or logged. The MCP tool
+    unreadable. A phrase is 1 to 512 characters after trimming (the one bound every search surface shares, #5360);
+    an eventCode is trimmed and 1 to 64 characters, the register loc atom bound (#5360) — both judged before
+    any read. Nothing is recorded or logged. The MCP tool
     hadron_get_instructions returns the same answer. Accepts IDs or URNs.
     """
     agentInstructions(agentRef: ID, appRef: ID, phrase: String, eventCode: String): AgentInstructions!
@@ -12715,8 +12761,14 @@ export const typeDefs = `#graphql
     hrn:apprun:<root>:<app>:<run-id> URN (#696). Readable by a platform admin,
     a READER of the run's organization, the run's own App key, or a user with a
     live App relationship for a run on their behalf or a MANUAL run they
-    started. A run the caller may not read returns null, exactly like a
-    missing one (#1577: no existence oracle).
+    started. A run of an App a person owns (organizationId null, #5077,
+    hrn:node:hadronmemory.com:specs:cor:dmo:050:12) is read by whoever manages
+    that App as themself (its owner
+    or an owner-role member), by the App's own key or a run of that App with no
+    user, and by a user for their own run as above; never by a platform admin,
+    an impersonated session or a run carrying a user id. A run the caller may
+    not read returns null, exactly like a missing one (#1577: no existence
+    oracle).
     """
     appRun(ref: ID!): AppRun
     "The latest run of an App resolved to a concrete run (#696) — 'current/latest/previous' are queries, never magic run-ids in URN space (cor:urn:010:02). previous: true returns the run before the latest."
@@ -14379,6 +14431,15 @@ export const typeDefs = `#graphql
     'ref' is the run's id or its hrn:apprun URN (renamed from 'id', #4141).
     A ref that cannot name a run is BAD_USER_INPUT; an unknown run answers
     NOT_FOUND "Run not found."; a non-admin keeps FORBIDDEN.
+    A run of an App a person owns (#5077,
+    hrn:node:hadronmemory.com:specs:cor:dmo:050:12) is cancelled by
+    whoever manages that App as themself (its owner or an owner-role member),
+    with the full run returned, and by a platform admin, who gets the run with
+    its content withheld: identity, owner, status, timestamps, budgets and
+    spend are kept, every other field is null and entryNodeUrn is the empty
+    string. Anyone who may read the run but not cancel it (the App's own key,
+    a member for their own run) gets FORBIDDEN; anyone who may not read it
+    gets NOT_FOUND, as for a missing run.
     """
     cancelAppRun(ref: ID!): AppRun!
 
@@ -14457,6 +14518,11 @@ export const typeDefs = `#graphql
     """
     Open a session — and, when \`input.workerRef\` is given, a WORKER SESSION:
     the binding that makes the work attributable to that named teammate.
+
+    Refusals worth knowing (#5266, none quotes your value): a \`parentSessionId\` or \`prevSessionId\` that names no
+    session you may read answers SESSION_NOT_FOUND, the same for a session that does not exist and for one you may not read,
+    before anything is written; an \`id\` that is already taken answers SESSION_ID_TAKEN, whoever owns the existing row,
+    your own repeat included (a repeat is not a resume: resume through the claim and \`--session\` paths).
 
     The binding is held server-side and is independent of the caller's CHAT
     SESSION (the human's Desktop window, Claude Code session or IDE chat).
@@ -14941,8 +15007,11 @@ export const typeDefs = `#graphql
     through any App); when you lose read the link goes inert, and it works again if you regain it. A user, with or without the
     App selected, gains nothing from a link. For a 'personal' or 'private' memory the key reads it only when the memory's owner
     is the App's owner (a user-owned App whose owner linked their own memory); in an organization's App the link is inert for
-    the key. Any class except 'system', in any tenant. One memory may be linked into several Apps. A link you already hold is
-    success and writes nothing. 'agentRef' is accepted and ignored (deployed clients keep working).
+    the key. The same holds for a user-owned memory of any other class (#5345): a knowledge or group memory under a user root
+    never reaches the key through a link — attaching gives no access, and the record gate refuses it — so the link sits inert
+    (listed with 'active: false' in attachedMemories) until it is detached. You may attach any class except 'system', in
+    any tenant, and the attach succeeds even when the link stays inert. One memory may be linked into several Apps. A link
+    you already hold is success and writes nothing. 'agentRef' is accepted and ignored (deployed clients keep working).
 
     Person only: a signed-in user acting as themselves, and a member of the App. Typed errors, judged in this order before any
     write: UNAUTHENTICATED (no signed-in user); FORBIDDEN (an App key, run, worker session or impersonation; also an unknown or
@@ -15177,7 +15246,7 @@ export const typeDefs = `#graphql
 
     Accepts the entity's ID or URN.
     """
-    updateAgent(ref: ID!, name: String, urn: String, description: String, systemMemoryRef: ID, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#4224: omitted or null leaves it unchanged." lifecycle: AgentLifecycle, "#4225: the context cap in tokens, a whole number from 1; omitted leaves it, null clears it (no cap)." contextCap: Int, registerDefaults: RegisterDefaultsInput, "#2171 (R211): replaces the member roles the Agent offers (and nothing else in its installation policy). Omitted or null: unchanged. Empty or malformed: BAD_USER_INPUT. Existing members keep their role." memberRoles: [String!]): Agent!
+    updateAgent(ref: ID!, name: String, urn: String, description: String, systemMemoryRef: ID, visibility: AgentVisibility, listedOnMarketplace: Boolean, type: AgentType, surfaces: [String!], personaRole: String, usesTasks: Boolean, resetContextAfterTask: Boolean, "#4224: omitted or null leaves it unchanged." lifecycle: AgentLifecycle, "#4225: the context cap in tokens, a whole number from 1; omitted leaves it, null clears it (no cap)." contextCap: Int, registerDefaults: RegisterDefaultsInput, "#2171 (R211): replaces the member roles the Agent offers (and nothing else in its installation policy). Omitted or null: unchanged. Empty or malformed: BAD_USER_INPUT. Existing members keep their role." memberRoles: [String!], "#5027 (hrn:node:hadronmemory.com:specs:cor:acl:030:01): the Agent's default chat home. Omitted leaves it; null clears it (today's behaviour). The same gate as every other field here: whoever manages the Agent (hrn:node:hadronmemory.com:specs:cor:dmo:050:13)." defaultChatHome: ChatHome): Agent!
 
     """
     Soft-delete an Agent and its owned system memory. Requires management
@@ -15443,13 +15512,14 @@ export const typeDefs = `#graphql
     SECRET_PROTECTED_NEEDS_PASSKEY with extensions requestId and ceremonyUrl, no
     secret exists yet, and the requester's own passkey ceremony at that URL makes
     it (hrn:node:hadronmemory.com:specs:cor:sec:070:02). A staged request lasts
-    one hour; at most 5 are open per secret name and at most 2 per requester
-    (SECRET_CHANGE_REQUEST_LIMIT, SECRET_CHANGE_REQUESTER_LIMIT). Across the App at
-    most 100 are open (SECRET_CHANGE_APP_LIMIT) and one requester holds at most 20
-    (SECRET_CHANGE_REQUESTER_LIMIT). A staged create counts open protected creates
-    toward the App's 500-secret limit and is refused SECRET_LIMIT_REACHED at staging
-    when there is no room; completion rejudges it. Those numbers are engineering
-    bounds, not ruled values (hrn:node:hadronmemory.com:specs:cor:sec:070:02).
+    one hour. Open staged requests are capped by scope (#5356): at most 5 per
+    secret name (SECRET_CHANGE_REQUEST_LIMIT); at most 2 per requester for one
+    secret name and at most 20 per requester across the App, both refused with
+    SECRET_CHANGE_REQUESTER_LIMIT; and at most 100 across the App
+    (SECRET_CHANGE_APP_LIMIT). These four caps are engineering bounds, not ruled
+    values (hrn:node:hadronmemory.com:specs:cor:sec:070:02). A staged create counts
+    open protected creates toward the App's 500-secret limit and is refused
+    SECRET_LIMIT_REACHED at staging when there is no room; completion rejudges it.
     """
     createSecret(
       ownerType: String!
@@ -15472,7 +15542,13 @@ export const typeDefs = `#graphql
     SECRET_PROTECTED_NEEDS_PASSKEY with extensions requestId and ceremonyUrl instead
     of a Secret, and nothing changes until the requester completes the passkey
     ceremony (hrn:node:hadronmemory.com:specs:cor:sec:070:02). The expiry and the two
-    caps are as for createSecret.
+    caps are as for createSecret. One exception: protected: true on a secret
+    that is already protected, with no value and with metadata omitted or
+    identical to the stored metadata, asks for no change and answers the
+    Secret unchanged, staging nothing, to a person who passes the staging
+    checks (hrn:node:hadronmemory.com:specs:cor:sec:070:01). A worker session,
+    an App key, an impersonation and a run keep SECRET_PROTECTED_NEEDS_PASSKEY,
+    as for a real change.
     Legacy webfetch-auth rows (written before metadata.type was derived from
     the value) recover differently per owner kind, because only org and user
     rows are re-validated against their own decrypted stored value. There, any
@@ -15482,8 +15558,18 @@ export const typeDefs = `#graphql
     while a metadata-only edit of such a row is refused (the stored type is
     unavailable) until a value rewrite restores it. This holds for protected
     and unprotected App rows alike; it is not part of the passkey rules above.
+    deleteAfterUse (App secrets only; refused on org and user secrets) is the
+    consent that lets a read client's auto-delete mark delete a PROTECTED secret
+    (hrn:node:hadronmemory.com:specs:cor:sec:060:03). On an unprotected secret it is
+    a plain field any member may set, and changes nothing by itself; turning protection
+    on (here or through setSecretProtected) clears it, so a protected secret is armed only
+    through the ceremony below. On a protected
+    secret it must be passed alone and is staged as SET_DELETE_AFTER_USE or
+    CLEAR_DELETE_AFTER_USE through the requester's ceremony, as above; setting it
+    needs the secret's creator or whoever manages the App. Asking for the value it
+    already has returns the Secret and changes nothing.
     """
-    updateSecret(ref: ID!, metadata: JSON, value: JSON, protected: Boolean): Secret!
+    updateSecret(ref: ID!, metadata: JSON, value: JSON, protected: Boolean, deleteAfterUse: Boolean): Secret!
     """
     Turn protection on or off for an App secret, through your own passkey ceremony
     (hrn:node:hadronmemory.com:specs:cor:sec:070:02). The payload is a Secret only when
@@ -15682,9 +15768,22 @@ export const typeDefs = `#graphql
     # ── Chat API ──────────────────────────────────────────────────────
     """
     Start an AGENT CHAT (creates chat nodes, loads conversation, returns
-    compiled prompt). When called by a JWT user, the agent chat is created in
-    that user's personal memory for the agent (provisioned lazily if
-    needed).
+    compiled prompt). When called by a signed-in user, a private agent chat is
+    created in that user's personal memory for the agent in the identified App
+    (provisioned lazily if needed).
+
+    #5394 (hrn:node:hadronmemory.com:specs:cor:cht:010:02): the App that supplies
+    the chatbot and keeps the chat is the one the call identifies: an App
+    credential's own App, or otherwise appRef (an ID or URN, as agentRef; the
+    CLI's global --app). No App is ever searched for. With neither, or with an
+    appRef that names another App than the credential's, the call is refused
+    CHAT_APP_NOT_IDENTIFIED before the Agent is resolved, so it says nothing
+    about the Agent. An appRef the caller takes no part in, or that names no
+    App, is refused exactly like an App the caller cannot use (the unknown-Agent
+    refusal for a private chat, SHARED_CHAT_REQUIRES_APP_CONTEXT for a shared
+    one), so it says nothing about the App either. Install, licence and
+    participation are judged against that App alone, and an existing home is
+    reused only if it belongs to it.
 
     #1034: an **agent chat** — deliberately not "chat session", which is
     reserved for the human's own conversation and names no row in this schema,
@@ -15699,12 +15798,15 @@ export const typeDefs = `#graphql
     evaluated refuses with ENTRY_CONDITION_FAILED (extensions reason, messageId
     and detail), and nothing is created. A named start never checks a condition.
     """
-    # 017: scope defaults to private (FR-003). A shared request
-    # requires a JWT user with an AppMember row in some App that
-    # installs this Agent (FR-006 + research.md Q-R2). Otherwise:
-    #   - MCP App-key session → SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS
-    #   - JWT user without a qualifying AppMember row, or no auth →
-    #     SHARED_CHAT_REQUIRES_APP_CONTEXT
+    # 017: scope defaults to private (FR-003). #5394: a shared request
+    # runs under the identified App, an App credential's included, which
+    # installs this Agent with a live licence (FR-006), and is started by a
+    # person: a signed-in user who is an AppMember of that App, or the user a
+    # pure App key of that App acts for, who must be a live AppMember of the
+    # App or a user the App created (createAppUser; #5430). Otherwise
+    # SHARED_CHAT_REQUIRES_APP_CONTEXT (or the unknown-user refusal for a user
+    # the key may not act for). Either way the chat lives in the App's shared
+    # app-class memory. (SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS is retired.)
     #
     # 019: isTestRun suppresses the AgentSubscription auto-provision
     # side-effect for chats started by the spec-019 Tester. Default
@@ -15727,7 +15829,7 @@ export const typeDefs = `#graphql
     # session, and chats only with its session's Agent. Anything else reads as an unknown user
     # or Agent. A signed-in user acts as themselves. The
     # subscription is provisioned in the transaction that creates the chat.
-    startChat(agentRef: ID!, userId: String, conversationName: String, scope: ChatScope = private, isTestRun: Boolean = false, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String, "#3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): optional AI config choice for this chat, stored with it: \`default\` or one of the chat App's own config ids from chatAiConfigChoices. Omitted keeps what the chat has. Any other id is refused as a missing config, revealing nothing about it." aiConfigChoice: String): ChatStartResult!
+    startChat(agentRef: ID!, userId: String, conversationName: String, "Omitted: memoryRef decides when given, else the Agent's defaultChatHome, else private (#5027). With memoryRef it must be omitted or equal the label the named memory's class derives, else BAD_USER_INPUT, judged after the memoryRef gate so it never discloses the class of a memory the caller cannot use, and before anything is written." scope: ChatScope, "#5027 (hrn:node:hadronmemory.com:specs:cor:acl:030:01): the memory the chat is saved in, an id or URN. It must be readable and writable by the caller as themselves, of class app, group, personal or private, and of this App's scope; anything else is refused CHAT_HOME_INVALID with one fixed message, before anything is created. An encrypted memory is allowed; with no cached key the start answers MEMORY_ENCRYPTED_NO_KEY." memoryRef: ID, isTestRun: Boolean = false, "#3096 / hrn:node:hadronmemory.com:specs:cor:dmo:150:08: optional client-reported model id, at most 256 UTF-16 code units, no control/format/line-separator characters or unpaired surrogates. Omitted or null fills empty for this call. Used only for prompt text and its immutable record, labelled client-reported; never billing, quotas or authorization. Invalid input refuses BAD_USER_INPUT without echoing it." llmModel: String, "#3957 (hrn:node:hadronmemory.com:specs:cor:dmo:050:10): optional AI config choice for this chat, stored with it: \`default\` or one of the chat App's own config ids from chatAiConfigChoices. Omitted keeps what the chat has. Any other id is refused as a missing config, revealing nothing about it." aiConfigChoice: String, "#5394 (hrn:node:hadronmemory.com:specs:cor:cht:010:02): the App this chat runs under (ID or URN), for a caller whose credential carries no App; the CLI's global --app. Naming another App than the credential's is refused CHAT_APP_NOT_IDENTIFIED." appRef: ID): ChatStartResult!
     """
     Process a user message (saves message, builds context, returns next prompt).
     #3501: CHAT_STATE_INVALID refuses unusable conversational state before the turn writes or builds a model prompt.
@@ -17194,7 +17296,7 @@ export const typeDefs = `#graphql
     \`instruction\` (hrn:node:hadronmemory.com:specs:cor:dmo:050:12 S6, ruling 0098; hrn:node:hadronmemory.com:specs:cor:dmo:050:05;
     hrn:node:hadronmemory.com:specs:cor:acl:010:01). ${RUN_REFUSAL_3340} A worker session that is refused cannot tell a missing key from an existing one.
     An admitted instructed revoke records one team event (never the key id); a key already revoked records none.
-    AppKey has no URN; the id is raw ID-only.
+    AppKey has no URN; the id is raw ID-only. An unknown key id answers APP_KEY_NOT_FOUND to a person (#5266); it never quotes the id.
     """
     revokeAppKey(id: ID!, instruction: ActInstructionInput): Boolean!
     """
@@ -17912,10 +18014,12 @@ export const typeDefs = `#graphql
     HALT
   }
 
-  "#2022 — a stop signal's scope: one worker, a team (its head and the whole reporting tree under it), or the workers a host registration lists."
+  "#2022 — a stop signal's scope: one worker, a team (its head and the whole reporting tree under it), every worker of the App (#5325), or the workers a host registration lists."
   enum StopSignalScope {
     WORKER
     TEAM
+    "#5325 (hrn:node:hadronmemory.com:specs:cor:agt:090:02) — every live worker of the App, worked out each time it is checked: a worker cast after the signal is covered from its birth. It names no target."
+    APP
     HOST
   }
 
@@ -17929,7 +18033,7 @@ export const typeDefs = `#graphql
     id: ID!
     level: StopSignalLevel!
     scope: StopSignalScope!
-    "WORKER and TEAM: the target worker (a team by its head)."
+    "WORKER and TEAM: the target worker (a team by its head). APP and HOST: null."
     targetWorkerId: ID
     "HOST: the target host's id."
     targetHostId: String
@@ -17963,9 +18067,9 @@ export const typeDefs = `#graphql
     appRef: String!
     level: StopSignalLevel!
     scope: StopSignalScope!
-    "WORKER and TEAM: the target worker (a team by its head)."
+    "WORKER and TEAM: the target worker (a team by its head). APP: none (a worker named with APP is BAD_USER_INPUT). A host key never sets APP."
     worker: String
-    "HOST: the host's id. A host key may omit it: its own host is taken from its binding."
+    "HOST: the host's id. A host key may omit it: its own host is taken from its binding. APP: none (a host named with APP is BAD_USER_INPUT too)."
     host: String
     "When it ends on its own; later than now. Omitted: until lifted."
     until: DateTime
@@ -18241,6 +18345,16 @@ export const typeDefs = `#graphql
   and model: a reporting input, never authorization.
   """
   enum EffortLevel { LOW MEDIUM HIGH XHIGH MAX UNSET NOT_APPLICABLE }
+
+  "#5027 (hrn:node:hadronmemory.com:specs:cor:acl:030:01, D-2026-11-26-008): where a chat goes when its starter names no home memory. There is no GROUP value: a group home needs a named memory, so it is chosen only through startChat(memoryRef:)."
+  enum ChatHome {
+    "The App's shared memory, found or created as a shared chat's is."
+    APP_SHARED
+    "The caller's own personal memory in the App (one per class, hrn:node:hadronmemory.com:specs:cor:dmo:060:20)."
+    PERSONAL
+    "The caller's own private memory in the App (one per class, hrn:node:hadronmemory.com:specs:cor:dmo:060:20)."
+    PRIVATE
+  }
 
   "#4224 (S3 of #4229): how long an Agent's workers run."
   enum AgentLifecycle {

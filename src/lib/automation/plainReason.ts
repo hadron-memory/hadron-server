@@ -10,7 +10,7 @@
  */
 export type PlainRunFailureKind =
   | 'NOT_ADOPTED' | 'MEMORY_UNREADABLE' | 'CHANGED' | 'OVER_BUDGET'
-  | 'POLICY_DENIED' | 'NO_AI_CONFIG' | 'TIMED_OUT' | 'CANCELLED' | 'OTHER';
+  | 'POLICY_DENIED' | 'NO_AI_CONFIG' | 'TIMED_OUT' | 'CANCELLED' | 'OUT_OF_CREDIT' | 'OTHER';
 
 export interface PlainRunFailure { kind: PlainRunFailureKind; summary: string; whoCanFix: string; nextStep: string }
 
@@ -60,6 +60,11 @@ const REASONS: Record<PlainRunFailureKind, Omit<PlainRunFailure, 'kind'>> = {
     whoCanFix: 'Whoever cancelled it.',
     nextStep: 'Start a new run if it is still needed.',
   },
+  OUT_OF_CREDIT: {
+    summary: 'The run stopped because the account has no AI credit left for work on the platform’s own AI provider.',
+    whoCanFix: 'The owner of the App.',
+    nextStep: 'Add AI credit to the account, or set up the App’s own AI provider key, then run it again.',
+  },
   OTHER: {
     summary: 'The run stopped because of an error.',
     whoCanFix: 'The App owner.',
@@ -90,6 +95,8 @@ export function plainRunFailure(run: RunLike, context?: { automationLabel?: stri
   else if (code === 'ACTIVATION_DENIED' && f.reason === 'DENIED_BUDGET') kind = 'OVER_BUDGET';
   else if (code === 'ACTIVATION_DENIED' && f.reason === 'DENIED_POLICY') kind = 'POLICY_DENIED';
   else if (code === 'ACTIVATION_DENIED' && f.reason === 'DENIED_CANCELLED') kind = 'CANCELLED';
+  // #5023: a run halted at a model hop because its billable account ran out of credit (cor:acl:050:05).
+  else if (code === 'ACTIVATION_DENIED' && f.reason === 'DENIED_CREDITS') kind = 'OUT_OF_CREDIT';
   else if (code === 'NO_AI_CONFIG') kind = 'NO_AI_CONFIG';
   else if (code === 'TIMEOUT' || run.status === 'TIMED_OUT') kind = 'TIMED_OUT';
   else if (code === 'CANCELLED' || run.status === 'CANCELLED') kind = 'CANCELLED';

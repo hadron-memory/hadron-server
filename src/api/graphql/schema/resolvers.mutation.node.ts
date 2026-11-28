@@ -135,6 +135,7 @@ import {
   lockLocForWrite,
   lockNodeForDelete,
 } from '../../../lib/nodeSubtreeLock.js';
+import { createChatbotContainers, missingChatbotContainers } from '../../../lib/chatbotAncestors.js';
 import {
   mergeNodeFields,
   ALL_NODE_MERGE_FIELDS,
@@ -1518,9 +1519,6 @@ async function writeNodeCoreRaw(
               return { conflict: false, node: unchanged };
             }
 
-            // #5019 — an edit that leaves the node over the ceiling is refused, whichever field it changes; inline edges are not node content.
-            if (changes.length > 0 || changesUnversionedField) assertSizeCeiling(currentForDiff);
-
             // #1328 — before the first write of this edit, and judged on the
             // locked row: the role before and after, the claim, the current
             // task revision. A write that changes no authored field needs no
@@ -1531,6 +1529,11 @@ async function writeNodeCoreRaw(
               runnable: mergedGovernedState(current, { role: input.role, isRunnable: input.isRunnable }).isRunnable,
               mintHuman: true, authoredChange: authoredContentChanged(changes),
             }, opts.authoring);
+
+            // #5019 — an edit that leaves the node over the ceiling is refused, whichever field it changes; inline edges
+            // are not node content. #5223: after the role and authoring gates — a size refusal counts stored fields, so a
+            // writer those gates refuse must not learn the over/under bit.
+            if (changes.length > 0 || changesUnversionedField) assertSizeCeiling(currentForDiff);
 
             // A guarded claim happens only after the no-op decision and inside
             // this transaction. Since revSeq names the CURRENT state, the
@@ -1871,9 +1874,16 @@ async function writeNodeCoreRaw(
             // #5015 — a fresh insert or a revive adds a live node to the memory's owner. The owner is read under the
             // memory row lock `assertMemoryWriteStateStable` holds, and the owner-limit key is the LAST lock this write
             // takes (gate ruling 5): after it the write only touches the row it holds and the loc whose key it holds.
+            // #5390 — a conversation, stage or prompt node that this write adds also gets its missing container parents
+            // (`conversations`, `prompts`, `prompts:<name>`), under the ancestor keys held above. They are live nodes, so
+            // the owner-limit check counts them with this one (cor:acl:150:04, FIT pin (a)).
+            const containers = !authoritative || reviving ? await missingChatbotContainers(tx, input.memoryId, [input.loc]) : [];
             if ((!authoritative || reviving) && opts.ownerLimit === 'refuse') {
-              await requireNodeHeadroom(tx, { memoryId: input.memoryId, caller: ownerLimitCaller(opts?.transaction?.requestContext ?? ctx) });
+              await requireNodeHeadroom(tx, {
+                memoryId: input.memoryId, amount: 1n + BigInt(containers.length), caller: ownerLimitCaller(opts?.transaction?.requestContext ?? ctx),
+              });
             }
+            await createChatbotContainers(tx, input.memoryId, containers, createdBy ?? null);
             const upserted = await tx.node.upsert({
               ...upsertArgs,
               create: { ...upsertArgs.create, ...(authoredStamp ?? {}), ...(nestedSeq != null ? { seq: nestedSeq } : {}) },
@@ -3308,6 +3318,16 @@ export const nodeMutations = {
         plaintext: { content: string | null; abstract: string | null };
         /** #2041 S2b — content before the replace; the row lock below revalidates it (revisionStateMatches). */
         storedContent: string | null;
+        /**
+         * #5223 — the decrypted row the ceiling is measured against. The size check no longer runs in the planning
+         * pass (a dry run cannot run the authoring gate, so it must not answer the size bit at all); the write pass
+         * measures from this. Freshness: `revisionStateMatches` compares every `TRACKED_NODE_FIELDS` entry — the
+         * four size-counted fields (content, description, data, properties) among them — between this plan's raw row
+         * and the FOR UPDATE-locked row, so any concurrent change to a size-counted field refuses the batch
+         * (NODE_WRITE_CONFLICT) instead of being measured stale; the one deliberately unversioned field, ownerRepo,
+         * is not size-counted. (The spec door instead re-snapshots under its row locks — see searchReplaceSpec.ts.)
+         */
+        sizeBasis: NodeContentFields;
         fieldResults: Array<{ field: string; matches: number }>;
         total: number;
         abstractChanged: boolean;
@@ -3426,8 +3446,6 @@ export const nodeMutations = {
         }
 
         if (total > 0) {
-          // #5019 — the resulting node, for the whole batch before any write, as the abstract cap above.
-          assertNodeContentSize(resultingNodeContent(changed, pt));
           plans.push({
             raw,
             isEncrypted: memEnc.isEncrypted,
@@ -3437,6 +3455,7 @@ export const nodeMutations = {
               abstract: abstractChanged ? (changed.abstract as string | null) : pt.abstract,
             },
             storedContent: pt.content ?? null,
+            sizeBasis: pt,
             fieldResults,
             total,
             abstractChanged,
@@ -3603,7 +3622,7 @@ export const nodeMutations = {
         for (const id of [...planMemory.keys()].sort()) {
           await ensureCurrentNodeRevisionInTransaction(tx, id, { expectedMemoryId: planMemory.get(id)! });
         }
-        const authoredStamps = new Map<string, NodeAuthorshipStamp | null>();
+        const authored: Array<{ plan: Plan; stamp: NodeAuthorshipStamp | null }> = [];
         for (const p of plans) {
           const locked = await tx.node.findUnique({ where: { id: p.raw.id } });
           // deletedAt is not a revisioned field, so a delete that committed
@@ -3618,12 +3637,23 @@ export const nodeMutations = {
           // and on what the row changes (compared on plaintext in the plan, which
           // the check above just proved current); one refusal refuses the batch,
           // like every check here.
-          authoredStamps.set(p.raw.id, await assertAuthoring(tx, p.raw.memoryId, {
-            priorRole: locked.role, priorRunnable: locked.isRunnable,
-            role: locked.role, runnable: locked.isRunnable, mintHuman: true, authoredChange: p.authoredChange,
-          }, authoring));
+          authored.push({
+            plan: p,
+            stamp: await assertAuthoring(tx, p.raw.memoryId, {
+              priorRole: locked.role, priorRunnable: locked.isRunnable,
+              role: locked.role, runnable: locked.isRunnable, mintHuman: true, authoredChange: p.authoredChange,
+            }, authoring),
+          });
         }
-        for (const p of plans) {
+        // #5019 (moved here by #5223): the whole batch's authoring gates have run; now every size check, then the
+        // writes. A size refusal counts stored fields, so a writer the authoring gate refuses (on this row or any
+        // other) must not learn the over/under bit — a batch whose row 1 is over-size and whose row 2 the gate
+        // refuses answers authoring, never the size bit. The dry run above never answers it either. A thunk, like
+        // every #5223 door: the ceiling costs nothing when none is set.
+        for (const { plan: p } of authored) {
+          assertNodeContentSize(() => resultingNodeContent(p.changed, p.sizeBasis));
+        }
+        for (const { plan: p, stamp } of authored) {
           const raw = p.raw;
           // #88: the bulk-edit rationale rides in revLabel (#620); `changes`
           // is exactly the field set the replace pass rewrote on this node.
@@ -3666,7 +3696,7 @@ export const nodeMutations = {
           }
           data.revisionContentHash = revisionStateHashRefreshMarker();
 
-          if (p.authoredChange) Object.assign(data, authoredStamps.get(raw.id) ?? clearNodeAuthorship());
+          if (p.authoredChange) Object.assign(data, stamp ?? clearNodeAuthorship());
           await tx.node.update({ where: { id: raw.id }, data });
           if (p.contentChanged || p.abstractChanged) {
             raw.embeddingWorkToken = await stampEmbeddingObligation(tx, raw.id, raw.memoryId);
@@ -4751,11 +4781,8 @@ export const nodeMutations = {
         throw e;
       }
 
-      // #5019 — the merged target, before any write. A merge that touches no encrypted field holds no key, so the stored
-      // body is then measured from its envelope.
-      if (Object.keys(changed).length > 0) {
-        assertNodeContentSize(() => resultingNodeContent(changed, tgtEnc.isEncrypted && !touchesEncrypted ? withEncryptedSizes(target) : tgtPt));
-      }
+      // #5019/#5223 — the merged target's size is measured inside the write transaction below, after its role-writer
+      // and authoring gates, from `tgtPt` (or the ciphertext envelope when the merge touches no encrypted field).
 
       // Post-merge plaintext content drives the spec-032 abstract hash.
       const postMergeContent = contentChanged
@@ -4924,6 +4951,14 @@ export const nodeMutations = {
           authoredChange: Object.keys(changed).length > 0,
           mintHuman: false, // a fold, not an authoring write (D-2026-09-26-D)
         }, authoringFromRequest(ctx, input.authoredWith));
+        // #5019 (moved here by #5223): the merged target, before any write, after the gates above. Freshness:
+        // `revisionStateMatches` above compared every `TRACKED_NODE_FIELDS` entry — the four size-counted fields
+        // (content, description, data, properties) among them — for BOTH endpoints against these locked rows, so
+        // `changed`, `tgtPt` and `touchesEncrypted` (all computed from the pre-transaction reads) describe the rows
+        // being written; the one deliberately unversioned field, ownerRepo, is not size-counted.
+        if (Object.keys(changed).length > 0) {
+          assertNodeContentSize(() => resultingNodeContent(changed, tgtEnc.isEncrypted && !touchesEncrypted ? withEncryptedSizes(target) : tgtPt));
+        }
         await createNodeRevision(
           tx,
           buildNodeRevisionSnapshot(target, editorFromAuth(ctx), {
@@ -5353,8 +5388,6 @@ export const nodeMutations = {
           decryptNodeFieldsWithKey(logicalCurrent, requireKey(current.memoryId));
         }
         const changes = diffNodeChanges(logicalCurrent, logicalRestoreFields);
-        // #5019 — a restore is checked like an update (the gate; exempting it is cor:dmo:060:19's Open Question).
-        assertNodeContentSize(resultingNodeContent(logicalRestoreFields, logicalCurrent));
         const restoreFields = { ...logicalRestoreFields };
         if (selectedDestination.isEncrypted) {
           Object.assign(restoreFields, encryptNodeFieldsWithKey(plaintextFields, requireKey(current.memoryId)));
@@ -5399,6 +5432,13 @@ export const nodeMutations = {
           'objectType' in restoreFields ? (restoreFields.objectType as string | null) : current.objectType,
           'properties' in restoreFields ? restoreFields.properties : current.properties,
         );
+        // cor:dmo:060:19 (Decided: Holger, 2026-11-27, answer A) — a restore is deliberately NOT
+        // checked against NODE_CONTENT_MAX_BYTES, even when the ceiling was lowered after that
+        // version was written: a restore is byte-identical to the revision it came from and adds
+        // nothing new (cor:dmo:060:04), so history stays recoverable. Exempt from the ceiling only —
+        // the role-writer and schema gates above still run, and every OTHER write to the node
+        // (updateNode, search-and-replace, merge, …) is still checked; the same content sent as an
+        // ordinary update refuses NODE_CONTENT_TOO_LARGE.
         if (truncate) {
           // #617 truncate: collapse the history so the selected revision becomes
           // the new baseline. Delete every snapshot NEWER than the selected one

@@ -8,7 +8,7 @@
  * and its unit records neither column and debits nobody.
  */
 import type { PrismaClient } from '../../generated/prisma/index.js';
-import { ownerOfWork, type OwnerRef } from '../owner.js';
+import { ownerOfWork, requireOwnerRefOf, type OwnerRef } from '../owner.js';
 
 /** A client or a transaction client: the lookup reads through whichever the caller holds. */
 type Db = Pick<PrismaClient, 'app' | 'agent'>;
@@ -28,4 +28,14 @@ export async function billableAccountFor(
   // row the rule does not reach.
   const agent = !app && work.agentId ? await db.agent.findUnique({ where: { id: work.agentId }, select: OWNER_SELECT }) : null;
   return ownerOfWork(app, agent);
+}
+
+/**
+ * #5023 (blind review F2): the billable account of a headless run, in ONE place. The credit gate (at launch and at each model
+ * hop) and the usage record of each hop both call it, so what is checked and what is debited cannot drift apart. #5077 (F3a):
+ * the run's owner, an organization or a person, copied from its App at mint (`chk_app_run_owner_xor`). A row naming no owner,
+ * or both, throws: it never becomes a unit with no billable account.
+ */
+export function billableAccountOfRun(run: { organizationId: string | null; ownerUserId: string | null }): OwnerRef {
+  return requireOwnerRefOf(run);
 }

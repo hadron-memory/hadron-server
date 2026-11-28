@@ -66,6 +66,7 @@ import { chatToolChoiceFor, RESPOND_ONCE_INSTRUCTION, sdkToolChoiceFor } from '.
 import { respondToolDefinition } from '../../api/graphql/schema/resolvers.helpers.js';
 import { recordLlmUsage } from '../../lib/metering/index.js';
 import { billableAccountFor } from '../../lib/metering/billableAccount.js';
+import { CreditsExhaustedError, gateCredit } from '../../lib/metering/gate.js';
 import type { OwnerRef } from '../../lib/owner.js';
 import { decryptToken, encryptToken } from '../../lib/tokenCrypto.js';
 import { defaultQuotaLimit, reserveQuota, settleReservation } from '../../jobs/appRuns.js';
@@ -642,6 +643,23 @@ export async function testAiServiceConfig(
   // reservation covers prompt margin PLUS the probe's capped output (#1413,
   // QA #2596: base + cap, so a realistic prompt and the full capped reply
   // settle inside what was reserved).
+  // #5023 (gate ruling 5, cor:acl:050:05): the credit check before the reservation and before either leg. A test that runs on
+  // the platform's own key has a billable account only if the config's owner is one; the platform's own config has none (A13),
+  // and work with no billable account is never gated, so this refuses nothing today. It is kept so the check stays uniform
+  // if a test ever names a billable account.
+  try {
+    await gateCredit(ctx.db, keyOwnerType, billableAccount);
+  } catch (err) {
+    if (!(err instanceof CreditsExhaustedError)) throw err;
+    return {
+      ...base,
+      ok: false,
+      latencyMs: 0,
+      reply: null,
+      error: { code: 'CREDITS_EXHAUSTED', message: err.message, transient: true },
+    };
+  }
+
   const quotaScope = keyOwnerType === 'HADRON_SERVER' && quotaOrganizationId ? quotaOrganizationId : null;
   const reserveTokens = AI_CONFIG_TEST_TOKEN_RESERVE + probeMaxTokens;
   const reservation = quotaScope

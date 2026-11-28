@@ -30,6 +30,7 @@ import { assertManualRunAllowed, mintManualRun } from './resolvers.appRun.js';
 import { publishRunRequested } from '../../../jobs/appRuns.js';
 import { lockInstallAuthorityFirst } from './installMemory.js';
 import { type Context, requireMemoryWriteAccess, concealUnreadableDenial, withoutRequestCaches } from './resolvers.helpers.js';
+import type { OwnerRef } from '../../../lib/owner.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
 
 export interface ImportNodeInput {
@@ -140,7 +141,7 @@ export const importNodeMutations = {
     // run itself is minted after the write (it needs the stored node's URN).
     let taskRun: {
       entryNodeUrn: string;
-      app: { id: string; organizationId: string; agentId: string | null };
+      app: { id: string; owner: OwnerRef; agentId: string | null };
       runAsSelf: boolean;
       importedMemoryUrn: string;
     } | null = null;

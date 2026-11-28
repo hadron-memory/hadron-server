@@ -9,7 +9,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import { db } from '../../integrations/db/client.js';
-import { cleanDb } from '../../test/helpers.js';
+import { cleanDb, createPriceRowForTest } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import {
   applyMarkup,
@@ -39,7 +39,7 @@ async function mkPrice(
   outRate = OUT_RATE,
   extra: { tier?: number; markupBasisPoints?: number | null } = {},
 ) {
-  return db.aiModelPrice.create({
+  return createPriceRowForTest(db, {
     data: {
       id: generateId(),
       provider,

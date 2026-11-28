@@ -18,6 +18,7 @@ import { withAuthorizedTx } from './authorizedTx.js';
 import { requireOwnerOrOrgRole, type Context } from './resolvers.helpers.js';
 
 import { projectAutomationReadGrant } from './automationReadGrantProjection.js';
+import { isOwnedBy, requireOwnerRefOf, sameOwnerRef } from '../../../lib/owner.js';
 
 export type AutomationTriggerKind = 'SCHEDULE' | 'WEBHOOK' | 'MANUAL';
 export interface AutomationTriggerRef { triggerKind: AutomationTriggerKind; triggerRef: string }
@@ -55,7 +56,10 @@ export async function requireAdopterContext(ctx: Context): Promise<string> {
 }
 
 type App = NonNullable<Awaited<ReturnType<Context['db']['app']['findFirst']>>>;
-type TriggerRow = { id: string; appId: string; organizationId: string; userId: string | null; entryNodeUrn: string; entryNodeId?: string | null };
+/** #5077: a MANUAL row is an AppRun, whose owner may be a person (`organizationId` null, `ownerUserId` set); schedule and webhook rows are an organization's until F3b. */
+type TriggerRow = { id: string; appId: string; organizationId: string | null; ownerUserId?: string | null; userId: string | null; entryNodeUrn: string; entryNodeId?: string | null };
+/** The owner a trigger row states (throws on a row naming none or both: fails closed). */
+const triggerOwner = (row: { organizationId: string | null; ownerUserId?: string | null }) => requireOwnerRefOf({ organizationId: row.organizationId, ownerUserId: row.ownerUserId ?? null });
 /**
  * May this caller adopt this trigger? THE one admission predicate (#2436) behind every adoption surface —
  * preview, the approval detail, approve, decline, re-adopt, and the adoptable list's run-as-user arm —
@@ -77,9 +81,13 @@ async function canAdopt(ctx: Context, app: App, row: TriggerRow): Promise<boolea
   }
 }
 /** The live App behind a trigger. An org-owned App must be the trigger's own org; a user-owned App has no organization (#2441), so any trigger org is accepted and the owner's strict-owner gate decides. */
-async function liveApp(ctx: Context, row: { appId: string; organizationId: string }) {
+async function liveApp(ctx: Context, row: { appId: string; organizationId: string | null; ownerUserId?: string | null }) {
   const app = await ctx.db.app.findFirst({ where: { id: row.appId, deletedAt: null, uninstalledAt: null } });
-  return app && (app.organizationId === null || app.organizationId === row.organizationId) ? app : null;
+  if (!app) return null;
+  // #5077: a person's run (a MANUAL row with no organization) belongs to an App that same person owns, compared by owner
+  // (`isOwnedBy`), never by two nullable organization ids.
+  if (row.organizationId === null) return isOwnedBy(app, triggerOwner(row)) ? app : null;
+  return app.organizationId === null || app.organizationId === row.organizationId ? app : null;
 }
 async function load(ctx: Context, input: AutomationTriggerRef) {
   const actorId = await requireAdopterContext(ctx);
@@ -103,7 +111,7 @@ async function load(ctx: Context, input: AutomationTriggerRef) {
 const entryRefOf = (row: TriggerRow, format: AutomationPinFormat) =>
   format === 'hadron-automation-pin-v3' ? row.entryNodeUrn : row.entryNodeId ?? row.entryNodeUrn;
 async function preview(ctx: Context, row: Awaited<ReturnType<typeof load>>, format: AutomationPinFormat = 'hadron-automation-pin-v4') {
-  const pin = await captureAutomationPin(ctx.db, row.appId, row.userId, entryRefOf(row, format), row.organizationId, ctx, configSelection(row), { format });
+  const pin = await captureAutomationPin(ctx.db, row.appId, row.userId, entryRefOf(row, format), triggerOwner(row), ctx, configSelection(row), { format });
   const memories = new Set(Object.values(pin.nodes).map(n => String(n.state.memoryId)));
   for (const id of memories) if (!await canReadMemory(ctx.db, ctx, id)) throw callerCannotRead();
   return pin;
@@ -286,10 +294,12 @@ type Row = Awaited<ReturnType<typeof load>>;
 async function adoptionDoor<T>(ctx: Context, input: AutomationTriggerRef, write: (tx: Prisma.TransactionClient, txCtx: Context, row: Row) => Promise<T>): Promise<T> {
   const observed = await load(ctx, input);
   let row = observed;
+  const observedOwner = triggerOwner(observed);
   return withAuthorizedTx(ctx, [ { kind: 'app', id: observed.appId },
-    { kind: 'org', id: observed.organizationId },
+    // #5077: the owner's anchor, an organization or a person.
+    'organizationId' in observedOwner ? { kind: 'org' as const, id: observedOwner.organizationId } : { kind: 'user' as const, id: observedOwner.userId },
     ...(observed.userId ? [{ kind: 'user' as const, id: observed.userId }] : []) ],
-    async txCtx => { row = await load(txCtx, input); if (row.appId !== observed.appId || row.userId !== observed.userId || row.organizationId !== observed.organizationId) throw denied(); },
+    async txCtx => { row = await load(txCtx, input); if (row.appId !== observed.appId || row.userId !== observed.userId || !sameOwnerRef(triggerOwner(row), observedOwner)) throw denied(); },
     (tx, txCtx) => write(tx, txCtx, row),
     { afterLock: async tx => {
       if (input.triggerKind === 'SCHEDULE') await tx.$queryRaw`SELECT id FROM agent_schedules WHERE id = ${observed.id} FOR UPDATE`;
