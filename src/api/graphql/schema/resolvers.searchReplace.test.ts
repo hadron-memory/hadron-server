@@ -1,6 +1,6 @@
 /**
  * searchReplaceInNodes — bulk literal/regex search-and-replace across selected
- * nodes. Covers selection (nodeIds / memoryIds / prefix), field coverage,
+ * nodes. Covers selection (nodeRefs / memoryRefs / prefix), field coverage,
  * dryRun, the name/abstract guards, revision snapshots, and regex mode.
  */
 
@@ -85,7 +85,7 @@ describe('searchReplaceInNodes — selection + replacement', () => {
     const res = await call({
       oldText: 'cat',
       newText: 'dog',
-      memoryIds: [memory.id],
+      memoryRefs: [memory.id],
       fields: ['content', 'description', 'tags'],
     });
 
@@ -109,7 +109,7 @@ describe('searchReplaceInNodes — selection + replacement', () => {
     const res = await call({
       oldText: 'cat',
       newText: 'dog',
-      memoryIds: [memory.id],
+      memoryRefs: [memory.id],
       fields: ['content'],
       dryRun: true,
     });
@@ -130,7 +130,7 @@ describe('searchReplaceInNodes — selection + replacement', () => {
     const res = await call({
       oldText: 'cat',
       newText: 'dog',
-      memoryIds: [memory.id],
+      memoryRefs: [memory.id],
       prefix: 'auth',
       fields: ['content'],
     });
@@ -142,14 +142,14 @@ describe('searchReplaceInNodes — selection + replacement', () => {
     expect((await db.node.findUnique({ where: { id: other.id } }))?.content).toBe('cat');
   });
 
-  it('selects explicit nodeIds (deduped against memoryIds)', async () => {
+  it('selects explicit nodeRefs (deduped against memoryRefs)', async () => {
     const a = await makeNode('a', { content: 'cat' });
     await makeNode('b', { content: 'cat' });
 
     const res = await call({
       oldText: 'cat',
       newText: 'dog',
-      nodeIds: [a.id],
+      nodeRefs: [a.id],
       fields: ['content'],
     });
     expect(res.nodesScanned).toBe(1);
@@ -158,7 +158,7 @@ describe('searchReplaceInNodes — selection + replacement', () => {
 
   it('writes a NodeRevision snapshot for each changed node', async () => {
     const a = await makeNode('a', { content: 'cat' });
-    await call({ oldText: 'cat', newText: 'dog', nodeIds: [a.id], fields: ['content'] });
+    await call({ oldText: 'cat', newText: 'dog', nodeRefs: [a.id], fields: ['content'] });
     const versions = await db.nodeRevision.findMany({ where: { nodeId: a.id } });
     expect(versions).toHaveLength(1);
     expect(versions[0].content).toBe('cat'); // pre-change snapshot
@@ -172,7 +172,7 @@ describe('searchReplaceInNodes — selection + replacement', () => {
     await call({
       oldText: 'cat',
       newText: 'dog',
-      nodeIds: [a.id],
+      nodeRefs: [a.id],
       fields: ['content'],
       reason: 'rename across corpus',
     });
@@ -187,7 +187,7 @@ describe('searchReplaceInNodes — selection + replacement', () => {
     await call({
       oldText: '(\\w+)@(\\w+)',
       newText: '$2.$1',
-      nodeIds: [a.id],
+      nodeRefs: [a.id],
       fields: ['content'],
       regex: true,
     });
@@ -201,7 +201,7 @@ describe('searchReplaceInNodes — guards', () => {
   it('rejects a replacement that would empty a required name', async () => {
     const a = await makeNode('only-name', { name: 'cat' });
     await expect(
-      call({ oldText: 'cat', newText: '', nodeIds: [a.id], fields: ['name'] }),
+      call({ oldText: 'cat', newText: '', nodeRefs: [a.id], fields: ['name'] }),
     ).rejects.toThrow(/would leave it empty/i);
   });
 
@@ -211,33 +211,33 @@ describe('searchReplaceInNodes — guards', () => {
       call({
         oldText: 'x',
         newText: 'y'.repeat(2001),
-        nodeIds: [a.id],
+        nodeRefs: [a.id],
         fields: ['abstract'],
       }),
     ).rejects.toThrow(/2000/);
   });
 
-  it('requires at least one of nodeIds / memoryIds', async () => {
+  it('requires at least one of nodeRefs / memoryRefs', async () => {
     await expect(
       call({ oldText: 'a', newText: 'b', fields: ['content'] }),
-    ).rejects.toThrow(/nodeIds.*memoryIds/);
+    ).rejects.toThrow(/nodeRefs.*memoryRefs/);
   });
 
-  it('rejects prefix without memoryIds', async () => {
+  it('rejects prefix without memoryRefs', async () => {
     await expect(
-      call({ oldText: 'a', newText: 'b', nodeIds: ['x'], prefix: 'auth', fields: ['content'] }),
+      call({ oldText: 'a', newText: 'b', nodeRefs: ['x'], prefix: 'auth', fields: ['content'] }),
     ).rejects.toThrow(/prefix/i);
   });
 
   it('rejects an empty fields list', async () => {
     await expect(
-      call({ oldText: 'a', newText: 'b', memoryIds: [memory.id], fields: [] }),
+      call({ oldText: 'a', newText: 'b', memoryRefs: [memory.id], fields: [] }),
     ).rejects.toThrow(/field/i);
   });
 
   it('rejects an invalid regex pattern', async () => {
     await expect(
-      call({ oldText: '(', newText: 'b', memoryIds: [memory.id], fields: ['content'], regex: true }),
+      call({ oldText: '(', newText: 'b', memoryRefs: [memory.id], fields: ['content'], regex: true }),
     ).rejects.toThrow(/invalid search pattern/i);
   });
 });
@@ -253,7 +253,7 @@ describe('#1294 — truthful selected/scanned/skipped reporting', () => {
     const result = await gqlCall({
       oldText: 'needle',
       newText: 'changed',
-      nodeIds: [ordinary.id, governed.id],
+      nodeRefs: [ordinary.id, governed.id],
       fields: ['content'],
       dryRun: true,
     });
@@ -283,7 +283,7 @@ describe('#1294 — truthful selected/scanned/skipped reporting', () => {
       const res = await call({
         oldText: 'needle',
         newText: 'changed',
-        nodeIds: [governed.id, ordinary.id, governed.id],
+        nodeRefs: [governed.id, ordinary.id, governed.id],
         fields: ['content'],
         dryRun,
       });
@@ -316,7 +316,7 @@ describe('#1294 — truthful selected/scanned/skipped reporting', () => {
       const res = await call({
         oldText: 'needle',
         newText: 'changed',
-        memoryIds: [memory.id],
+        memoryRefs: [memory.id],
         prefix: 'scope',
         fields: ['content'],
         dryRun,
@@ -365,7 +365,7 @@ describe('#1294 — truthful selected/scanned/skipped reporting', () => {
     const res = await call({
       oldText: 'needle',
       newText: 'changed',
-      nodeIds: [rootId, governedRootId],
+      nodeRefs: [rootId, governedRootId],
       fields: ['content'],
     });
 
@@ -422,7 +422,7 @@ describe('#1294 — truthful selected/scanned/skipped reporting', () => {
           input: {
             oldText: 'needle',
             newText: 'changed',
-            nodeIds: [hidden.id],
+            nodeRefs: [hidden.id],
             fields: ['content'],
           },
         } as never,
@@ -463,10 +463,13 @@ describe('#1298 — concurrent edits between selection and bulk write', () => {
     const atBulkWrite = new Promise<void>((resolve) => { reached = resolve; });
     const mayCommit = new Promise<void>((resolve) => { release = resolve; });
     let hooked = false;
+    let bulkPid = -1;
+    const contenderPids: number[] = [];
     const spy = vi.spyOn(db, '$transaction').mockImplementation((async (arg: unknown, opts?: unknown) => {
       if (!hooked && typeof arg === 'function') {
         hooked = true;
         return (original as any)(async (tx: any) => {
+          bulkPid = (await tx.$queryRaw`SELECT pg_backend_pid() AS pid`)[0].pid;
           const update = tx.node.update.bind(tx.node);
           vi.spyOn(tx.node, 'update').mockImplementation(async (args: any) => {
             const written = await update(args);
@@ -479,9 +482,13 @@ describe('#1298 — concurrent edits between selection and bulk write', () => {
           return arg(tx);
         }, opts);
       }
+      if (typeof arg === 'function') return (original as any)(async (tx: any) => {
+        contenderPids.push((await tx.$queryRaw`SELECT pg_backend_pid() AS pid`)[0].pid);
+        return arg(tx);
+      }, opts);
       return (original as any)(arg, opts);
     }) as never);
-    return { atBulkWrite, release, restore: () => spy.mockRestore() };
+    return { atBulkWrite, release, restore: () => spy.mockRestore(), get bulkPid() { return bulkPid; }, contenderPids };
   }
 
   it('move-first refuses a selected node after it crosses into an unauthorized memory', async () => {
@@ -500,7 +507,7 @@ describe('#1298 — concurrent edits between selection and bulk write', () => {
     await expect(beforeBulkTransaction(
       () => resolvers.Mutation.moveNode({}, { sourceRef: node.id, targetMemoryRef: destination.id }, ctx()),
       () => resolvers.Mutation.searchReplaceInNodes({}, {
-        input: { oldText: 'cat', newText: 'dog', nodeIds: [node.id], fields: ['content'] },
+        input: { oldText: 'cat', newText: 'dog', nodeRefs: [node.id], fields: ['content'] },
       } as never, { db, roles: ['READER'], userId: writer.id } as Context),
     )).rejects.toMatchObject({ extensions: { code: 'NODE_WRITE_CONFLICT' } });
 
@@ -515,9 +522,9 @@ describe('#1298 — concurrent edits between selection and bulk write', () => {
     const node = await makeNode('same-field', { content: 'cat' });
     await expect(beforeBulkTransaction(
       () => resolvers.Mutation.updateNode({}, {
-        input: { id: node.id, content: 'cat plus cat' },
+        input: { ref: node.id, content: 'cat plus cat' },
       } as never, ctx()),
-      () => call({ oldText: 'cat', newText: 'dog', nodeIds: [node.id], fields: ['content'] }),
+      () => call({ oldText: 'cat', newText: 'dog', nodeRefs: [node.id], fields: ['content'] }),
     )).rejects.toMatchObject({ extensions: { code: 'NODE_WRITE_CONFLICT' } });
 
     const after = await db.node.findUniqueOrThrow({ where: { id: node.id } });
@@ -532,9 +539,9 @@ describe('#1298 — concurrent edits between selection and bulk write', () => {
     const b = await makeNode('atomic:b', { content: 'cat' });
     await expect(beforeBulkTransaction(
       () => resolvers.Mutation.updateNode({}, {
-        input: { id: b.id, content: 'cat changed' },
+        input: { ref: b.id, content: 'cat changed' },
       } as never, ctx()),
-      () => call({ oldText: 'cat', newText: 'dog', nodeIds: [a.id, b.id], fields: ['content'] }),
+      () => call({ oldText: 'cat', newText: 'dog', nodeRefs: [a.id, b.id], fields: ['content'] }),
     )).rejects.toMatchObject({ extensions: { code: 'NODE_WRITE_CONFLICT' } });
 
     expect(await db.node.findUniqueOrThrow({ where: { id: a.id } })).toMatchObject({ content: 'cat', revSeq: 1 });
@@ -550,7 +557,7 @@ describe('#1298 — concurrent edits between selection and bulk write', () => {
       () => ensureChannelWithRoot(db, {
         memoryId: memory.id, loc: 'channel-race', name: 'channel-race', createdBy: admin.id,
       }),
-      () => call({ oldText: 'cat', newText: 'dog', nodeIds: [node.id, ordinary.id], fields: ['content'] }),
+      () => call({ oldText: 'cat', newText: 'dog', nodeRefs: [node.id, ordinary.id], fields: ['content'] }),
     );
     expect(result).toMatchObject({
       nodesSelected: 2,
@@ -565,29 +572,33 @@ describe('#1298 — concurrent edits between selection and bulk write', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: ordinary.id } })).content).toBe('dog');
   });
 
-  it('bulk-first holds the row lock until its write commits, then the move sees that content', async () => {
+  it('bulk-first holds the memory handshake until its write commits, then the move sees that content', async () => {
     const node = await makeNode('bulk-first', { content: 'cat' });
     const destination = await db.memory.create({
       data: { id: generateId(), organizationId: org.id, urn: 'sr-org:dest', name: 'dest', class: 'knowledge' },
     });
     const paused = pauseBulkAfterWriting(node.id);
 
-    const bulk = call({ oldText: 'cat', newText: 'dog', nodeIds: [node.id], fields: ['content'] });
+    const bulk = call({ oldText: 'cat', newText: 'dog', nodeRefs: [node.id], fields: ['content'] });
     let move: Promise<unknown> | undefined;
     try {
       await paused.atBulkWrite;
       move = resolvers.Mutation.moveNode({}, { sourceRef: node.id, targetMemoryRef: destination.id }, ctx());
+      const [{ key }] = await db.$queryRaw<Array<{ key: number }>>`SELECT hashtext(${'channel-host:' + memory.id}) AS key`;
       await vi.waitFor(async () => {
         const waits = await db.$queryRaw<Array<{ pid: number }>>`
-          SELECT pid FROM pg_stat_activity
-          WHERE datname = current_database() AND wait_event_type = 'Lock'
-            AND query LIKE '%nodes%' AND pid <> pg_backend_pid()
+          SELECT pid FROM pg_locks WHERE locktype='advisory' AND NOT granted
+            AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
+            AND pid=ANY(${paused.contenderPids}::int[]) AND classid=${key < 0 ? 4294967295 : 0}::bigint::oid
+            AND objid=${key >>> 0}::bigint::oid AND objsubid=1
+            AND ${paused.bulkPid}=ANY(pg_blocking_pids(pid))
         `;
         expect(waits.length).toBeGreaterThan(0);
-      }, { timeout: 2_000, interval: 25 });
+      }, { timeout: 8_000, interval: 10 });
     } finally {
       paused.release();
       paused.restore();
+      await Promise.allSettled([bulk, ...(move ? [move] : [])]);
     }
     await bulk;
     await move;
@@ -602,7 +613,7 @@ describe('#1298 — concurrent edits between selection and bulk write', () => {
   it('bulk-first holds the Channel key until commit, then an ancestor Channel can claim the address', async () => {
     const node = await makeNode('late-channel:child', { content: 'cat' });
     const paused = pauseBulkAfterWriting(node.id);
-    const bulk = call({ oldText: 'cat', newText: 'dog', nodeIds: [node.id], fields: ['content'] });
+    const bulk = call({ oldText: 'cat', newText: 'dog', nodeRefs: [node.id], fields: ['content'] });
     let channel: Promise<unknown> | undefined;
     try {
       await paused.atBulkWrite;

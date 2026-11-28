@@ -16,6 +16,7 @@ vi.mock('../../services/embedding/enqueue.js',async original=>({...await origina
 import { sweepUnreportedHostOperations } from '../hostOperations/settle.js';
 import { CLAIM_LEASE_MS } from './types.js';
 import { sweepContextResets, registerContextResetRecovery } from './contextReset.js';
+import { joinHostForKey } from '../../test/agentTeamHost.js';
 vi.mock('../../integrations/github/writeNodeToGit.js',()=>({writeNodeToGit:vi.fn().mockResolvedValue(undefined)}));
 vi.mock('../bus/index.js',()=>({getBusClient:vi.fn(async()=>null)}));
 let f:ResetFixture;
@@ -51,10 +52,22 @@ it('replays the stored node through each registered nonended phase, ignoring cha
 });
 it.each(['both','neither'])('refuses %s checkpoint inputs without a node or phase change',async mode=>{
  const s=await claimed(),n=await nodeCount();
+ // Straight after the claim, before any refusal or fixture row exists: only the claim's own audit write can make this 1.
+ expect(await db.hostKeyUse.count({where:{appKeyId:f.orca1.id,action:'reset',operationId:s.operationId,refusedCode:null}})).toBe(1);
  expect(await code(call(s,mode==='both'?{checkpointNode:(await f.checkpoint()).id}:{checkpoint:undefined}))).toBe('RECOVERY_REF_INVALID');
  expect(await nodeCount()).toBe(n+(mode==='both'?1:0));
  expect((await db.contextReset.findUniqueOrThrow({where:{id:s.resetId}})).phase).toBe('claimed');
- expect((await db.hostKeyUse.findMany({where:{appKeyId:f.orca1.id,action:mode==='both'?'checkpoint':'reset'}})).at(-1)?.refusedCode).toBe('RECOVERY_REF_INVALID');
+ // #4424: read the refusal by its code, never by position. The table is append-only, so put an accepted row AFTER the
+ // refusal (timestamp taken from the stored refusal), the order that made `.at(-1)` return null; the filtered read must still find it.
+ // Reads are by f.orca1.id, which is a fresh key per case (setUpResetFixture runs in beforeEach). They are not scoped to
+ // operationId because a refusal row can legally carry none.
+ const action=mode==='both'?'checkpoint':'reset';
+ const refusal=await db.hostKeyUse.findFirstOrThrow({where:{appKeyId:f.orca1.id,action,refusedCode:'RECOVERY_REF_INVALID'}});
+ const key=await db.appKey.findUniqueOrThrow({where:{id:f.orca1.id}});
+ await db.hostKeyUse.create({data:{id:generateId(),appKeyId:key.id,appId:key.appId,hostId:refusal.hostId,action,operationId:s.operationId,refusedCode:null,usedAt:new Date(refusal.usedAt.getTime()+1000)}});
+ const rows=await db.hostKeyUse.findMany({where:{appKeyId:f.orca1.id,action},orderBy:{usedAt:'asc'}});
+ expect(rows.at(-1)?.refusedCode).toBeNull(); // the position-based read would now see an accepted row
+ expect(rows.filter(r=>r.refusedCode==='RECOVERY_REF_INVALID')).toHaveLength(1);
 });
 it.each(['missing-memory','encrypted'])('refuses %s working memory and writes nothing',async kind=>{
  const s=await claimed(),n=await nodeCount();
@@ -72,7 +85,7 @@ it.each(['epoch','phase','lease','collected','host','app','missing','malformed',
  else if(kind==='lease'){await db.contextReset.update({where:{id:s.resetId},data:{claimedAt:new Date(0)}});p=call(s,{checkpoint:{title:'',content:''}});expected='CLAIM_LAPSED';}
  else if(kind==='collected'){p=call(s,{epoch:0});expected='HOST_OPERATION_NOT_COLLECTED';}
  else if(kind==='host'){const k=await f.hostKey('other');auditKey=k.id;p=call(s,{},k);expected='CONTEXT_RESET_NOT_FOUND';}
- else if(kind==='app'){const other=await db.app.create({data:{organizationId:f.orgId,name:'Other',urn:`other-${generateId()}`}});const key=await db.appKey.create({data:{appId:other.id,keyHash:generateId(),keyPreview:'test'}});auditKey=key.id;await M.grantAppKeyScope({}, {id:key.id,scope:'host:operate',hostId:'orca1'},ctx(f.manager.id));p=M.registerContextResetRecovery({}, {input:{...input(s),appRef:other.id}}, {...f.keyCtx(key),appId:other.id});expected='CONTEXT_RESET_NOT_FOUND';}
+ else if(kind==='app'){const other=await db.app.create({data:{organizationId:f.orgId,name:'Other',urn:`other-${generateId()}`}});const key=await db.appKey.create({data:{appId:other.id,keyHash:generateId(),keyPreview:'test'}});auditKey=key.id;await joinHostForKey(db,key.id,'orca1');await M.grantAppKeyScope({}, {id:key.id,scope:'host:operate',hostId:'orca1'},ctx(f.manager.id));p=M.registerContextResetRecovery({}, {input:{...input(s),appRef:other.id}}, {...f.keyCtx(key),appId:other.id});expected='CONTEXT_RESET_NOT_FOUND';}
  else if(kind==='missing'||kind==='malformed'){p=call(s,{resetId:kind==='missing'?generateId():'invalid/id'});expected='CONTEXT_RESET_NOT_FOUND';}
  else if(kind==='scope'||kind==='revoked'){if(kind==='scope')await M.revokeAppKeyScope({}, {id:f.orca1.id,scope:'host:operate'},ctx(f.manager.id));else await db.appKey.update({where:{id:f.orca1.id},data:{revokedAt:new Date()}});p=call(s);expected='APP_KEY_SCOPE_REQUIRED';}
  else if(kind==='person'){auditKey=null;p=M.registerContextResetRecovery({}, {input:{appRef:f.app.id,...input(s)}},ctx(f.manager.id));}
@@ -93,11 +106,11 @@ it.each([false,true])('generic GraphQL and MCP writes stay refused, claimed=%s',
  for(const mem of memories){
   const node=await f.checkpoint(mem.id),before=await db.node.findMany({orderBy:{id:'asc'}}),edgeCount=await db.edge.count();
   for(const loc of ['ordinary:probe','sheds:auto-test']){
-   await expect(M.createNode({}, {input:{memoryId:mem.id,loc,name:'No',content:'No'}},f.keyCtx())).rejects.toBeDefined();
+   await expect(M.createNode({}, {input:{memoryRef:mem.id,loc,name:'No',content:'No'}},f.keyCtx())).rejects.toBeDefined();
    const text=await server.callToolText('hadron_create_node',{urn:`hrn:node:${mem.urn}:${loc}`,name:'No',content:'No'});
    expect(text).toMatch(/forbidden|not found|cannot write|does not have write/i);
   }
-  await expect(M.updateNode({}, {input:{id:node.id,name:'No'}},f.keyCtx())).rejects.toBeDefined();
+  await expect(M.updateNode({}, {input:{ref:node.id,name:'No'}},f.keyCtx())).rejects.toBeDefined();
   await expect(M.deleteNode({}, {nodeRef:node.id},f.keyCtx())).rejects.toBeDefined();
   for(const verb of ['hadron_update_node','hadron_delete_node']){
    const row=await db.node.findUniqueOrThrow({where:{id:node.id}});

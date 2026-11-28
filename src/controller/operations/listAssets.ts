@@ -1,7 +1,7 @@
 /**
  * listAssets — the uniform cross-memory asset list (#891).
  *
- * `memoryAssets(memoryId:)` answers "files in THIS memory". This answers
+ * `memoryAssets(memoryRef:)` answers "files in THIS memory". This answers
  * "every file I can reach", which is what a top-level Assets section
  * needs: its tabs are all cross-memory (my uploads / everything readable
  * / this org's), so they are FILTERS over one list rather than three
@@ -47,7 +47,7 @@ export interface AssetFilterInput {
 
 export interface ListAssetsInput {
   filter?: AssetFilterInput | null;
-  orgId?: string | null;
+  orgRef?: string | null;
   limit?: number | null;
   offset?: number | null;
 }
@@ -77,7 +77,7 @@ export async function listAssets(ctx: Context, input: ListAssetsInput): Promise<
   // tool, a CLI surface — would otherwise reach it unguarded.
   if (ctx.impersonation) return EMPTY;
 
-  const scope = await resolveOrgScope(ctx, input.orgId);
+  const scope = await resolveOrgScope(ctx, input.orgRef);
   if (!scope) return EMPTY;
 
   // `mine` is "uploaded by ME", so a caller with no user identity (an App
@@ -94,7 +94,7 @@ export async function listAssets(ctx: Context, input: ListAssetsInput): Promise<
   const accessible = await getAccessibleMemoryIds(ctx);
 
   // Org narrowing has to be expressed as a memory-id set too, because the
-  // scope is per-ASSET via its memory. Only applied when an orgId was
+  // scope is per-ASSET via its memory. Only applied when an orgRef was
   // actually requested — without one, the accessible set already IS the
   // caller's reach and must not be narrowed to org-owned memories (that
   // would drop user-owned and shared ones).

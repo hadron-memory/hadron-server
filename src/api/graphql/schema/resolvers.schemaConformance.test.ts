@@ -43,7 +43,7 @@ beforeEach(async () => {
 describe('hadron_validate — property-schema conformance audit (#725)', () => {
   it('reports a non-conforming node (missing required field), passes a conforming one', async () => {
     // Conforming (via the enforced write path).
-    await createNode({ memoryId: memId, loc: 'ok', name: 'OK', objectType: 'competitor', properties: { name: 'Letta' } });
+    await createNode({ memoryRef: memId, loc: 'ok', name: 'OK', objectType: 'competitor', properties: { name: 'Letta' } });
     // Non-conforming, inserted DIRECTLY (simulates a row written before the schema
     // existed / outside the write seam) — missing required `name`.
     await db.node.create({ data: { id: generateId(), memoryId: memId, loc: 'bad', name: 'Bad', objectType: 'competitor', properties: {} } as any });
@@ -73,12 +73,12 @@ describe('hadron_validate — property-schema conformance audit (#725)', () => {
 
 describe('restoreNodeRevision — enforces the current schema (#737)', () => {
   it('blocks restoring a snapshot that no longer conforms after a schema tightening', async () => {
-    const n = await createNode({ memoryId: memId, loc: 'c.r', name: 'R', objectType: 'competitor', properties: { name: 'x' } });
-    await updateNode({ memoryId: memId, loc: 'c.r', properties: { name: 'y' } }); // snapshots pre-edit {name:'x'}
+    const n = await createNode({ memoryRef: memId, loc: 'c.r', name: 'R', objectType: 'competitor', properties: { name: 'x' } });
+    await updateNode({ memoryRef: memId, loc: 'c.r', properties: { name: 'y' } }); // snapshots pre-edit {name:'x'}
     const rev = await db.nodeRevision.findFirst({ where: { nodeId: n.id }, orderBy: { revNo: 'desc' } });
     // Tighten: competitor now also requires `stage` — the snapshot lacks it.
     await updateMemory({ ref: memId, schema: { objectTypes: { competitor: { fields: { name: { type: 'text', required: true }, stage: { type: 'text', required: true } } } } } });
-    await expect((resolvers.Mutation as any).restoreNodeRevision(null, { revisionId: rev!.id }, admin())).rejects.toMatchObject({
+    await expect((resolvers.Mutation as any).restoreNodeRevision(null, { nodeRevRef: rev!.id }, admin())).rejects.toMatchObject({
       extensions: { code: 'BAD_USER_INPUT' },
     });
   });

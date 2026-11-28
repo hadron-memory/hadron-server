@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -54,7 +54,7 @@ interface Fake {
   retryReply: (() => string) | null;
   /** The worker's checkStatus.lastCheckedAt as the server reports it; null = never checked. */
   lastCheckedAt: string | null;
-  /** agentTask(id) replies, by task id. */
+  /** agentTask(ref) replies, by task id. */
   tasks: Record<string, unknown>;
   evidenceQueries: string[];
   /** When set, the worker check-status read answers this GraphQL error. */
@@ -72,7 +72,7 @@ interface Fake {
   sessions: Record<string, Array<{ id: string; workerId: string; appId: string; endedAt: string | null }>>;
   sessionsError: string | null;
   sessionQueries: string[];
-  /** #1704: agentTeamEvents(taskId, alarmsOnly) replies, by task id. */
+  /** #1704: agentTeamEvents(taskRef, alarmsOnly) replies, by task id. */
   alarms: Record<string, unknown[]>;
   /** When set, the alarm read answers this GraphQL error. */
   alarmError: string | null;
@@ -979,18 +979,139 @@ describe('CLI entry and single instance', () => {
     expect(existsSync(join(dir, 'ticker-wake', 'lock'))).toBe(false); // released
   });
 
-  it('refuses to start while another live ticker-wake holds the lock', async () => {
-    const holder = spawn('node', ['-e', 'setTimeout(() => {}, 20000)', 'ticker-wake'], { stdio: 'ignore' });
+  // #4297 (UNCONFIRMED hosted sighting: the next assertion received exit 0, expected 1): the holder is a SYNTHETIC process with
+  // verifiable identity, confirmed ready before the lock decision, and its PID / start time / cmdline / state are snapshotted
+  // before and after `main` runs. A failure message carries both snapshots, so a recurrence says whether the holder was
+  // alive and recognizable at the decision (a product lock-semantics question) or not (a setup/timing question).
+  type HolderSnapshot = { pid: number | undefined; alive: boolean; state: string; startTicks: string; cmdline: string };
+  const snapshotOf = (pid: number | undefined): HolderSnapshot => {
+    if (!pid) return { pid, alive: false, state: 'no-pid', startTicks: '', cmdline: '' };
+    let cmdline = ''; let state = 'unreadable'; let startTicks = '';
+    try { cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim(); } catch (e) { cmdline = `ERR ${(e as NodeJS.ErrnoException).code}`; }
     try {
-      const stateDir = join(dir, 'ticker-wake');
-      mkdirSync(stateDir, { recursive: true });
-      writeFileSync(join(stateDir, 'lock'), String(holder.pid));
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const after = stat.slice(stat.lastIndexOf(')') + 2).split(' '); // fields from 3 on; field 3 is the state, field 22 the start time
+      state = after[0] ?? 'unreadable'; startTicks = after[19] ?? '';
+    } catch { /* gone */ }
+    return { pid, alive: state !== 'unreadable' && state !== 'Z' && state !== 'X', state, startTicks, cmdline };
+  };
+  /** A nested contender's own pid: above PID_MAX_LIMIT (2^22), so it is never a live process and never the holder's pid. */
+  const NOT_A_PID = 4_194_305;
+  // #4297 (2026-11-23 merge-queue sighting, the takeover-race sibling): a pid from `spawn` is not yet a recognizable
+  // ticker-wake. libuv resumes the parent when the child's exec begins (the close-on-exec pipe closes, or the vfork parent
+  // is released), and the kernel fills in the new /proc cmdline only later in the same exec, so under load a contender can
+  // read an empty cmdline and judge a live holder gone. This holder models that window deterministically and wider: a
+  // shell that sleeps, then execs the ticker-wake holder, with the marker in the environment so the shell's own cmdline
+  // does not carry it. Through startLockHolder the race is judged against a recognizable holder; with the pid used the
+  // moment spawn returns (the takeover tests before #4297) the nested contender is told "left behind".
+  const spawnLateIdentity = (): ChildProcess => spawn('sh', ['-c',
+    `sleep 0.5; exec node -e "process.stdout.write('ready\\n'); setTimeout(() => {}, 20000)" "$HOLDER_MARKER"`,
+  ], { stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, HOLDER_MARKER: 'ticker-wake' } });
+  /** An error that carries the holder's snapshot as a field, so a test reads it instead of parsing the message. */
+  class HolderError extends Error {
+    constructor(message: string, readonly snapshot: HolderSnapshot) { super(`${message}: ${JSON.stringify(snapshot)}`); }
+  }
+  /**
+   * A synthetic live holder, handed out only once it is RECOGNIZABLE: it reported ready (its exec finished and it runs),
+   * and /proc shows it alive with `marker` in its cmdline. A pid from spawn() alone is not enough (#4297: see the
+   * late-identity pin below), so every lock test takes its holder from here. `launch` replaces the default holder
+   * process; it must pipe stdout and print a line on it once it runs. A holder that never qualifies is killed, not leaked.
+   * `readyTimeoutMs` (default 3 s) and `stopBoundMs` (default 1 s) are injectable; the worst case is 3 s ready wait + 1 s
+   * SIGTERM grace + 0.5 s after SIGKILL, under Vitest's 5 s test timeout, so the diagnostics below stay reachable.
+   * `stop()` sends SIGTERM and resolves once the holder has exited; past `stopBoundMs` it sends SIGKILL, and it throws
+   * if the holder still has not exited, so a stuck holder can neither hang a test nor leak silently.
+   */
+  async function startLockHolder(
+    marker: string, launch?: () => ChildProcess, readyTimeoutMs = 3_000, stopBoundMs = 1_000,
+  ): Promise<{ pid: number; stop: () => Promise<void> }> {
+    const holder = launch ? launch()
+      : spawn('node', ['-e', "process.stdout.write('ready\\n'); setTimeout(() => {}, 20000)", marker], { stdio: ['ignore', 'pipe', 'ignore'] });
+    // A failed spawn emits 'error' and never 'exit', so 'error' settles `exited` as well.
+    const exited = new Promise<void>((resolve) => {
+      if (holder.exitCode !== null || holder.signalCode !== null) resolve();
+      else { holder.once('exit', () => resolve()); holder.once('error', () => resolve()); }
+    });
+    const waitFor = async (ms: number): Promise<boolean> => {
+      let t: NodeJS.Timeout | undefined;
+      const won = await Promise.race([exited.then(() => true), new Promise<boolean>((resolve) => { t = setTimeout(() => resolve(false), ms); })]);
+      clearTimeout(t);
+      return won;
+    };
+    const stop = async (): Promise<void> => {
+      holder.kill();
+      if (await waitFor(stopBoundMs)) return;
+      holder.kill('SIGKILL');
+      if (!(await waitFor(500))) throw new Error(`startLockHolder: the holder (pid ${holder.pid}) did not exit after SIGKILL`);
+    };
+    try {
+      const out = holder.stdout;
+      if (!out) throw new Error('startLockHolder contract: the launcher must pipe stdout (stdio[1] = "pipe")');
+      await new Promise<void>((resolve, reject) => {
+        const t = setTimeout(() => reject(new HolderError('holder never reported ready', snapshotOf(holder.pid))), readyTimeoutMs);
+        holder.once('error', (e) => { clearTimeout(t); reject(e); });
+        out.once('data', () => { clearTimeout(t); resolve(); });
+      });
+      const snap = snapshotOf(holder.pid);
+      if (!snap.alive || !snap.cmdline.includes(marker)) throw new HolderError(`holder ready but not recognizable as ${marker}`, snap);
+    } catch (e) { await stop(); throw e; }
+    return { pid: holder.pid!, stop };
+  }
+  const holderPid = (e: unknown): number => (e as HolderError).snapshot.pid!;
+  const writeLockFor = (pid: number): void => {
+    const stateDir = join(dir, 'ticker-wake');
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, 'lock'), String(pid));
+  };
+
+  it('refuses to start while another live ticker-wake holds the lock', async () => {
+    const holder = await startLockHolder('ticker-wake');
+    try {
+      writeLockFor(holder.pid);
       f.wakes = [wake('w-ada', 'Ada', [TICK])];
-      expect(await main(['once'], deps())).toBe(1);
+      const before = snapshotOf(holder.pid);
+      // the fixture itself is verified: a live, recognizable ticker-wake process with a start time
+      expect(before.alive, JSON.stringify(before)).toBe(true);
+      expect(before.cmdline, JSON.stringify(before)).toContain('ticker-wake');
+      expect(before.startTicks, JSON.stringify(before)).toMatch(/^\d+$/);
+      const code = await main(['once'], deps());
+      const after = snapshotOf(holder.pid);
+      const where = `holder before=${JSON.stringify(before)} after=${JSON.stringify(after)}`;
+      expect(code, where).toBe(1);
+      // the same process, still alive, at the decision. `state` is excluded on purpose: R (running) vs S (sleeping) flips
+      // under load (hosted CI saw it, run 44871947484), while pid, start ticks and cmdline are the process's identity.
+      const identity = (h: HolderSnapshot) => ({ pid: h.pid, alive: h.alive, startTicks: h.startTicks, cmdline: h.cmdline });
+      expect(identity(after), where).toEqual(identity(before));
       expect(log()).toContain('holds');
       expect(f.sent).toEqual([]);
       expect(f.pages).toBe(0);
-    } finally { holder.kill(); }
+    } finally { await holder.stop(); }
+  });
+
+  it('refuses every time: ten fresh live holders in a row, none reads as stale', async () => {
+    for (let i = 0; i < 10; i++) {
+      const holder = await startLockHolder('ticker-wake');
+      try {
+        writeLockFor(holder.pid);
+        const before = snapshotOf(holder.pid);
+        const code = await main(['once'], deps());
+        expect(code, `attempt ${i}: ${JSON.stringify(before)}`).toBe(1);
+      } finally { await holder.stop(); rmSync(join(dir, 'ticker-wake', 'lock'), { force: true }); }
+    }
+    expect(f.sent).toEqual([]);
+    expect(f.pages).toBe(0);
+  });
+
+  it('a live process that is NOT a ticker-wake (a reused pid) does not hold the lock', async () => {
+    const other = await startLockHolder('some-other-tool');
+    try {
+      writeLockFor(other.pid);
+      f.wakes = [];
+      const snap = snapshotOf(other.pid);
+      expect(snap.alive, JSON.stringify(snap)).toBe(true);
+      expect(snap.cmdline, JSON.stringify(snap)).not.toContain('ticker-wake');
+      expect(await main(['once'], deps())).toBe(0); // recognized by cmdline only: an unrelated live pid is stale
+      expect(existsSync(join(dir, 'ticker-wake', 'lock'))).toBe(false); // taken over and released
+    } finally { await other.stop(); }
   });
 
   it('a stale lock (dead pid) is taken over and released', async () => {
@@ -1003,38 +1124,116 @@ describe('CLI entry and single instance', () => {
     expect(existsSync(join(stateDir, 'lock'))).toBe(false);
   });
 
-  it('stale-lock takeover race: a second contender during the takeover is refused, exactly one proceeds', async () => {
+  // One body for both takeover-race tests: a stale lock, a recognizable first contender, and a nested contender that
+  // arrives at the decision. `launch` picks the holder's process.
+  async function takeoverRace(launch?: () => ChildProcess): Promise<void> {
     const stateDir = join(dir, 'ticker-wake');
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(join(stateDir, 'lock'), '999999999');
-    // The first contender is a live process named ticker-wake (liveness is judged from /proc cmdline).
-    const first = spawn('node', ['-e', 'setTimeout(() => {}, 20000)', 'ticker-wake'], { stdio: 'ignore' });
+    // The first contender is a live process named ticker-wake (liveness is judged from /proc cmdline), handed out only
+    // once /proc recognizes it (#4297); the nested contender's own pid can never be the holder's (NOT_A_PID).
+    const first = await startLockHolder('ticker-wake', launch);
     try {
       let nested = '';
-      const release = acquireLock(stateDir, first.pid!, {
+      let atDecision: HolderSnapshot | undefined;
+      const release = acquireLock(stateDir, first.pid, {
         beforeUnlink: () => {
-          try { acquireLock(stateDir, process.pid + 1); nested = 'GOT'; } catch (e) { nested = (e as Error).message; }
+          atDecision = snapshotOf(first.pid);
+          try { acquireLock(stateDir, NOT_A_PID); nested = 'GOT'; } catch (e) { nested = (e as Error).message; }
         },
       });
-      expect(nested).toContain('taking over');
+      expect(nested, `takeover owner at the nested decision: ${JSON.stringify(atDecision)}`).toContain('taking over');
       expect(readFileSync(join(stateDir, 'lock'), 'utf8')).toBe(String(first.pid));
       release();
       expect(existsSync(join(stateDir, 'lock.takeover'))).toBe(false);
-    } finally { first.kill(); }
+    } finally { await first.stop(); }
+  }
+
+  it('stale-lock takeover race: a second contender during the takeover is refused, exactly one proceeds', () => takeoverRace());
+
+  it('stale-lock takeover race with a holder whose identity appears after spawn returns: the nested contender is told "taking over" (#4297)',
+    () => takeoverRace(spawnLateIdentity));
+
+  it('the holder fixture refuses a holder that runs but is not recognizable, and kills it (#4297)', async () => {
+    const err = await startLockHolder('ticker-wake', () => spawn('node', ['-e', "process.stdout.write('ready\\n'); setTimeout(() => {}, 20000)", 'some-other-tool'],
+      { stdio: ['ignore', 'pipe', 'ignore'] })).then(() => null, (e: Error) => e);
+    expect(err?.message).toContain('not recognizable as ticker-wake');
+    const pid = holderPid(err);
+    expect(pid).toBeGreaterThan(0);
+    for (let i = 0; i < 50 && snapshotOf(pid).alive; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(snapshotOf(pid).alive).toBe(false); // not leaked
+  });
+
+  // A holder that survives SIGTERM for a while, as a real daemon draining its work does. Without the ready-path stop()
+  // awaiting the exit, the old pin saw the holder dead only by luck of timing (7 of 15 runs failed once the await was
+  // removed); with a 300 ms exit delay the missing await is caught every time.
+  const slowToExit = (ready: boolean): string =>
+    `process.on('SIGTERM', () => setTimeout(() => process.exit(0), 300)); ${ready ? "process.stdout.write('ready\\n'); " : ''}setTimeout(() => {}, 20000)`;
+
+  it('the holder fixture kills a holder that never reports ready, with the ready diagnostic, and waits for it to exit', async () => {
+    const t0 = Date.now();
+    const err = await startLockHolder('ticker-wake', () => spawn('node', ['-e', slowToExit(false), 'ticker-wake'],
+      { stdio: ['ignore', 'pipe', 'ignore'] }), 600).then(() => null, (e: Error) => e);
+    expect(err?.message).toContain('holder never reported ready');
+    expect(Date.now() - t0, 'the injected 600 ms ready timeout is used, not the 3 s default').toBeLessThan(2_000);
+    expect(holderPid(err)).toBeGreaterThan(0);
+    // stop() awaited the exit (the holder takes ~300 ms to leave after SIGTERM): killed, not leaked, no polling needed
+    expect(snapshotOf(holderPid(err)).alive).toBe(false);
+  });
+
+  it('the ready timeout is the injected value: a holder that reports ready after 400 ms passes a 2 s timeout and fails a 150 ms one', async () => {
+    const late = (): ChildProcess => spawn('node', ['-e', "setTimeout(() => process.stdout.write('ready\\n'), 400); setTimeout(() => {}, 20000)", 'ticker-wake'],
+      { stdio: ['ignore', 'pipe', 'ignore'] });
+    const ok = await startLockHolder('ticker-wake', late, 2_000);
+    await ok.stop();
+    const t0 = Date.now();
+    const err = await startLockHolder('ticker-wake', late, 150).then(() => null, (e: Error) => e);
+    expect(err?.message).toContain('holder never reported ready');
+    expect(Date.now() - t0).toBeLessThan(1_500);
+  });
+
+  it('stop() escalates to SIGKILL when the holder ignores SIGTERM past the stop bound', async () => {
+    const stubborn = (): ChildProcess => spawn('node', ['-e', "process.on('SIGTERM', () => {}); process.stdout.write('ready\\n'); setTimeout(() => {}, 20000)", 'ticker-wake'],
+      { stdio: ['ignore', 'pipe', 'ignore'] });
+    const h = await startLockHolder('ticker-wake', stubborn, 3_000, 300);
+    const t0 = Date.now();
+    await h.stop();
+    expect(snapshotOf(h.pid).alive, 'killed by SIGKILL after the bound').toBe(false);
+    expect(Date.now() - t0).toBeLessThan(2_000);
+  });
+
+  it('the holder fixture fails fast with a contract message when the launcher does not pipe stdout, and kills the holder', async () => {
+    let pid: number | undefined;
+    const err = await startLockHolder('ticker-wake', () => {
+      const c = spawn('node', ['-e', 'setTimeout(() => {}, 20000)', 'ticker-wake'], { stdio: ['ignore', 'ignore', 'ignore'] });
+      pid = c.pid;
+      return c;
+    }).then(() => null, (e: Error) => e);
+    expect(err?.message).toContain('must pipe stdout');
+    expect(pid).toBeGreaterThan(0);
+    expect(snapshotOf(pid!).alive, 'the holder behind a broken launcher is killed, not leaked').toBe(false);
+  });
+
+  it('a holder that fails to spawn rejects with the spawn error and stop() does not wait out its bound', async () => {
+    const t0 = Date.now();
+    const err = await startLockHolder('ticker-wake', () => spawn('/nonexistent/ticker-wake-holder', [], { stdio: ['ignore', 'pipe', 'ignore'] }),
+      3_000, 1_500).then(() => null, (e: Error) => e);
+    expect((err as NodeJS.ErrnoException | null)?.code).toBe('ENOENT');
+    expect(Date.now() - t0, 'spawn failure emits error and never exit; stop() must settle on error too').toBeLessThan(1_000);
   });
 
   it('stale-lock takeover never unlinks a live replacement owner that arrived after the stale judgment', async () => {
     const stateDir = join(dir, 'ticker-wake');
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(join(stateDir, 'lock'), '999999999');
-    const holder = spawn('node', ['-e', 'setTimeout(() => {}, 20000)', 'ticker-wake'], { stdio: 'ignore' });
+    const holder = await startLockHolder('ticker-wake'); // recognizable before the replacement arrives (#4297)
     try {
       expect(() => acquireLock(stateDir, process.pid, {
         afterJudgedStale: () => { writeFileSync(join(stateDir, 'lock'), String(holder.pid)); }, // replacement arrives
       })).toThrow('holds');
       expect(readFileSync(join(stateDir, 'lock'), 'utf8')).toBe(String(holder.pid)); // left intact
       expect(existsSync(join(stateDir, 'lock.takeover'))).toBe(false);
-    } finally { holder.kill(); }
+    } finally { await holder.stop(); }
   });
 
   it('a takeover file left behind by a dead process fails closed for operator cleanup, and is not removed', async () => {
@@ -2561,6 +2760,36 @@ describe('#2275 dead-receiver replacement', () => {
     expect(f.sent).toHaveLength(1); expect(f.acked).toEqual([]);
     expect(stored()['w-ada'].receiver).toBe('term_a#inc-1');
   });
+  // #2362: the producer contract for re-handling an incarnation is not established by source or owner evidence, so a listed row
+  // naming the old incarnation under ANY handle keeps the receipt held; only a complete census of known, different identities proves absence.
+  it('holds when the old incarnation is listed under a different handle (alias)', async () => {
+    const prior = seed();
+    f.extraTerminals = [{ handle: 'term_alias', incarnationId: 'inc-old', worktreePath: dir, connected: false, writable: false }];
+    await go();
+    expect(f.sent).toEqual([]); expect(f.retries).toEqual([]); expect(f.acked).toEqual([]);
+    expect(stored()['w-ada']).toEqual(prior);
+  });
+  it('holds a reused handle when the old incarnation is also listed under another handle', async () => {
+    const prior = seed({ ...old(), handle: 'term_a', receiver: 'term_a#inc-old' });
+    f.extraTerminals = [{ handle: 'term_alias', incarnationId: 'inc-old', worktreePath: dir, connected: true, writable: true }];
+    await go();
+    expect(f.sent).toEqual([]); expect(f.acked).toEqual([]);
+    expect(stored()['w-ada']).toEqual(prior);
+  });
+  it('holds when another handle lists a row whose incarnation is unknown', async () => {
+    const prior = seed();
+    f.extraTerminals = [{ handle: 'term_x', worktreePath: dir, connected: true, writable: true }];
+    await go();
+    expect(f.sent).toEqual([]); expect(f.acked).toEqual([]);
+    expect(stored()['w-ada']).toEqual(prior);
+  });
+  it('still replaces when every other listed row has a known, different incarnation (exact absence)', async () => {
+    seed();
+    f.extraTerminals = [{ handle: 'term_x', incarnationId: 'inc-other', worktreePath: dir, connected: true, writable: true }];
+    await go();
+    expect(f.sent).toHaveLength(1); expect(f.acked).toEqual([]);
+    expect(stored()['w-ada']).toMatchObject({ receiver: 'term_a#inc-1' });
+  });
   for (const kind of ['failed', 'partial', 'unknown-old', 'unknown-current', 'unknown-row'] as const) {
     it(`holds replacement on ${kind} inventory/identity`, async () => {
       const prior = seed();
@@ -2895,7 +3124,7 @@ describe('#2754 — the server tick line', () => {
     'tick eden-queue-tick: same task as above',
     'tick team-tick: no task is mapped for tick.team',
     'tick team-tick: no task found at x-system:tasks:on-team-tick for tick.team',
-    'tick team-tick: resolve your task for tick.team yourself',
+    'tick team-tick: routine tick, read your tagged messages and act on what is yours; if you have a task for tick.team, resolve it yourself',
   ];
   const TEAM = { kind: 'TICK', ticker: { id: 'V', name: 'team-tick' } };
   const mapped = (t: any, state: string) => ({ ...t, action: { state } });
@@ -2904,6 +3133,15 @@ describe('#2754 — the server tick line', () => {
     f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1']), [], undefined, FORMS[0])];
     await go();
     expect(f.sent).toEqual([`${FORMS[0]} ${nudgeText(['team-tick'], [])}`]);
+  });
+
+  // #4999: the receiver set does not change: a due worker with no open task still gets the routine tick, whose text no longer presumes one.
+  it('a task-less due worker still receives the fallthrough tick line and the nudge (#4999)', async () => {
+    f.openTasks = {};
+    f.wakes = [wake('w-ada', 'Ada', [TEAM], proof(['V:1']), [], undefined, FORMS[4])];
+    await go();
+    expect(f.sent).toEqual([`${FORMS[4]} ${nudgeText(['team-tick'], [])}`]);
+    expect(f.sent[0]).not.toContain('resolve your task');
   });
 
   for (const form of FORMS) {
@@ -2996,7 +3234,7 @@ describe('#2754 — the server tick line', () => {
 
   for (const action of [null, undefined, { state: 'UNMAPPED' }, { state: 'UNRESOLVED' }, { state: 'WITHHELD' }]) {
     it(`9. a coordinator-tick with action ${JSON.stringify(action)} keeps today's base-tick sentence`, async () => {
-      f.wakes = [wake('w-ada', 'Ada', [{ ...TICK, ...(action === undefined ? {} : { action }) }], proof(['T:1']), [], undefined, 'tick coordinator-tick: resolve your task for tick.coordinator yourself')];
+      f.wakes = [wake('w-ada', 'Ada', [{ ...TICK, ...(action === undefined ? {} : { action }) }], proof(['T:1']), [], undefined, 'tick coordinator-tick: routine tick, read your tagged messages and act on what is yours; if you have a task for tick.coordinator, resolve it yourself')];
       await go();
       expect(f.sent[0]).toContain('run your base tick (coordinator-system:tasks:on-base-tick)');
     });

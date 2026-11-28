@@ -1,6 +1,6 @@
 import { endHeldGrants } from '../../../lib/grants/departure.js';
 import { personalOrgAgentServeAllowed } from '../../../lib/auth/personalOrgAgentInstall.js';
-import { requireWorkerReadAccess, locateTeamAgent, forbidden, appNotFound, resolveAppRefConcealed, isAppGateRefusal, type AppRow } from '../../../lib/auth/workerRead.js';
+import { requireWorkerReadAccess, locateTeamAgent, forbidden, appNotFound, resolveAppRefConcealed, isAppGateRefusal, isAppRefResolutionFailure, type AppRow } from '../../../lib/auth/workerRead.js';
 export { requireWorkerReadAccess, locateTeamAgent, ROLES_BRANCH_PREFIX } from '../../../lib/auth/workerRead.js';
 import { listAppInstallations, resolveAppInstallation, resolveUnfilteredAppInstallation, lockAppInstallation } from '../../../lib/appInstallations.js';
 import { lockStaffingAct } from '../../../lib/auth/staffingAct.js';
@@ -31,7 +31,7 @@ import { bootPromptRefusal } from '../../../lib/bootPrompt/refusal.js';
 import { previewServedBootPrompt, readRecordedRevisionContent, recordServedPrompt, resolveServedBootPrompt, type PageServedMemo, type ServeTarget } from '../../../lib/bootPrompt/serve.js';
 import { normalizeFamily, tierOf } from '../../../lib/agentTasks/family.js';
 import { workerRunRecordOf, type WorkerRunRecord } from '../../../lib/agentTasks/runSettings.js';
-import { lockStopFence } from '../../../lib/stopSignals/state.js';
+import { appStopSignalLive, lockStopFence } from '../../../lib/stopSignals/state.js';
 import { reconcileStopCoverage } from '../../../lib/stopSignals/lifecycle.js';
 import { generateId } from '../../../lib/id.js';
 import { GraphQLError } from 'graphql';
@@ -58,6 +58,7 @@ import { lintWorkerFields, pageLintWarnings } from '../../../lib/bootPromptLint.
 import { normalizeUrnForLookup, hasSchemePrefix, parseUrnV2 } from '../../../lib/urn.js';
 import { RESERVED_WORKER_MENTION_TOKENS, mentionTokenOf } from '../../../lib/mentionToken.js';
 import { isId } from '../../../lib/entityRef/shape.js';
+import { refHasUnstorableChars } from '../../../lib/entityRef/refNamesNothing.js';
 import { nextFreeWorkerSlug } from '../../../lib/workerSlug.js';
 import {
   resolveWorkerRef as resolveWorkerRefId,
@@ -84,7 +85,7 @@ import { canSeeUserPersonalFields } from '../../../lib/auth/userVisibility.js';
 import { participantAppWhere } from '../../../lib/auth/appParticipation.js';
 import { castTeamChoice, teamPlacement, type CastTeamArgs } from '../../../lib/workerTeamChoice.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
-import { deletePristineGeneratedTickers, miscastHasReferences } from '../../../lib/workerMiscastRepair.js';
+import { deletePristineGeneratedTickers, miscastHasReferences, workerCensusTransactionTimeoutMs, WorkerCensusIncompleteError } from '../../../lib/workerMiscastRepair.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { runMayReadTeam } from '../../../lib/auth/runTeamRead.js';
@@ -109,6 +110,14 @@ import {
   safeCanonicalUrn,
   isMemoryReadableCached,
 } from './resolvers.helpers.js';
+
+/**
+ * #4809 (cor:dmo:050:11): the census ran out of its bound. Its own code, never `WORKER_IN_USE` (no reference was found):
+ * the delete is refused, nothing is written, and the caller may retry or retire. Same on both doors.
+ */
+const censusIncomplete = (workerId: string) => new GraphQLError('The reference check for this worker did not finish in time, so it was not deleted. Retry later, or retire the worker instead.', {
+  extensions: { code: 'WORKER_CENSUS_INCOMPLETE', workerId },
+});
 
 /**
  * Backstop on slug-race retries in `castWorker` (#991). Not an allocation
@@ -343,7 +352,7 @@ async function resolveWorkerRefRow(ctx: Context, workerRef: string): Promise<Wor
  */
 export function workerNotFound(workerRef: string): GraphQLError {
   return new GraphQLError('Worker not found.', {
-    extensions: { code: 'WORKER_NOT_FOUND', workerRef },
+    extensions: { code: 'WORKER_NOT_FOUND' }, // #5168: the caller's ref is not relayed
   });
 }
 
@@ -455,6 +464,9 @@ export async function resolveWorkerIdByName(
 ): Promise<string | null> {
   const trimmed = name.trim();
   if (trimmed === '') return null; // blank is absent (cor:agt:020:02)
+  // #4971: a NUL or lone surrogate names nothing (no stored name holds one); Postgres would reject it as a
+  // query parameter and the lookup would surface as a driver fault instead of the absent answer.
+  if (refHasUnstorableChars(trimmed)) return null;
   const rows = await db.$queryRaw<{ id: string }[]>`
     SELECT id FROM workers
     WHERE app_id = ${appId} AND lower(name) = lower(${trimmed})
@@ -599,7 +611,7 @@ export async function resolveReportsToTarget(ctx: Context, appId: string, ref: s
   } else {
     id = await resolveWorkerIdByNameGated(ctx, appId, trimmed);
   }
-  if (!id) throw new GraphQLError(`Worker not found in this App: "${trimmed}"`, { extensions: { code: 'WORKER_NOT_FOUND' } });
+  if (!id) throw new GraphQLError('Worker not found in this App', /* #5168: no ref quoted */ { extensions: { code: 'WORKER_NOT_FOUND' } });
   return id;
 }
 
@@ -1046,6 +1058,7 @@ export const workerMutations = {
       for (let attempt = 0; attempt < SLUG_RACE_RETRY_LIMIT; attempt++) {
         try {
           const plannedWorkerId = generateId();
+          let stopFenced = false; // #5325: set in afterLock when this cast took the stop fence (see there)
           return await withAuthorizedTx(ctx, anchors, async () => {}, async (tx, txCtx) => {
             // Exclusive anchors prevent concurrent casts from upgrading SHARE App rows together.
             await lockWorkerNames(tx, appId);
@@ -1126,7 +1139,9 @@ export const workerMutations = {
             if (choice.kind !== 'UNSET') {
               await writeReportsTo(tx, { workerId: castWorkerRow.id, appId, to: freshTarget.reportingHeadId, actor: staffingActActor(admission), setBy: 'cast' });
             }
-            if (freshTarget.reportingHeadId) await reconcileStopCoverage(tx, appId, new Date());
+            // #5325: a worker born into an App under a live APP stop signal is covered from its birth, with or without a reporting
+            // line, so a cast that took the fence reconciles (a reporting-line birth, or an App with an unended APP signal).
+            if (freshTarget.reportingHeadId || stopFenced) await reconcileStopCoverage(tx, appId, new Date());
             // #2024 (S8): the Agent's declared tickers become this worker's, with the worker subscribed, in this
             // same transaction. Any refusal rolls the whole cast back, the name allocation included.
             try {
@@ -1139,9 +1154,14 @@ export const workerMutations = {
             return castWorkerRow;
           }, { lockMode: 'exclusive', timeout: 30_000, afterLock: async tx => {
             await lockAgentTemplates(tx, agent.id, 'shared');
-            // Only a reporting-line birth changes S6 topology. Acquire its fence
-            // before name/graph/Worker resources; no-head casts need no coverage write.
-            if (choice.kind === 'REPORTS_TO') await lockStopFence(tx, appId, 'exclusive');
+            // A reporting-line birth changes S6 topology: acquire the fence before name/graph/Worker resources. A no-head cast
+            // is unrelated to the stop fence (castReporting2028), EXCEPT while the App has an unended APP signal (#5325): that
+            // signal covers a worker born now, so the cast is ordered with it and tells the worker. With none, nothing changes;
+            // a worker born in the instant one is set is covered at once by enforcement (computed live) and told at its first
+            // bind, which reconciles coverage.
+            // Assigned on every run of this callback (not only set to true), so a re-run of the transaction cannot keep a stale `true`.
+            stopFenced = choice.kind === 'REPORTS_TO' || (await appStopSignalLive(tx, appId));
+            if (stopFenced) await lockStopFence(tx, appId, 'exclusive');
           } });
         } catch (e) {
           // Order matters: a slug race is private and retried; a name
@@ -1236,9 +1256,10 @@ export const workerMutations = {
       async (tx, txCtx) => {
         await lockStaffingAct(tx, app, admission, ctx.sessionId, [worker.id]);
         admission = await admitWorkerStaffAct(txCtx, app, instruction, admission, true);
+        const retiredAt = new Date();
         const retired = await tx.worker.updateMany({
           where: { id: worker.id, retiredAt: null },
-          data: { retiredAt: new Date(), retiredBy: ctx.userId ?? null },
+          data: { retiredAt, retiredBy: ctx.userId ?? null },
         });
         // #1726: a retired worker reports to nobody. Workers that report TO it
         // keep their value; the roster flags them (`reportsToRetired`) rather
@@ -1246,7 +1267,7 @@ export const workerMutations = {
         if (retired.count > 0) {
           // #3690 / ruling 0259 ("Retire ends grants too"): the grants this worker HOLDS end with it, in this transaction, after the
           // worker row lock (lockStaffingAct, step 5): the grant row lock is the last one taken. Only when THIS call retired it.
-          await endHeldGrants(tx, 'worker', worker.id);
+          await endHeldGrants(tx, 'worker', worker.id, 'WORKER_RETIRED');
           await appendWorkerRetiredEvent(tx, { appId: worker.appId, actor: staffingActActor(admission), instruction: staffingInstruction(admission), workerId: worker.id });
           await writeReportsTo(tx, { workerId: worker.id, appId: worker.appId, to: null, actor: staffingActActor(admission), setBy: 'retirement' });
           // #1747 / cor:agt:080:02: a retired worker's ticker subscriptions end
@@ -1261,7 +1282,7 @@ export const workerMutations = {
           });
           // #2024 (S8): the tickers generated for this worker end with it (and the subscriptions others hold to
           // them). Nothing else is touched.
-          await endGeneratedTickersForWorker(tx, { workerId: worker.id, deletedBy: ctx.userId ?? null });
+          await endGeneratedTickersForWorker(tx, { workerId: worker.id, deletedBy: ctx.userId ?? null, at: retiredAt });
           await reconcileStopCoverage(tx, worker.appId, new Date());
         } else {
           await appendStaffingInstructionClaim(tx, { appId: app.id, admission, operation: 'worker.retire', workerId: worker.id });
@@ -1795,7 +1816,7 @@ export const workerMutations = {
       // concurrent revoked row would leave it stale; provisionCastGrants judges the licence again (as the cast does).
       await provisionCastGrants(tx, freshApp, agent.id, provisionGrantsFor, ctx.userId ?? null);
       try {
-        await endGeneratedTickersForWorker(tx, { workerId: worker.id, deletedBy: ctx.userId ?? null });
+        await endGeneratedTickersForWorker(tx, { workerId: worker.id, deletedBy: ctx.userId ?? null, at: new Date() });
         await tx.worker.update({
           where: { id: worker.id },
           data: { agentId: agent.id, role: toRole, bootPromptNodeId: null, bootPromptUrn: null },
@@ -1834,7 +1855,8 @@ export const workerMutations = {
     const refuse = () => new GraphQLError('This worker has persisted references, an unreleased stint, or encrypted attribution that cannot be verified. Retire it instead.', {
       extensions: { code: 'WORKER_IN_USE', workerId: worker.id },
     });
-    if (await miscastHasReferences(ctx.db, worker)) throw refuse();
+    // #4809: no census outside the transaction. The one inside the SERIALIZABLE transaction is the authoritative one
+    // (the fence's guarantee rests on it); an early outside run only doubled the cost of a refusal.
     try {
       await ctx.db.$transaction(async (tx) => {
         // Preserve this door's SERIALIZABLE reference fence (including uninstalled Apps), while adding
@@ -1856,7 +1878,7 @@ export const workerMutations = {
         await tx.$executeRaw`INSERT INTO worker_reference_fences(subject_id) VALUES (${worker.id})
           ON CONFLICT (subject_id) DO UPDATE SET version = worker_reference_fences.version + 1`;
         const current = await tx.worker.findUnique({ where: { id: worker.id } });
-        if (!current) throw new GraphQLError('Worker not found.', { extensions: { code: 'WORKER_NOT_FOUND', workerRef } });
+        if (!current) throw new GraphQLError('Worker not found.', { extensions: { code: 'WORKER_NOT_FOUND' } });
         if (await miscastHasReferences(tx, current)) throw refuse();
         await deletePristineGeneratedTickers(tx, worker.id);
         await tx.session.deleteMany({ where: { workerId: worker.id } });
@@ -1864,8 +1886,9 @@ export const workerMutations = {
         if (current.memoryId) await tx.memory.delete({ where: { id: current.memoryId } });
         // #2766: recorded last, so any refusal above leaves no event; the row is gone, the id stays in the history.
         await appendWorkerDeletedEvent(tx, { appId: current.appId, actor: staffingActActor(admission), instruction: staffingInstruction(admission), workerId: worker.id });
-      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: workerCensusTransactionTimeoutMs() });
     } catch (error) {
+      if (error instanceof WorkerCensusIncompleteError) throw censusIncomplete(worker.id);
       // The fence deliberately makes a stale SERIALIZABLE snapshot abort.
       // Raw statements report 40001/40P01 as P2010; model writes use P2034.
       if (error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -1916,7 +1939,7 @@ export const workerQueries = {
         await lockStaffingAct(tx, app, admission, ctx.sessionId);
         admission = await admitWorkerStaffAct(txCtx, app, instruction, admission, true);
         const current = await tx.worker.findUnique({ where: { id: worker.id } });
-        if (!current) throw new GraphQLError('Worker not found.', { extensions: { code: 'WORKER_NOT_FOUND', workerRef } });
+        if (!current) throw new GraphQLError('Worker not found.', { extensions: { code: 'WORKER_NOT_FOUND' } });
         if (await miscastHasReferences(tx, current)) {
           throw new GraphQLError('This worker has persisted references, an unreleased stint, or encrypted attribution that cannot be verified. Retire it instead.', {
             extensions: { code: 'WORKER_IN_USE', workerId: worker.id },
@@ -1924,8 +1947,9 @@ export const workerQueries = {
         }
         await appendStaffingInstructionClaim(tx, { appId: app.id, admission, operation: 'worker.delete-preview', workerId: worker.id });
         return { workerId: worker.id, attestationRequired: true };
-      });
+      }, { timeout: workerCensusTransactionTimeoutMs() });
     } catch (error) {
+      if (error instanceof WorkerCensusIncompleteError) throw censusIncomplete(worker.id);
       if (error instanceof GraphQLError && error.extensions.code === 'WORKER_REFERENCE_NOT_FOUND' && error.extensions.workerRef === worker.id) {
         throw workerNotFound(workerRef);
       }
@@ -1978,9 +2002,12 @@ export const workerQueries = {
       let appId: string;
       try {
         ({ id: appId } = await resolveAppRef(ctx.db, appRef));
-      } catch {
+      } catch (e) {
+        // #4893/#2975: only a name-resolution outcome collapses into WORKER_NOT_FOUND; a
+        // database fault propagates (it is not "worker not found").
+        if (!isAppRefResolutionFailure(e)) throw e;
         throw new GraphQLError('Worker not found.', {
-          extensions: { code: 'WORKER_NOT_FOUND', workerRef: trimmed },
+          extensions: { code: 'WORKER_NOT_FOUND' },
         });
       }
       // Gate-then-lookup, with denial and absence collapsed — see
@@ -1988,7 +2015,7 @@ export const workerQueries = {
       const byName = await resolveWorkerIdByNameGated(ctx, appId, trimmed);
       if (!byName) {
         throw new GraphQLError('Worker not found.', {
-          extensions: { code: 'WORKER_NOT_FOUND', workerRef: trimmed },
+          extensions: { code: 'WORKER_NOT_FOUND' },
         });
       }
       return singleWorkerActivityRow(await ctx.db.worker.findUniqueOrThrow({ where: { id: byName } }));
@@ -3726,7 +3753,46 @@ export const workerFieldResolvers = {
       const handoff = handoffRow
         ? await ctx.db.node.findUnique({ where: { id: handoffRow.id } })
         : null;
-      return { status, handoff, previousSession };
+      // #1054: the envelope's session id rides along (not in the SDL) for WorkerContinuity.handoffAuthor.
+      return {
+        status, handoff, previousSession,
+        handoffWorkerId: worker.id,
+        handoffEnvelopeSessionId: handoffRow ? handoffSessionId(handoffRow.data) : null,
+      };
+    },
+  },
+  WorkerContinuity: {
+    /**
+     * #1054 — who held the worker when the session that wrote the newest handoff ran.
+     *
+     * The handle is identity (hrn:node:hadronmemory.com:specs:cor:acl:070:01): visible to any
+     * signed-in caller who reaches this field, which is already behind the worker read gate
+     * (`continuity` masks to null on deny). Null `userHandle` only for an unknown or erased author:
+     * a session with no user, a deleted session, or a soft-deleted user. Never an error.
+     *
+     * The envelope's session id is data any writer of the handoff node can set, so the session is
+     * looked up ONLY among this worker's own sessions: a forged id can never name another worker's
+     * driver. Selected narrowly (the user id), never the Session row (#552 / #983), and the user is
+     * projected to its handle alone.
+     */
+    handoffAuthor: async (
+      c: { handoff: unknown; handoffWorkerId?: string; handoffEnvelopeSessionId?: string | null },
+      _: unknown,
+      ctx: Context,
+    ) => {
+      if (!c.handoff) return null;
+      const sessionId = c.handoffEnvelopeSessionId ?? null;
+      if (!sessionId || !c.handoffWorkerId) return { userHandle: null, sessionId: null };
+      const session = await ctx.db.session.findFirst({
+        where: { id: sessionId, workerId: c.handoffWorkerId, deletedAt: null },
+        select: { id: true, userId: true },
+      });
+      const user = session?.userId
+        ? await ctx.db.user.findFirst({ where: { id: session.userId, deletedAt: null }, select: { handle: true } })
+        : null;
+      // sessionId is returned only for a session found among this worker's own non-deleted sessions (same
+      // sanitization as previousSession): an unverified envelope id is never echoed as fact.
+      return { userHandle: user?.handle ?? null, sessionId: session?.id ?? null };
     },
   },
 };

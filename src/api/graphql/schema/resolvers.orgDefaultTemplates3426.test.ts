@@ -412,6 +412,35 @@ describe('#3426 skipped references leave a concealed record (C6)', () => {
     expect(seen.data!.memoryConfig.defaultSkips).toMatchObject([{ role: 'spec', field: 'authorTask', reason: 'REFERENCE_UNAVAILABLE', sourceTemplate: { id: t.id }, refState: 'BROKEN' }]);
   });
 
+  it('#3615: selecting ref and refState on N skip rows looks each template rule up once, not twice', async () => {
+    await tpl('skippy', [rule('spec', taskA), rule('other', taskB)], { orgDefault: true });
+    await db.node.updateMany({ where: { id: { in: [taskA.id, taskB.id] } }, data: { deletedAt: new Date() } });
+    const m = await newMemory('skipcount1');
+    expect(await skipsOf(m.id)).toHaveLength(2);
+    let lookups = 0;
+    const countingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (prop !== 'memoryConfigTemplateRule') return value;
+        return new Proxy(value as object, {
+          get(t, p, r) {
+            const v = Reflect.get(t, p, r);
+            if (p !== 'findUnique') return v;
+            return (...args: unknown[]) => {
+              lookups++;
+              return (v as (...a: unknown[]) => unknown).apply(t, args);
+            };
+          },
+        });
+      },
+    });
+    const seen = await gql({ ...as(admin), db: countingDb as typeof db }, SKIPS, { m: m.id });
+    expect(seen.errors, JSON.stringify(seen.errors)).toBeUndefined();
+    expect(seen.data!.memoryConfig.defaultSkips).toHaveLength(2);
+    expect(seen.data!.memoryConfig.defaultSkips.every((s: { refState: string }) => s.refState === 'BROKEN')).toBe(true);
+    expect(lookups).toBe(2);
+  });
+
   it('a non-manager creator sees no signal in the response, and cannot read the record', async () => {
     await tpl('skippy', [rule('spec', taskA)], { orgDefault: true });
     await db.node.update({ where: { id: taskA.id }, data: { deletedAt: new Date() } });
@@ -480,11 +509,11 @@ describe('#3426 Q1 (ruling 0200): a broken REQUIRED default is planted fail-clos
     expect(rules).toMatchObject([{ role: 'guide', locked: true, authorTaskId: null, authorTaskRequired: true }]);
     expect(await skipsOf(m.id)).toEqual([]);
     const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<unknown>>;
-    await expect(M.createNode!({}, { input: { memoryId: m.id, loc: 'n1', name: 'n1', content: 'x', role: 'guide' } }, { db, roles: [], userId: admin } as Context))
+    await expect(M.createNode!({}, { input: { memoryRef: m.id, loc: 'n1', name: 'n1', content: 'x', role: 'guide' } }, { db, roles: [], userId: admin } as Context))
       .rejects.toMatchObject({ extensions: { code: 'AUTHOR_TASK_BROKEN' } });
     // An admin repointing the rule clears the refusal.
     await db.nodeRoleRule.update({ where: { id: rules[0]!.id }, data: { authorTaskId: taskB.id } });
-    await expect(M.createNode!({}, { input: { memoryId: m.id, loc: 'n1', name: 'n1', content: 'x', role: 'guide' } }, { db, roles: [], userId: admin } as Context))
+    await expect(M.createNode!({}, { input: { memoryRef: m.id, loc: 'n1', name: 'n1', content: 'x', role: 'guide' } }, { db, roles: [], userId: admin } as Context))
       .rejects.toMatchObject({ extensions: { code: 'AUTHORING_ATTESTATION_MISSING' } });
   });
 

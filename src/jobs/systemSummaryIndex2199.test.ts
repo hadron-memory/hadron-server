@@ -209,7 +209,7 @@ describe('changing the setting or the source never loses the summary', () => {
 
 describe('search scope', () => {
   const find = (memoryIds: string[]) =>
-    (resolvers.Query as any).findNodes(null, { query: 'q', mode: 'vector', filter: { memoryIds } }, { db, roles: ['ADMIN'], userId: 'admin-idx' } as Context);
+    (resolvers.Query as any).findNodes(null, { query: 'q', mode: 'vector', filter: { memoryRefs: memoryIds } }, { db, roles: ['ADMIN'], userId: 'admin-idx' } as Context);
 
   it('a system memory with the setting off is vector-searchable by explicit scope; a knowledge memory with it off is not', async () => {
     const sys = await node(await memory({ cls: 'system', flag: false }), 'a', 'q');

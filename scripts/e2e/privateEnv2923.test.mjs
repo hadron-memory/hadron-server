@@ -182,3 +182,33 @@ test('registration switch: forwarded only when the host sets it, so a private-fi
     for (const c of composeCalls(set.calls())) assert(c.includes(`E2E_PASSKEY_REGISTRATION_ENABLED=${value} `), c);
   }
 });
+
+// #4624: the run worker is OFF by default and ON only for the exact host value `true`; the scheduler is never switched.
+test('run worker: off for every value but the exact `true` (E2E_DISABLE_RUN_WORKER relayed to every compose call)', t => {
+  for (const [value, expected] of [[undefined, 'true'], ['', 'true'], ['1', 'true'], ['TRUE', 'true'], ['yes', 'true'], ['true', 'false']]) {
+    const s = setup(t);
+    s.run('up', 'priv', { E2E_PRIVATE_ENV_FILE: s.envFile, E2E_RUN_WORKER: value });
+    const calls = composeCalls(s.calls());
+    assert(calls.length > 0);
+    for (const c of calls) {
+      assert(c.includes(`E2E_DISABLE_RUN_WORKER=${expected} `), `E2E_RUN_WORKER=${value}: ${c}`);
+      assert(!/DISABLE_SCHEDULER/.test(c), `the scheduler is not a host switch: ${c}`);
+    }
+  }
+});
+
+test('compose.yaml: the worker default is the relayed switch, and the scheduler is pinned off', () => {
+  const compose = readFileSync(new URL('./compose.yaml', import.meta.url), 'utf8');
+  assert.match(compose, /^\s+DISABLE_RUN_WORKER: \$\{E2E_DISABLE_RUN_WORKER:-true\}$/m);
+  assert.match(compose, /^\s+DISABLE_SCHEDULER: 'true'$/m);
+});
+
+test('compose.yaml: OWNER_DEFAULT_LIMITS is mapped from E2E_OWNER_DEFAULT_LIMITS, empty by default (#5134)', () => {
+  const compose = readFileSync(new URL('./compose.yaml', import.meta.url), 'utf8');
+  assert.match(compose, /^\s+OWNER_DEFAULT_LIMITS: \$\{E2E_OWNER_DEFAULT_LIMITS:-\}$/m);
+});
+
+test('compose.yaml: OWNER_DEFAULT_MONTHLY_GRANT is mapped from E2E_OWNER_DEFAULT_MONTHLY_GRANT, empty by default (#5022)', () => {
+  const compose = readFileSync(new URL('./compose.yaml', import.meta.url), 'utf8');
+  assert.match(compose, /^\s+OWNER_DEFAULT_MONTHLY_GRANT: \$\{E2E_OWNER_DEFAULT_MONTHLY_GRANT:-\}$/m);
+});

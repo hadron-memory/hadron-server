@@ -13,15 +13,17 @@ import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { encryptChatEngineStateWithKey } from '../../../lib/chatRootEngineState.js';
 import { updateChatRootData } from '../../../lib/chatRoot.js';
 import { getMemoryEncryptionInfo } from '../../../lib/nodeCrypto.js';
+import { buildSchema, type GraphQLObjectType } from 'graphql';
+import { typeDefs } from './typeDefs.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 const other = new PrismaClient({ datasourceUrl: process.env.DATABASE_URL });
 afterAll(() => other.$disconnect());
 afterEach(() => sessionKeyCache.clear());
-let userId: string, agentId: string, systemId: string, ids: Record<string, string>;
+let userId: string, appId: string, agentId: string, systemId: string, ids: Record<string, string>;
 const ctx = (client = db): Context => ({ db: client, roles: ['READER'], userId });
-const start = () => resolvers.Mutation.startChat({}, { agentRef: agentId, conversationName: 'main' }, ctx());
+const start = () => resolvers.Mutation.startChat({}, { agentRef: agentId, conversationName: 'main', appRef: appId }, ctx());
 const respond = (chatId: string, fields: Record<string, unknown> = {}, client = db) => resolvers.Mutation.processChatResponse({}, { chatId, toolResponse: { message: 'reply', onTrack: true, ...fields } }, ctx(client));
 async function state(chatId: string) {
   const root = await chatNodeByLocOrThrow(db, chatId);
@@ -38,6 +40,8 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { organizationId: org.id, userId, role: 'ADMIN' } });
   const agent = await resolvers.Mutation.createAgent({}, { orgRef: org.id, name: 'Completion fixture', visibility: 'ORGANIZATION' }, { ...ctx(), roles: ['ADMIN'] });
   agentId = agent.id; systemId = agent.systemMemoryId!; ids = {};
+  // #5394: a start names its App; this one installs the Agent and the user takes part in it.
+  appId = (await db.app.create({ data: { name: 'completion-app', urn: `${org.urn}:completion-app`, organizationId: org.id, appAgents: { create: { agentId } }, members: { create: { userId, role: 'member' } } } })).id;
   for (const [loc, data] of [
     ['config', {}], ['conversations', {}],
     ['conversations:main', { stageOrder: ['one', 'two'] }], ['conversations:main:one', {}], ['conversations:main:two', {}],
@@ -147,10 +151,52 @@ describe('#4036 completion by explicit goal_reached', () => {
     expect(after.engine.completedConversations ?? []).toEqual([]);
     expect((await db.chatRootCounter.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).lastMessageAt).toBeTruthy();
   });
+  it('two connections: a committed STAGE-ONLY move (same conversation) after origin capture wins; the whole stale batch is dropped (#4099)', async () => {
+    // The interleave above moves the conversation too, so it cannot tell whether the stage half of applyChatRoutingDecision's
+    // origin compare is live. Here only stageName changes between decision capture and apply; conversationName stays 'main'.
+    await rule(); const chat = await start(); const { root, engine: before } = await state(chat.chatId);
+    expect(before).toMatchObject({ conversationName: 'main', stageName: 'one' });
+    let release!: () => void, observed!: () => void;
+    const held = new Promise<void>(r => { release = r; }); const entered = new Promise<void>(r => { observed = r; });
+    let intercepted = 0;
+    const client = db.$extends({ query: { edge: { async findMany({ args, query }) {
+      const rows = await query(args);
+      if (args.where?.sourceId === ids['conversations:main:one']) { intercepted++; observed(); await held; }
+      return rows;
+    } } } }) as unknown as typeof db;
+    // goal_reached fires the on_complete rule: the stale batch would complete 'main', record history, close the goal and move to 'target'.
+    const pending = respond(chat.chatId, { goal_reached: true, onTrack: false, offTrackReason: 'late' }, client);
+    const winningHistory = [...(before.routeHistory ?? []), { conversationUrn: 'conversations:main', nodeUrn: 'conversations:main:two', action: 'ENTER', trigger: { type: 'STAGE_TRANSITION', content: 'winner-4099' }, timestamp: new Date().toISOString() }];
+    try {
+      await Promise.race([entered, new Promise((_, reject) => setTimeout(() => reject(new Error('origin observation timeout')), 5000))]);
+      expect(intercepted).toBe(1);
+      await updateChatRootData(other, { id: root.id, loc: root.loc, memoryId: root.memoryId }, await getMemoryEncryptionInfo(other, root.memoryId),
+        fresh => ({ ...fresh, stageName: 'two', routeHistory: winningHistory }));
+      expect((await state(chat.chatId)).engine).toMatchObject({ conversationName: 'main', stageName: 'two' });
+    } finally { release(); }
+    expect(await pending).toMatchObject({ routingSkipped: true, conversationCompleted: null, conversationHandoff: null, stageTransitioned: false, newStageName: null });
+    const after = await state(chat.chatId);
+    // The winning stage stands, and bookkeeping outside routing still applies.
+    expect(after.engine).toMatchObject({ conversationName: 'main', stageName: 'two', lastOffTrackReason: 'late' });
+    // No completion, no history entry, no goal change and no move from the stale batch.
+    expect(after.engine.completedConversations ?? []).toEqual([]);
+    expect(after.engine.routeHistory).toEqual(winningHistory);
+    expect(after.engine.goalStack).toEqual(before.goalStack);
+  });
 });
 
 // #4102 F9: moved from src/lib/chatRouting4036.test.ts so that lib-only file imports no api-layer code
 // (the 4035 file's respond-tool describe is the precedent for asserting the schema at this layer).
+describe('#4099 the result text states the stale-origin clearing', () => {
+  it('rejectedNextStage and routingSkipped say a skipped turn clears the rejection, without changing the wire shape', () => {
+    const fields = (buildSchema(typeDefs).getType('ChatResponseResult') as GraphQLObjectType).getFields();
+    expect(String(fields.rejectedNextStage.type)).toBe('String');
+    expect(fields.rejectedNextStage.description).toContain('null when routingSkipped: the rejection was judged against a stage list the chat has since left');
+    expect(String(fields.routingSkipped.type)).toBe('Boolean!');
+    expect(fields.routingSkipped.description).toContain('rejectedNextStage all read as unset');
+  });
+});
+
 describe('#4036 respond tool contract', () => {
   it('adds an optional boolean goal_reached to the shared respond schema', () => {
     const parameters = respondToolDefinition({})[0].parameters as any;

@@ -16,6 +16,7 @@ import { z } from 'zod';
 import type { AiServiceConfig, Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { encryptToken } from './tokenCrypto.js';
 import { chatToolChoiceFor, type ChatToolChoice } from './llm/chatToolChoice.js';
+import { type OwnedRow, type OwnerRef, ownerOfWork } from './owner.js';
 
 // ── Typed errors (Constitution S2 — resolver layer maps name → extensions.code) ──
 
@@ -33,7 +34,7 @@ export async function lockAiServiceConfig(tx: Prisma.TransactionClient, id: stri
 
 export class AiServiceConfigNotFoundError extends Error {
   constructor(public ref: string) {
-    super(`AI service config not found: ${ref}`);
+    super('AI service config not found');
     this.name = 'AiServiceConfigNotFoundError';
   }
 }
@@ -209,11 +210,11 @@ export function apiKeyWriteFields(
 export type AiConfigOwnerType = 'HADRON_SERVER' | 'ORGANIZATION' | 'APP' | 'AGENT';
 
 export interface AiConfigContext {
-  /** Installation context; its org is the Org level of the walk. */
+  /** Installation context; its owner is the tenant of the walk (an organization's App: that organization's level; a person's App: neither the organization nor the platform level). */
   appId?: string | null;
-  /** Design-time context; supplies the Org level when no App is given. */
+  /** Design-time context; its own configurations answer, and its owner is the tenant when no App is given. */
   agentId?: string | null;
-  /** Explicit org context (e.g. platform jobs scoped to an org). */
+  /** Explicit org context (e.g. platform jobs scoped to an org); always the App's own organization. Never overrides a person's App. */
   organizationId?: string | null;
 }
 
@@ -233,28 +234,48 @@ function resolved(config: AiServiceConfig, ownerType: AiConfigOwnerType): Resolv
 }
 
 /**
- * Whether the walk may consult the HadronServer level.
- *
- * `cor:dmo:050:10` (D-2026-09-29-D, clarified by Holger in team chat #4542):
- * a personal (user-owned) Agent used where no organization is in play never
- * falls back to the platform's config — its owner brings their own key. Its
- * own configs and a user-owned App's configs still answer; only the host
- * level is closed. With an organization in play (the App's, the Agent's, or
- * an explicit one) the rule does not apply and the host level stays open.
- *
- * Enforced here, in the shared walk, so every consumer inherits it: the
- * decrypt query, the masked picker, and server-side runs (#1482).
+ * #5075 (cor:dmo:050:10, cor:dmo:170:05): the tenant of an AI-configuration context, decided ONCE for the walk, the list
+ * walk, the decrypting query and the chat tool-choice read. In order:
+ *   1. an App that exists and a person owns: that person, and nothing else is consulted;
+ *   2. else an explicit organization (jobs scoped to one; it is always the App's own organization): that organization;
+ *   3. else the owner of the work (the App's owner, else the Agent's);
+ *   4. else UNOWNED when an App or Agent row exists but names no owner (the platform level stays closed), else the
+ *      server's own context (no App or Agent row: a platform job, or an id with no row, as before).
+ * An organization's App running another party's Agent stays the organization's tenant, so every organization context
+ * answers as before.
  */
-function hostLevelOpen(personalAgent: boolean, organizationId: string | null): boolean {
-  return !(personalAgent && !organizationId);
+export type AiConfigTenant = OwnerRef | { server: true } | { unowned: true };
+
+export function aiConfigTenantFor(input: {
+  app: OwnedRow | null;
+  agent: OwnedRow | null;
+  organizationId: string | null;
+}): AiConfigTenant {
+  if (input.app?.ownerUserId != null) return { userId: input.app.ownerUserId };
+  if (input.organizationId) return { organizationId: input.organizationId };
+  const owner = ownerOfWork(input.app, input.agent);
+  if (owner) return owner;
+  // No owner. A row that exists but names no owner (an impossible row under the owner XOR invariant) is UNOWNED and
+  // closes the platform level; a context with no App or Agent row at all (a platform job, or an id with no row) is the
+  // server's own context.
+  return input.app || input.agent ? { unowned: true } : { server: true };
+}
+
+/**
+ * Whether the walk may consult the HadronServer level: the platform's configuration answers for a server context and for
+ * an organization, never for a person and never for an unowned row (their App or their own Agent brings its own key).
+ * A8 (#5025) opens it for a person by changing this one line.
+ */
+function platformLevelOpen(tenant: AiConfigTenant): boolean {
+  return 'server' in tenant || 'organizationId' in tenant;
 }
 
 /**
  * Walk App -> Agent -> Org -> HadronServer for the first ENABLED config
- * with `name`. Levels absent from the context are skipped (a platform
- * job with no App/Agent/org resolves against the host only). The host
- * level is skipped for an org-less personal Agent ({@link hostLevelOpen}).
- * Returns null when no level matches.
+ * with `name`. The App's and the Agent's own configurations are always consulted; the organization level and the platform
+ * level only for the tenant they belong to ({@link aiConfigTenantFor}, {@link platformLevelOpen}): a person's App (or a
+ * person's Agent) sees neither. Levels absent from the context are skipped (a platform job with no App/Agent/org resolves
+ * against the host only). Returns null when no level matches.
  */
 export async function resolveAiConfig(
   db: PrismaClient,
@@ -262,41 +283,42 @@ export async function resolveAiConfig(
   ctx: AiConfigContext,
 ): Promise<ResolvedAiConfig | null> {
   const { appId, agentId } = ctx;
-  let organizationId = ctx.organizationId ?? null;
-  let personalAgent = false;
+  let app: OwnedRow | null = null;
+  let agent: OwnedRow | null = null;
 
   // Each owner level is one query: the level's matching config and (for
-  // App/Agent) its organizationId come back together, so a miss costs no
+  // App/Agent) its owner columns come back together, so a miss costs no
   // extra roundtrip for the org lookup (PR #262 review).
   if (appId) {
-    const app = await db.app.findUnique({
+    const row = await db.app.findUnique({
       where: { id: appId },
       include: { aiServiceConfigs: { where: { name, enabled: true }, take: 1 } },
     });
-    const config = app?.aiServiceConfigs[0];
+    const config = row?.aiServiceConfigs[0];
     if (config) return resolved(config, 'APP');
-    if (!organizationId) organizationId = app?.organizationId ?? null;
+    app = row;
   }
 
   if (agentId) {
-    const agent = await db.agent.findUnique({
+    const row = await db.agent.findUnique({
       where: { id: agentId },
       include: { aiServiceConfigs: { where: { name, enabled: true }, take: 1 } },
     });
-    const config = agent?.aiServiceConfigs[0];
+    const config = row?.aiServiceConfigs[0];
     if (config) return resolved(config, 'AGENT');
-    if (!organizationId) organizationId = agent?.organizationId ?? null;
-    personalAgent = agent?.ownerUserId != null;
+    agent = row;
   }
 
-  if (organizationId) {
+  const tenant = aiConfigTenantFor({ app, agent, organizationId: ctx.organizationId ?? null });
+
+  if ('organizationId' in tenant) {
     const config = await db.aiServiceConfig.findFirst({
-      where: { organizationId, name, enabled: true },
+      where: { organizationId: tenant.organizationId, name, enabled: true },
     });
     if (config) return resolved(config, 'ORGANIZATION');
   }
 
-  if (!hostLevelOpen(personalAgent, organizationId)) return null;
+  if (!platformLevelOpen(tenant)) return null;
 
   const config = await db.aiServiceConfig.findFirst({
     where: { hadronServerId: { not: null }, name, enabled: true },
@@ -317,7 +339,7 @@ export async function resolveDefaultAiConfig(
 /**
  * Collect every config RESOLVABLE in a context — the plural, list-all-names
  * analogue of resolveAiConfig (which resolves ONE name). Walks the same
- * App -> Agent -> Org (of the App, else of the Agent) -> HadronServer order,
+ * App -> Agent -> Org (of the tenant, {@link aiConfigTenantFor}) -> HadronServer order,
  * gathering all ENABLED configs and deduping by name with the INNERMOST owner
  * winning, so each name appears once as the row resolveAiConfig would return
  * for it. Absent levels are skipped; disabled configs are skipped.
@@ -332,8 +354,8 @@ export async function resolveAiConfigs(
   ctx: AiConfigContext,
 ): Promise<ResolvedAiConfig[]> {
   const { appId, agentId } = ctx;
-  let organizationId = ctx.organizationId ?? null;
-  let personalAgent = false;
+  let app: OwnedRow | null = null;
+  let agent: OwnedRow | null = null;
 
   // Inner -> outer walk; keep the FIRST config seen per name so the innermost
   // owner wins, mirroring resolveAiConfig's single-name precedence.
@@ -345,34 +367,35 @@ export async function resolveAiConfigs(
   };
 
   if (appId) {
-    const app = await db.app.findUnique({
+    const row = await db.app.findUnique({
       where: { id: appId },
       include: { aiServiceConfigs: { where: { enabled: true } } },
     });
-    if (app) collect(app.aiServiceConfigs, 'APP');
-    if (!organizationId) organizationId = app?.organizationId ?? null;
+    if (row) collect(row.aiServiceConfigs, 'APP');
+    app = row;
   }
 
   if (agentId) {
-    const agent = await db.agent.findUnique({
+    const row = await db.agent.findUnique({
       where: { id: agentId },
       include: { aiServiceConfigs: { where: { enabled: true } } },
     });
-    if (agent) collect(agent.aiServiceConfigs, 'AGENT');
-    if (!organizationId) organizationId = agent?.organizationId ?? null;
-    personalAgent = agent?.ownerUserId != null;
+    if (row) collect(row.aiServiceConfigs, 'AGENT');
+    agent = row;
   }
 
-  if (organizationId) {
+  const tenant = aiConfigTenantFor({ app, agent, organizationId: ctx.organizationId ?? null });
+
+  if ('organizationId' in tenant) {
     collect(
-      await db.aiServiceConfig.findMany({ where: { organizationId, enabled: true } }),
+      await db.aiServiceConfig.findMany({ where: { organizationId: tenant.organizationId, enabled: true } }),
       'ORGANIZATION',
     );
   }
 
-  // Same host-level rule as resolveAiConfig, so the picker never offers a
-  // config the single-name walk would refuse to resolve.
-  if (hostLevelOpen(personalAgent, organizationId)) {
+  // The same tenant and platform-level rule as resolveAiConfig, so the picker never offers a configuration the
+  // single-name walk would refuse to resolve.
+  if (platformLevelOpen(tenant)) {
     collect(
       await db.aiServiceConfig.findMany({
         where: { hadronServerId: { not: null }, enabled: true },

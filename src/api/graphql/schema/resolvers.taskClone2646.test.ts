@@ -17,12 +17,12 @@ const ctx = (userId: string) => ({ db, userId, roles: ['READER'] });
 const code = (c: string) => ({ extensions: { code: c } });
 const stored = (id: string) => db.agentTask.findUniqueOrThrow({ where: { id } }) as Promise<any>;
 const created = (id: string) => db.agentTeamEvent.findMany({ where: { taskId: id, type: 'task.created' } });
-const clone = (taskId: string, input: any = {}, userId = owner.id) => M.cloneAgentTask({}, { taskId, input }, ctx(userId));
+const clone = (taskId: string, input: any = {}, userId = owner.id) => M.cloneAgentTask({}, { taskRef: taskId, input }, ctx(userId));
 const eventCount = (id: string) => db.agentTeamEvent.count({ where: { taskId: id } });
 
 async function finish(taskId: string, userId: string) {
-  await M.startAgentTask({}, { taskId }, ctx(userId));
-  await M.finishAgentTask({}, { taskId, result: { outcome: 'succeeded', summary: 'done', evidence: 'e' } }, ctx(userId));
+  await M.startAgentTask({}, { taskRef: taskId }, ctx(userId));
+  await M.finishAgentTask({}, { taskRef: taskId, result: { outcome: 'succeeded', summary: 'done', evidence: 'e' } }, ctx(userId));
 }
 
 let source: any;
@@ -185,8 +185,8 @@ describe('parent, root and project', () => {
   describe('a child task', () => {
     let child: any;
     beforeEach(async () => {
-      await M.startAgentTask({}, { taskId: source.id }, ctx(assignee.id));
-      child = await M.createAgentTask({}, { input: { parentTaskId: source.id, title: 'Child', source: 's' } }, ctx(assignee.id));
+      await M.startAgentTask({}, { taskRef: source.id }, ctx(assignee.id));
+      child = await M.createAgentTask({}, { input: { parentTaskRef: source.id, title: 'Child', source: 's' } }, ctx(assignee.id));
     });
 
     it('keeps its parent for the parent\'s assignee', async () => {
@@ -197,14 +197,14 @@ describe('parent, root and project', () => {
     it('is refused for anyone else unless the call names another parent or none; nothing is created', async () => {
       await expect(clone(child.id, {}, sibling.id)).rejects.toMatchObject(code('TASK_NOT_ASSIGNEE'));
       expect(await db.agentTask.count({ where: { clonedFromId: child.id } })).toBe(0);
-      const none = await clone(child.id, { parentTaskId: null }, sibling.id);
+      const none = await clone(child.id, { parentTaskRef: null }, sibling.id);
       const at0 = await db.agentTask.findFirstOrThrow({ where: { appId: app.id, handle: 'AT0' } });
       expect((await stored(none.id)).parentTaskId).toBe(at0.id);
     });
 
     it('goes under AT0 when its parent has ended', async () => {
-      await M.cancelAgentTask({}, { taskId: child.id }, ctx(assignee.id));
-      await M.finishAgentTask({}, { taskId: source.id, result: { outcome: 'succeeded' } }, ctx(assignee.id));
+      await M.cancelAgentTask({}, { taskRef: child.id }, ctx(assignee.id));
+      await M.finishAgentTask({}, { taskRef: source.id, result: { outcome: 'succeeded' } }, ctx(assignee.id));
       const c = await clone(child.id, {}, sibling.id);
       const at0 = await db.agentTask.findFirstOrThrow({ where: { appId: app.id, handle: 'AT0' } });
       expect((await stored(c.id)).parentTaskId).toBe(at0.id);
@@ -219,7 +219,7 @@ describe('parent, root and project', () => {
 
     it('a parent named from another App reads as not found', async () => {
       const foreign = await M.createAgentTask({}, { input: { appRef: other.id, title: 'Foreign' } }, ctx(outsider.id));
-      await expect(clone(child.id, { parentTaskId: foreign.id }, assignee.id)).rejects.toMatchObject(code('TASK_NOT_FOUND'));
+      await expect(clone(child.id, { parentTaskRef: foreign.id }, assignee.id)).rejects.toMatchObject(code('TASK_NOT_FOUND'));
     });
   });
 });
@@ -237,7 +237,7 @@ describe('copied requirements still pass the create gates', () => {
 describe('no reopen', () => {
   it('an ended task still never moves again', async () => {
     await finish(source.id, assignee.id);
-    await expect(M.cancelAgentTask({}, { taskId: source.id }, ctx(owner.id))).rejects.toMatchObject(code('TASK_ENDED'));
+    await expect(M.cancelAgentTask({}, { taskRef: source.id }, ctx(owner.id))).rejects.toMatchObject(code('TASK_ENDED'));
     await clone(source.id);
     expect((await stored(source.id)).status).toBe('finished');
   });

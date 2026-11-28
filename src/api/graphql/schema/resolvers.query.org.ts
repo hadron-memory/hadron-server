@@ -1,4 +1,5 @@
 // orgQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
+import { thresholdRoles } from '../../../lib/auth/billingRole.js';
 import { parseUrnInput } from '../../../lib/urn.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
@@ -247,14 +248,15 @@ export const orgQueries = {
       // case stays gated by callerCanAudit exactly as before.
       if (
         !auditsSelf &&
-        !(await callerCanAudit(ctx.db, { userId: ctx.userId, roles: ctx.roles }, resolved))
+        !(await callerCanAudit(ctx.db, { userId: ctx.userId, roles: thresholdRoles(ctx.roles) }, resolved))
       ) {
         throw new GraphQLError('Forbidden', { extensions: { code: 'FORBIDDEN' } });
       }
 
       const result = await computeEffectiveAccess(
         ctx.db,
-        { id: subjectUser.id, roles: subjectUser.roles },
+        // #5012: BILLING grants no effective access; the shared Subject type names the four threshold roles.
+        { id: subjectUser.id, roles: thresholdRoles(subjectUser.roles) ?? [] },
         resolved,
         ctx.impersonation ? { restrictOrgId: ctx.impersonation.orgId } : undefined,
       );
@@ -376,7 +378,7 @@ export const orgQueries = {
         query,
         entityTypes,
         fields,
-        orgId: orgIdArg,
+        orgRef: orgRefArg,
         limit,
         offset,
         scope,
@@ -385,7 +387,7 @@ export const orgQueries = {
         query: string;
         entityTypes?: SearchEntityType[] | null;
         fields?: SearchField[] | null;
-        orgId?: string | null;
+        orgRef?: string | null;
         limit?: number | null;
         offset?: number | null;
         /** Spec 049 Phase 3 — a scope named in the call (see findNodes). */
@@ -397,7 +399,7 @@ export const orgQueries = {
       // Spec 049 Phase 3 — a named scope narrows the Memory + Node slices to
       // the scope's memories (already ∩ access, S2); `global` becomes the
       // organization narrowing below. Nothing else changes; omitted ⇒ pre-049.
-      let orgId = orgIdArg;
+      let orgId = orgRefArg;
       let scopeRes: SearchScopeResolution | null = null;
       if (scope != null && scope.trim() !== '') {
         scopeRes = await resolveNamedScopeForQuery(ctx, scope, appRef ?? null, orgId ?? null);

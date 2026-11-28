@@ -19,6 +19,7 @@ import { startDesiredWorkers } from '../../../lib/desiredState/desiredStart.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { resolvers, type Context } from './resolvers.js';
+import { joinHostForKey } from '../../../test/agentTeamHost.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -99,6 +100,7 @@ beforeEach(async () => {
   kit = await w(longAgent, 'Kit', 'coordinator');
   sam = await w(shortAgent, 'Sam', 'builder');
   orca1 = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: `h-${generateId()}`, keyPreview: 'abcd', label: 'orca1' }, select: { id: true } });
+  await joinHostForKey(db, orca1.id, 'orca1');
   await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, ctx(admin.id));
   await M.registerHost({}, { input: { appRef: app.id, label: 'Orca 1', pollIntervalSeconds: 600, workers: [
     { worker: kit.id, family: 'claude', worktrees: ['hadron-server/kit'] },
@@ -144,7 +146,7 @@ describe('the worker record: written from what the session reports, never cleare
     // model, so the next start names codex and no model, and the matcher places no tier from it.
     expect(await recordOf(sam)).toEqual({ family: 'codex', model: 'claude-opus-5-5', effort: 'HIGH' });
     await M.endSession({}, { id: s.id }, ctx(bo.id));
-    await M.cancelAgentTask({}, { taskId: first.id }, ctx(admin.id));
+    await M.cancelAgentTask({}, { taskRef: first.id }, ctx(admin.id));
     // The first start is over (its host reported it), so the next assignment may issue another.
     await db.hostOperation.updateMany({ where: { workerId: sam.id, status: 'collected' }, data: { status: 'succeeded', finishedAt: new Date() } });
     const minimum = await queue(null, { minTier: 'low' });
@@ -366,7 +368,7 @@ describe('a task\'s run settings are checked at creation', () => {
   });
   it('a later requirements edit that the stored settings would violate is refused the same way', async () => {
     const t = await queue({ family: 'codex' }, {}, 'nobody');
-    expect(await refusal(M.updateAgentTask({}, { taskId: t.id, input: { requirements: { role: 'nobody', familyIn: ['claude'] } } }, ctx(admin.id))))
+    expect(await refusal(M.updateAgentTask({}, { taskRef: t.id, input: { requirements: { role: 'nobody', familyIn: ['claude'] } } }, ctx(admin.id))))
       .toMatchObject({ code: 'TASK_RUN_SETTINGS_INVALID', reason: 'FAMILY_EXCLUDED' });
   });
 });
@@ -376,7 +378,7 @@ describe('a run setting is not a requirement for a worker that is already runnin
     for (const w of [sam, kit]) {
       const s = await bind(w, { llmModel: 'claude-sonnet-5-5', effort: 'MEDIUM' });
       const t = await assignTo(w, { family: 'codex' });
-      const answer = await runAsActor({ workerId: w.id, agentId: w === sam ? shortAgent : longAgent }, () => M.startAgentTask({}, { taskId: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
+      const answer = await runAsActor({ workerId: w.id, agentId: w === sam ? shortAgent : longAgent }, () => M.startAgentTask({}, { taskRef: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
       // The mutation's own answer carries the stamp: startAgentTask returns the row read after its transaction.
       expect(T.appliedRunSettings(answer)).toEqual({ family: 'claude', model: 'claude-sonnet-5-5', effort: 'MEDIUM' });
       const row = await db.agentTask.findUniqueOrThrow({ where: { id: t.id } });
@@ -392,7 +394,7 @@ describe('a run setting is not a requirement for a worker that is already runnin
     const s = await bind(sam, { llmModel: 'claude-sonnet-5-5' });
     const t = await assignTo(sam, { family: 'codex' });
     const asSam = <R>(fn: (c: Context) => Promise<R>) => runAsActor({ workerId: sam.id, agentId: shortAgent }, () => fn({ ...ctx(bo.id), sessionId: s.id } as Context));
-    await asSam((c) => M.startAgentTask({}, { taskId: t.id }, c));
+    await asSam((c) => M.startAgentTask({}, { taskRef: t.id }, c));
     expect(T.appliedRunSettings(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } }))).toMatchObject({ family: 'claude' });
     await asSam((c) => M.handBackAgentTask({}, { taskRef: t.id, reason: { code: 'CANNOT_DO', text: 'not mine' } }, c));
     const row = await db.agentTask.findUniqueOrThrow({ where: { id: t.id } });

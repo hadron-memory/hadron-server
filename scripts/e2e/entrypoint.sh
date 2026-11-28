@@ -9,12 +9,16 @@ fi
 # Per-launch secrets keep even synthetic JWT sessions isolated between stacks.
 JWT_SECRET=$(node -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))")
 HADRON_ENCRYPTION_KEY=$(node -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))")
+# #4747: the App-secret root key, dedicated to this launch (never HADRON_ENCRYPTION_KEY's value or derived from it, never a
+# dev, test or production value: R18). Assigned, not defaulted, so a root key in the launching shell is replaced. Safe per launch
+# because the empty-database check above means this stack never holds a secret minted under another root (secret_root_check).
+SECRET_ROOT_KEY=$(node -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))")
 # #1793: only after the empty-DB check above; every process in this fresh stack shares this key.
 # A private QA override supports multi-process/overlap probes; never use production key material here.
 if [ -z "${RATE_LIMIT_KEYRING:-}" ]; then
   RATE_LIMIT_KEYRING=$(node -e "process.stdout.write(JSON.stringify({current:'e2e',keys:{e2e:require('crypto').randomBytes(32).toString('hex')}}))")
 fi
-export JWT_SECRET HADRON_ENCRYPTION_KEY RATE_LIMIT_KEYRING
+export JWT_SECRET HADRON_ENCRYPTION_KEY SECRET_ROOT_KEY RATE_LIMIT_KEYRING
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f prisma/pre-push.sql
 pnpm prisma db push --skip-generate
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f prisma/post-push.sql

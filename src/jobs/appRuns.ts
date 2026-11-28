@@ -29,10 +29,14 @@ import { generateId } from '../lib/id.js';
 import { toNaiveUtc } from '../lib/sessionActivity.js';
 import { getBusClient } from '../lib/bus/index.js';
 import { evaluatePolicyChain, parsePolicyLink, type PolicyAction } from '@hadron-memory/access-control';
+import { parseRunPolicySnapshot } from '../lib/runner/runPolicy.js';
+export { parseRunPolicySnapshot } from '../lib/runner/runPolicy.js';
 import { resolveNodeRef } from '../lib/entityRef/nodeRef.js';
 import { emitNodeUrnV2 } from '../lib/urnEmit.js';
-import { resolveAiConfigWithFallback, NoAiConfigAvailableError } from '../lib/aiConfig.js';
+import { NoAiConfigAvailableError } from '../lib/aiConfig.js';
 import { recordLlmUsage } from '../lib/metering/index.js';
+import { CreditsExhaustedError, gateCredit } from '../lib/metering/gate.js';
+import { billableAccountOfRun } from '../lib/metering/billableAccount.js';
 // Spec 049 Phase 3b — the trigger's scope snapshot on the run.
 import { parseRunScopeSnapshot, snapshotScopeForTrigger } from '../lib/scopes.js';
 import { snapshotRegisterForRun } from '../lib/resolveRegister.js';
@@ -56,6 +60,8 @@ import { agentPlatformValues } from '../lib/bootPrompt/variables.js';
 import { bootPromptRefusal } from '../lib/bootPrompt/refusal.js';
 import { applyPlatformVariables, applyRecordedVariables } from '../lib/personaDescription.js';
 import type { NextEdgeSelection } from '../lib/runner/selectNextEdge.js';
+import { type OwnerRef, isOwnedBy, orgIdOf, ownerColumns, personalAppRunsEnabled, requireOwnerRefOf } from '../lib/owner.js';
+import { resolveRunAiConfig } from '../lib/runner/runAiConfig.js';
 import { EdgeConditionEvalError } from '../lib/runner/selectNextEdge.js';
 
 export const RUN_REQUESTED_SUBJECT = 'run.requested.v1';
@@ -78,6 +84,11 @@ const QUOTA_SMS_PER_DAY_ORG = intEnv('QUOTA_SMS_PER_DAY_ORG', 200);
 // Agent email is deliberately a notification channel, not a campaign plane.
 const QUOTA_EMAILS_PER_DAY_APP = intEnv('QUOTA_EMAILS_PER_DAY_APP', 25);
 const QUOTA_EMAILS_PER_DAY_ORG = intEnv('QUOTA_EMAILS_PER_DAY_ORG', 100);
+// A person's counters (#5074): the host-configurable seed, code defaults equal to the organization's.
+const QUOTA_RUNS_PER_DAY_USER = intEnv('QUOTA_RUNS_PER_DAY_USER', 1_000);
+const QUOTA_TOKENS_PER_DAY_USER = intEnv('QUOTA_TOKENS_PER_DAY_USER', 10_000_000);
+const QUOTA_SMS_PER_DAY_USER = intEnv('QUOTA_SMS_PER_DAY_USER', 200);
+const QUOTA_EMAILS_PER_DAY_USER = intEnv('QUOTA_EMAILS_PER_DAY_USER', 100);
 
 /** Parse a positive-integer env var, falling back when unset/invalid. */
 function intEnv(name: string, fallback: number): number {
@@ -97,7 +108,9 @@ export class RunLaunchDeniedError extends Error {
       | 'APP_NOT_FOUND'
       | 'AGENT_NOT_INSTALLED'
       | 'ENCRYPTED_MEMORY_UNSUPPORTED'
-      | 'ENTRY_NOT_IN_ORG',
+      | 'ENTRY_NOT_IN_ORG'
+      // #5023 (cor:acl:050:05): the billable account has no credit left for work on the platform's own key.
+      | 'CREDITS_EXHAUSTED',
   ) {
     super(message);
     this.name = 'RunLaunchDeniedError';
@@ -116,6 +129,9 @@ function nextUtcMidnight(): Date {
   return d;
 }
 
+/** The scope a daily counter is kept for (cor:acl:050:04): an App, an organization, or a person. */
+export type QuotaScopeKind = 'app' | 'org' | 'user';
+
 const QUOTA_WINDOW = 'day';
 
 /**
@@ -126,7 +142,7 @@ const QUOTA_WINDOW = 'day';
  */
 async function ensureQuotaRow(
   db: PrismaClient,
-  scopeKind: 'app' | 'org',
+  scopeKind: QuotaScopeKind,
   scopeId: string,
   action: QuotaAction,
   defaultLimit: number,
@@ -153,20 +169,82 @@ async function ensureQuotaRow(
 }
 
 /** Platform-default (env-seeded) limit for a scope × action (#510 admin surface). */
-export function defaultQuotaLimit(
-  scopeKind: 'app' | 'org',
-  action: QuotaAction,
-): number {
-  if (action === 'run.execute') {
-    return scopeKind === 'app' ? QUOTA_RUNS_PER_DAY_APP : QUOTA_RUNS_PER_DAY_ORG;
+export function defaultQuotaLimit(scopeKind: QuotaScopeKind, action: QuotaAction): number {
+  const seeds: Record<QuotaScopeKind, Record<QuotaAction, number>> = {
+    app: {
+      'run.execute': QUOTA_RUNS_PER_DAY_APP,
+      'sms.send': QUOTA_SMS_PER_DAY_APP,
+      'email.send': QUOTA_EMAILS_PER_DAY_APP,
+      'llm.tokens': QUOTA_TOKENS_PER_DAY_APP,
+    },
+    org: {
+      'run.execute': QUOTA_RUNS_PER_DAY_ORG,
+      'sms.send': QUOTA_SMS_PER_DAY_ORG,
+      'email.send': QUOTA_EMAILS_PER_DAY_ORG,
+      'llm.tokens': QUOTA_TOKENS_PER_DAY_ORG,
+    },
+    user: {
+      'run.execute': QUOTA_RUNS_PER_DAY_USER,
+      'sms.send': QUOTA_SMS_PER_DAY_USER,
+      'email.send': QUOTA_EMAILS_PER_DAY_USER,
+      'llm.tokens': QUOTA_TOKENS_PER_DAY_USER,
+    },
+  };
+  return seeds[scopeKind][action];
+}
+
+/** The counter scope of an App's owner: an organization's `org` rows or a person's `user` rows. */
+export function quotaScopeOf(owner: OwnerRef): { scopeKind: 'org' | 'user'; scopeId: string } {
+  return 'organizationId' in owner
+    ? { scopeKind: 'org', scopeId: owner.organizationId }
+    : { scopeKind: 'user', scopeId: owner.userId };
+}
+
+/**
+ * Quota tier 1 of the launch gate (cor:acl:050:01): runs/day per App AND per owner (both must pass: the App first, its
+ * unit given back when the owner refuses), then the token look-ahead for both. Throws `QUOTA_EXCEEDED`.
+ */
+export async function consumeRunLaunchQuota(
+  db: PrismaClient,
+  args: { appId: string; owner: OwnerRef },
+): Promise<void> {
+  const { scopeKind, scopeId } = quotaScopeOf(args.owner);
+  const org = scopeKind === 'org';
+  if (!(await consumeQuota(db, 'app', args.appId, 'run.execute', defaultQuotaLimit('app', 'run.execute')))) {
+    throw new RunLaunchDeniedError('App run quota exhausted for today.', 'QUOTA_EXCEEDED');
   }
-  if (action === 'sms.send') {
-    return scopeKind === 'app' ? QUOTA_SMS_PER_DAY_APP : QUOTA_SMS_PER_DAY_ORG;
+  if (!(await consumeQuota(db, scopeKind, scopeId, 'run.execute', defaultQuotaLimit(scopeKind, 'run.execute')))) {
+    await db.quotaCounter.updateMany({
+      where: { scopeKind: 'app', scopeId: args.appId, action: 'run.execute', window: 'day', used: { gt: 0 } },
+      data: { used: { decrement: 1 } },
+    });
+    throw new RunLaunchDeniedError(
+      org ? 'Organization run quota exhausted for today.' : "The App owner's run quota is exhausted for today.",
+      'QUOTA_EXCEEDED',
+    );
   }
-  if (action === 'email.send') {
-    return scopeKind === 'app' ? QUOTA_EMAILS_PER_DAY_APP : QUOTA_EMAILS_PER_DAY_ORG;
+  // Token look-ahead: deny NEW launches while the daily token ledger is at or over its stored limit (the enforcement
+  // point for post-hoc token spend, see recordQuotaUsage).
+  if (!(await hasQuotaHeadroom(db, 'app', args.appId, 'llm.tokens', defaultQuotaLimit('app', 'llm.tokens')))) {
+    throw new RunLaunchDeniedError('App token quota exhausted for today.', 'QUOTA_EXCEEDED');
   }
-  return scopeKind === 'app' ? QUOTA_TOKENS_PER_DAY_APP : QUOTA_TOKENS_PER_DAY_ORG;
+  if (!(await hasQuotaHeadroom(db, scopeKind, scopeId, 'llm.tokens', defaultQuotaLimit(scopeKind, 'llm.tokens')))) {
+    throw new RunLaunchDeniedError(
+      org ? 'Organization token quota exhausted for today.' : "The App owner's token quota is exhausted for today.",
+      'QUOTA_EXCEEDED',
+    );
+  }
+}
+
+/** One model hop's token spend, recorded to the App's and the owner's `llm.tokens` rows (unconditionally: the honest ledger). */
+export async function recordRunTokenUsage(
+  db: PrismaClient,
+  args: { appId: string; owner: OwnerRef },
+  spent: number,
+): Promise<void> {
+  const { scopeKind, scopeId } = quotaScopeOf(args.owner);
+  await recordQuotaUsage(db, 'app', args.appId, 'llm.tokens', defaultQuotaLimit('app', 'llm.tokens'), spent);
+  await recordQuotaUsage(db, scopeKind, scopeId, 'llm.tokens', defaultQuotaLimit(scopeKind, 'llm.tokens'), spent);
 }
 
 /**
@@ -177,7 +255,7 @@ export function defaultQuotaLimit(
  */
 export async function ensureQuotaRowsForScope(
   db: PrismaClient,
-  scopeKind: 'app' | 'org',
+  scopeKind: QuotaScopeKind,
   scopeId: string,
 ): Promise<void> {
   for (const action of ['run.execute', 'llm.tokens', 'sms.send', 'email.send'] as const) {
@@ -193,7 +271,7 @@ export async function ensureQuotaRowsForScope(
  */
 export async function setQuotaLimit(
   db: PrismaClient,
-  scopeKind: 'app' | 'org',
+  scopeKind: QuotaScopeKind,
   scopeId: string,
   action: QuotaAction,
   limit: number,
@@ -212,7 +290,7 @@ export async function setQuotaLimit(
  */
 export async function consumeQuota(
   db: PrismaClient,
-  scopeKind: 'app' | 'org',
+  scopeKind: QuotaScopeKind,
   scopeId: string,
   action: QuotaAction,
   defaultLimit: number,
@@ -235,7 +313,7 @@ export async function consumeQuota(
  */
 export async function reserveQuota(
   db: PrismaClient,
-  scopeKind: 'app' | 'org',
+  scopeKind: QuotaScopeKind,
   scopeId: string,
   action: QuotaAction,
   defaultLimit: number,
@@ -285,7 +363,7 @@ export async function reserveQuota(
  */
 export async function settleReservation(
   db: PrismaClient,
-  scopeKind: 'app' | 'org',
+  scopeKind: QuotaScopeKind,
   scopeId: string,
   action: QuotaAction,
   delta: number,
@@ -302,7 +380,7 @@ export async function settleReservation(
 /** Stored-limit headroom check WITHOUT consuming (the launch gate's token look-ahead). */
 export async function hasQuotaHeadroom(
   db: PrismaClient,
-  scopeKind: 'app' | 'org',
+  scopeKind: QuotaScopeKind,
   scopeId: string,
   action: QuotaAction,
   defaultLimit: number,
@@ -324,7 +402,7 @@ export async function hasQuotaHeadroom(
  */
 export async function recordQuotaUsage(
   db: PrismaClient,
-  scopeKind: 'app' | 'org',
+  scopeKind: QuotaScopeKind,
   scopeId: string,
   action: QuotaAction,
   defaultLimit: number,
@@ -348,11 +426,14 @@ export async function recordQuotaUsage(
  */
 export async function consumeActionTicket(
   db: PrismaClient,
-  organizationId: string,
+  /** #5077: the run's owner. `action_tickets` has no person column yet, so a person holds no ticket: false, with no query. */
+  owner: OwnerRef,
   appId: string | null,
   action: string,
   runId: string,
 ): Promise<boolean> {
+  const organizationId = orgIdOf(owner);
+  if (organizationId === null) return false;
   const now = new Date();
   const candidates = await db.actionTicket.findMany({
     where: {
@@ -389,7 +470,11 @@ export async function consumeActionTicket(
 export interface MintAppRunArgs extends TriggerRunBudgets {
   /** Internal interactive caller; never accepted from trigger/event data. */
   consentPrincipal?: import('../middleware/auth.js').AuthContext;
-  organizationId: string;
+  /**
+   * #5077: the owner the caller holds for the App (the gate's App, the trigger row, the parent run). Mint checks it against
+   * the App and then uses the App's own owner (`tenant`) for everything after; never a nullable organization id.
+   */
+  owner: OwnerRef;
   appId: string;
   /**
    * The run's Agent. Optional on INPUT only, so every door reaches the one typed refusal (cor:agt:040:07 / 040:10:
@@ -429,11 +514,16 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // 1. LAUNCH GATE (cor:acl:050:01). App live?
   const app = await db.app.findFirst({
     where: { id: args.appId, deletedAt: null },
-    select: { id: true, organizationId: true },
+    select: { id: true, organizationId: true, ownerUserId: true },
   });
-  if (!app || app.organizationId !== args.organizationId) {
+  // #5077: the App must be owned by the owner the caller holds (two nulls never match), and with the deploy-window switch
+  // off a person as owner is refused the same way (decision a).
+  if (!app || !isOwnedBy(app, args.owner) || ('userId' in args.owner && !personalAppRunsEnabled())) {
     throw new RunLaunchDeniedError('App not found or not in this organization.', 'APP_NOT_FOUND');
   }
+  // From here on the App's own owner is the run's tenant: the entry check, the policy chain, the counters, the credit, the
+  // consent, the AI configuration and the row.
+  const tenant = requireOwnerRefOf(app);
   // agentId must be an Agent actually installed in this App — otherwise the
   // AI-config walk would consult a FOREIGN agent's credentials (PR-493
   // review, Codex P1). Checked here (defense in depth) and at trigger
@@ -450,7 +540,8 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // Preserve mint's existing AppMember OR non-revoked subscription gate.
   // #2168 changes installation membership, not subscriber activation/expiry;
   // manual/trigger pre-checks retain their stricter hasAppRelationship gate.
-  if (args.userId) {
+  // #5077: the owner of a person's App has a relationship with it whether or not it holds a member row.
+  if (args.userId && !('userId' in tenant && tenant.userId === args.userId)) {
     const member = await db.appMember.findFirst({
       where: { appId: args.appId, userId: args.userId },
       select: { userId: true },
@@ -486,7 +577,7 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
     resolvedEntryNodeId = entryNodeId;
     const entryNode = await db.node.findUnique({
       where: { id: entryNodeId },
-      select: { memory: { select: { isEncrypted: true, organizationId: true } } },
+      select: { memory: { select: { isEncrypted: true, organizationId: true, ownerUserId: true } } },
     });
     if (entryNode?.memory.isEncrypted) {
       throw new RunLaunchDeniedError(
@@ -499,9 +590,12 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
     // via a public/subscribed memory) would mint a run that consumes quota
     // and then always fails. Reject synchronously at the gate instead —
     // covers every mint path (schedule/webhook/manual/importNode).
-    if (entryNode && entryNode.memory.organizationId !== args.organizationId) {
+    // #5077: `isOwnedBy`, never `!==` between two nullable columns (two persons' memories both have a null organization).
+    if (entryNode && !isOwnedBy(entryNode.memory, tenant)) {
       throw new RunLaunchDeniedError(
-        'The entry node is not in this App\'s organization — headless runs cannot cross orgs (v1).',
+        'userId' in tenant
+          ? 'The entry node is not in a memory this App\'s owner owns.'
+          : 'The entry node is not in this App\'s organization — headless runs cannot cross orgs (v1).',
         'ENTRY_NOT_IN_ORG',
       );
     }
@@ -515,8 +609,12 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // run row below — later policy edits apply to FUTURE mints only (a live
   // run's kill switch is budgets/cancel, not policy edits). #510 wired the
   // upper layers; before that only the trigger link was evaluated.
+  // #5077 (decision b, cor:acl:040:02 Proposed): the owner's link is the organization's policy, or for a person's App the
+  // owner's own `User.policy`.
   const [orgPolicyRow, appPolicyRow, userPolicyRow] = await Promise.all([
-    db.organization.findUnique({ where: { id: args.organizationId }, select: { policy: true } }),
+    'organizationId' in tenant
+      ? db.organization.findUnique({ where: { id: tenant.organizationId }, select: { policy: true } })
+      : db.user.findUnique({ where: { id: tenant.userId }, select: { policy: true } }),
     db.app.findUnique({ where: { id: args.appId }, select: { policy: true } }),
     args.userId
       ? db.user.findUnique({ where: { id: args.userId }, select: { policy: true } })
@@ -549,27 +647,34 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   }
   const budgets = effectiveRunBudgets(requestedBudgets ?? {});
 
-  // Quota tier 1: runs/day per App AND per org (both must pass — consume
-  // app first, refund on org denial to keep the counters truthful).
-  if (!(await consumeQuota(db, 'app', args.appId, 'run.execute', QUOTA_RUNS_PER_DAY_APP))) {
-    throw new RunLaunchDeniedError('App run quota exhausted for today.', 'QUOTA_EXCEEDED');
+  // cor:dmo:150:08: `session.llmModel` is the run's model. It is the one the run will resolve (same override, same registry
+  // walk as `resolveConfig`), taken now so the record holds it; with none configured the run fails NO_AI_CONFIG anyway.
+  // #5023 (gate ruling 1a): resolved BEFORE the quota block (it only reads), so the credit check below runs before any counter
+  // moves and a refused launch leaves both run counters where they were.
+  let runModel = '';
+  let runKeyOwnerType: string | null = null;
+  {
+    const override = args.eventData && typeof args.eventData === 'object' ? ((args.eventData as Record<string, unknown>).__aiConfigName as string | undefined) : undefined;
+    try {
+      const resolvedConfig = await resolveRunAiConfig(db as PrismaClient, override ?? null, { appId: args.appId, agentId: args.agentId ?? undefined, tenant });
+      runModel = resolvedConfig.config.model ?? '';
+      runKeyOwnerType = resolvedConfig.ownerType;
+    } catch (err) {
+      if (!(err instanceof NoAiConfigAvailableError)) throw err;
+    }
   }
-  if (!(await consumeQuota(db, 'org', args.organizationId, 'run.execute', QUOTA_RUNS_PER_DAY_ORG))) {
-    await db.quotaCounter.updateMany({
-      where: { scopeKind: 'app', scopeId: args.appId, action: 'run.execute', window: 'day', used: { gt: 0 } },
-      data: { used: { decrement: 1 } },
-    });
-    throw new RunLaunchDeniedError('Organization run quota exhausted for today.', 'QUOTA_EXCEEDED');
+  // #5023 (cor:acl:050:05): the credit check, an access control before the work starts. Only a configuration on the platform's
+  // own key is gated; the billable account of a run is the owner of the App it runs in (cor:dmo:170:05), which is the run's
+  // organization. It is the run's own refusal, mapped by every door like QUOTA_EXCEEDED.
+  try {
+    await gateCredit(db, runKeyOwnerType, billableAccountOfRun(ownerColumns(tenant)));
+  } catch (err) {
+    if (err instanceof CreditsExhaustedError) throw new RunLaunchDeniedError(err.message, 'CREDITS_EXHAUSTED');
+    throw err;
   }
-  // Token look-ahead: deny NEW launches while the daily token ledger is at
-  // or over its stored limit (the enforcement point for post-hoc token
-  // spend — see recordQuotaUsage).
-  if (!(await hasQuotaHeadroom(db, 'app', args.appId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_APP))) {
-    throw new RunLaunchDeniedError('App token quota exhausted for today.', 'QUOTA_EXCEEDED');
-  }
-  if (!(await hasQuotaHeadroom(db, 'org', args.organizationId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_ORG))) {
-    throw new RunLaunchDeniedError('Organization token quota exhausted for today.', 'QUOTA_EXCEEDED');
-  }
+
+  // Quota tier 1: runs/day per App AND per owner, then the token look-ahead.
+  await consumeRunLaunchQuota(db, { appId: args.appId, owner: tenant });
 
   // 2. MINT the activation (AppRun row) + publish the wake-up.
   // Spec 049 Phase 3b: the scope travels as a SNAPSHOT (like `policy`), so an
@@ -594,7 +699,7 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // fresh resolution from the URN. Null on legacy rows and unresolvable refs.
   let entryNodeId: string | null = args.entryNodeId ?? null;
   if (args.triggerKind === 'MANUAL') {
-    automationPin = await captureSetupConsent(db, args.appId, args.userId ?? null, entryNodeId ?? args.entryNodeUrn, args.organizationId, args.consentPrincipal ?? { appId: args.appId, userId: args.userId ?? undefined, organizationId: args.organizationId }, configSelection(args));
+    automationPin = await captureSetupConsent(db, args.appId, args.userId ?? null, entryNodeId ?? args.entryNodeUrn, tenant, args.consentPrincipal ?? { appId: args.appId, userId: args.userId ?? undefined, organizationId: orgIdOf(tenant) ?? undefined }, configSelection(args));
   } else if (args.triggerKind === 'SCHEDULE') {
     const schedule = await db.agentSchedule.findFirst({ where: { id: args.triggerId ?? '', appId: args.appId, deletedAt: null }, select: { automationPin: true, entryNodeId: true } });
     automationPin = schedule?.automationPin;
@@ -615,24 +720,16 @@ export async function mintAppRun(db: PrismaClient, args: MintAppRunArgs): Promis
   // #3689: past this guard the run has its Agent; the column is NOT NULL with a foreign key, so there is no agentless row.
   const runAgentId = args.agentId;
   if (!runAgentId) throw bootPromptRefusal('BOOT_PROMPT_NOT_SET', { surface: 'run', agentName: '' });
-  const runAgent = await db.agent.findUniqueOrThrow({ where: { id: runAgentId }, select: { id: true, name: true, urn: true, personaRole: true } });
+  // #3911: a trigger's agent_id has no foreign key, so a hard-deleted Agent leaves a dangling id. It is the same typed refusal
+  // as no Agent (the headless run has no boot prompt to serve), not a P2025 that surfaces as a 500.
+  const runAgent = await db.agent.findUnique({ where: { id: runAgentId }, select: { id: true, name: true, urn: true, personaRole: true } });
+  if (!runAgent) throw bootPromptRefusal('BOOT_PROMPT_NOT_SET', { surface: 'run', agentName: '' });
   await resolveServedBootPrompt(db, { surface: 'run', appId: args.appId, agent: { id: runAgent.id, name: runAgent.name } });
-  // cor:dmo:150:08: `session.llmModel` is the run's model. It is the one the run will resolve (same override, same registry
-  // walk as `resolveConfig`), taken now so the record holds it; with none configured the run fails NO_AI_CONFIG anyway.
-  let runModel = '';
-  {
-    const override = args.eventData && typeof args.eventData === 'object' ? ((args.eventData as Record<string, unknown>).__aiConfigName as string | undefined) : undefined;
-    try {
-      runModel = (await resolveAiConfigWithFallback(db as PrismaClient, override ?? null, { appId: args.appId, agentId: runAgentId, organizationId: args.organizationId })).config.model ?? '';
-    } catch (err) {
-      if (!(err instanceof NoAiConfigAvailableError)) throw err;
-    }
-  }
   const runId = generateId();
   const createRun = (client: Pick<PrismaClient, 'appRun'>) => client.appRun.create({
     data: {
       id: runId,
-      organizationId: args.organizationId,
+      ...ownerColumns(tenant),
       appId: args.appId,
       agentId: runAgentId,
       userId: args.userId ?? null,
@@ -972,6 +1069,18 @@ async function executeAppRunInner(
         );
       }
 
+      // #5023 (gate ruling 2: after the activation verdict, so a cancelled, policy-denied or over-budget run is still reported
+      // as such): a model hop on the platform's own key is refused before any model call when the owner has no credit left.
+      // A script hop makes no model call and is not checked. The refusal is stored as DENIED_CREDITS.
+      if (!spec.script && resolved !== null) {
+        try {
+          await gateCredit(db, resolved.ownerType, billableAccountOfRun(run));
+        } catch (err) {
+          if (err instanceof CreditsExhaustedError) return fail('ACTIVATION_DENIED', err.message, 'DENIED_CREDITS');
+          throw err;
+        }
+      }
+
       // The resolved AI config, for model hops only (resolved just above). Loud, not a cast: a script hop has none,
       // so reading it there is a bug, not a null to launder (#3143 blind P3).
       const modelConfig = (): ResolvedAiConfig => {
@@ -1024,8 +1133,7 @@ async function executeAppRunInner(
         });
         // Recorded even into overage — tokens are already spent at the provider;
         // the NEXT launch gate is the enforcement point (PR-493 Codex P2).
-        await recordQuotaUsage(db, 'app', run.appId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_APP, spent);
-        await recordQuotaUsage(db, 'org', run.organizationId, 'llm.tokens', QUOTA_TOKENS_PER_DAY_ORG, spent);
+        await recordRunTokenUsage(db, { appId: run.appId, owner: requireOwnerRefOf(run) }, spent);
         // One usage event per hop — a failed flow still shows what it spent.
         // Spec 046: recordLlmUsage enriches with attribution (user + org),
         // the cost snapshot, and BYOK classification; it is throw-safe.
@@ -1034,7 +1142,10 @@ async function executeAppRunInner(
           nodeLoc: cur,
           appId: run.appId,
           userId: run.userId ?? null,
-          organizationId: run.organizationId,
+          // #5020 (cor:dmo:170:05): the owner of the work is the owner of the App the run is in, which is the run's own
+          // owner (copied from the App at mint; #5077: an organization or a person). Never the Agent's owner: an Agent another
+          // organization owns bills the App's owner (spec S3).
+          billableAccount: billableAccountOfRun(run),
           provider,
           model,
           tokensIn,
@@ -1302,21 +1413,6 @@ async function executeAppRunInner(
 }
 
 /**
- * Parse an AppRun.policy snapshot into chain links. Two stored shapes:
- * `{chain: [link, ...]}` (#510 — the full conjunctive snapshot) and the
- * pre-#510 single-link object (runs minted before the deploy). Anything
- * unparseable yields `[null]` — an absent link, which the evaluator treats
- * as no restriction (PR-512 review: comment matched to behavior).
- */
-export function parseRunPolicySnapshot(raw: unknown): Array<{ allow: string[] } | null> {
-  if (raw != null && typeof raw === 'object' && !Array.isArray(raw)) {
-    const chain = (raw as { chain?: unknown }).chain;
-    if (Array.isArray(chain)) return chain.map((l) => parsePolicyLink(l));
-  }
-  return [parsePolicyLink(raw)];
-}
-
-/**
  * The activation re-check (cor:agt:010:02): status live + policy allows +
  * (optionally) action budget headroom, decremented atomically on the same
  * statement so cancellation/zeroing halts the run at its next action.
@@ -1432,7 +1528,7 @@ async function tryFireSpawnCallback(db: PrismaClient, parentId: string): Promise
   const tally = await tallyChildren(db, parentId);
   try {
     await mintAppRun(db, {
-      organizationId: parent.organizationId,
+      owner: requireOwnerRefOf(parent),
       appId: parent.appId,
       agentId: parent.agentId,
       userId: parent.userId,
@@ -1496,7 +1592,7 @@ export async function handleSpawnCompletion(db: PrismaClient, runId: string): Pr
   if (cfg.itemCallback) {
     try {
       await mintAppRun(db, {
-        organizationId: parent.organizationId,
+        owner: requireOwnerRefOf(parent),
         appId: parent.appId,
         agentId: parent.agentId,
         userId: parent.userId,

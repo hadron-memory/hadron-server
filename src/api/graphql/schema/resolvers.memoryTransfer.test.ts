@@ -34,7 +34,7 @@ beforeEach(async () => {
   await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: owner.id, role: 'ADMIN' } });
   memory = await db.memory.create({ data: {
     id: generateId(), ownerUserId: owner.id, userId: owner.id,
-    urn: 'transfer-owner:specs', name: 'Specs', class: 'private', corpusDraft: false,
+    urn: 'transfer-owner:specs', name: 'Specs', class: 'private',
   } });
   node = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'cor:spc:020:01', name: 'Rule', content: 'Permanent citation', tags: [] } });
 });
@@ -54,7 +54,7 @@ describe('transferMemoryOwnership', () => {
     await locked;
 
     const share = resolvers.Mutation.createMemoryShare(null, {
-      memoryId: memory.id, granteeId: receiver.id, role: 'reader',
+      memoryRef: memory.id, granteeRef: receiver.id, role: 'reader',
     }, ctx(owner.id));
     try {
       await waitForLockWaitersOfType(db, 'transactionid', 1);
@@ -299,8 +299,8 @@ describe('transferMemoryOwnership', () => {
       },
     });
     const input = mode === 'create'
-      ? { memoryId: memory.id, loc: 'late-node', name: 'Late', content: 'late write' }
-      : { memoryId: memory.id, loc: node.loc, content: 'late write' };
+      ? { memoryRef: memory.id, loc: 'late-node', name: 'Late', content: 'late write' }
+      : { memoryRef: memory.id, loc: node.loc, content: 'late write' };
     const mutation = mode === 'create' ? resolvers.Mutation.createNode : resolvers.Mutation.updateNode;
     await expect(mutation(null, { input }, { db: raceDb, userId: owner.id, roles: ['READER'] }))
       .rejects.toMatchObject({ name: 'MemoryNotFoundError' });
@@ -446,7 +446,7 @@ describe('transferMemoryOwnership', () => {
 
   it('refuses erasure of a minted corpus until its owner hands it to a surviving org', async () => {
     await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: receiver.id, role: 'OWNER' } });
-    await db.memory.update({ where: { id: memory.id }, data: { corpusMintedAt: new Date() } });
+    await db.node.update({ where: { id: node.id }, data: { mintedAt: new Date(), mintedByInfo: 'test' } });
     await db.node.update({ where: { id: node.id }, data: { tags: ['spec'] } });
     await expect(resolvers.Mutation.deleteUser(null, {}, ctx(owner.id))).rejects.toMatchObject({
       extensions: { code: 'SPEC_MINTED_PERMANENT' },
@@ -459,9 +459,11 @@ describe('transferMemoryOwnership', () => {
     await transfer({ ...input, expectedNewUrn: preview.newUrn });
     await resolvers.Mutation.deleteUser(null, {}, ctx(owner.id));
     expect(await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).toMatchObject({
-      organizationId: org.id, ownerUserId: null, corpusMintedAt: expect.any(Date),
+      organizationId: org.id, ownerUserId: null,
       urn: preview.newUrn, legacyUrn: memory.urn,
     });
+    expect((await db.node.aggregate({ where: { memoryId: memory.id }, _max: { mintedAt: true } }))._max.mintedAt)
+      .toBeInstanceOf(Date);
     expect((await resolveNodeRef(db, `hrn:node:${memory.urn}:${node.loc}`)).id).toBe(node.id);
   });
 

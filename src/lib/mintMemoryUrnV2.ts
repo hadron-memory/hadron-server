@@ -40,6 +40,7 @@
 
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { mintLocalSlug } from './mintLocalSlug.js';
+import { isReservedSlug } from './derivedSlug.js';
 
 export interface MintMemoryUrnV2Args {
   /**
@@ -75,7 +76,10 @@ export async function mintMemoryUrnV2(
     root: args.root,
     desiredSlug: args.desiredSlug,
     authorRoot: args.authorRoot,
+    // #5203 S3: a reserved word is never stored, so a reserved candidate counts as taken and the mint aliases past
+    // it like any other collision (hrn:node:hadronmemory.com:specs:cor:urn:010:01).
     isTaken: async (composedUrn) =>
+      isReservedSlug(composedUrn.slice(args.root.length + 1)) ||
       (await db.memory.count({
         where: { OR: [{ urn: composedUrn }, { legacyUrn: composedUrn }] },
       })) > 0,

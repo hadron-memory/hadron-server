@@ -1,3 +1,5 @@
+import { lockMemoriesForChannelChange } from '../../lib/channels.js';
+import { memoryOwnerInTx, sameOwner } from '../../lib/ownerLimits/nodes.js';
 import { assertCopiedIncludesWritable, resyncDerivedIncludesForNodes, type ReadableMemoryIds } from '../../lib/includes/writeIncludes.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from '../../lib/nodeRoleWriters.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
@@ -13,6 +15,8 @@ import { carryNodeAuthorship, clearNodeAuthorship } from '../../lib/nodeAuthorsh
 import { computeContentHash } from '../../lib/contentHash.js';
 import { rebindIncludeTags } from '../../lib/includes/rebindIncludeTags.js';
 import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
+import { requireOwnerHeadroomMany } from '../../lib/ownerLimits/gate.js';
+import { memoryCountsAgainstOwner } from '../../lib/ownerLimits/keys.js';
 import { resetEmbeddingObligations } from '../../services/embedding/obligation.js';
 import type { MemoryClass, MemoryVisibility } from '../../generated/prisma/index.js';
 
@@ -91,6 +95,12 @@ export interface ExtractParentNodeArgs {
   actorId: string | null;
   /** #2167 — memories the copier may read (`getAccessibleMemoryIds`); `null` = unrestricted. */
   copierReadableMemoryIds: ReadableMemoryIds;
+  /**
+   * #5015 (cor:acl:150:04) — the person whose act this extract is, for the owner-limit refusal's form (null for an
+   * unattended or impersonated caller). REQUIRED so a new caller states it. The copies are new live nodes of the new
+   * memory's owner; a move inside one owner soft-deletes as many as it copies and is net zero.
+   */
+  ownerLimitCaller: { userId: string } | null;
 }
 
 export interface ExtractParentNodeResult {
@@ -109,6 +119,8 @@ export async function extractParentNodeGraph(
 ): Promise<ExtractParentNodeResult> {
   return db.$transaction(
     async (tx) => {
+      // #1213: owning copies/moves join before reading the signals they will carry.
+      await lockMemoriesForChannelChange(tx, [args.sourceMemoryId]);
       const source = await tx.memory.findUniqueOrThrow({ where: { id: args.sourceMemoryId } });
 
       // ── Subtree ──────────────────────────────────────────────────────────
@@ -167,16 +179,9 @@ export async function extractParentNodeGraph(
       // Unlike the merge this whole operation is ONE transaction, so holding
       // the lock here covers every write it performs.
       //
-      // CORRECTED by #1210 (@copilot, PR #1230). This used to continue: "…
-      // `nodes` was read inside it a few lines above, so the governed check is
-      // on this transaction's own snapshot rather than a stale one." That
-      // safety property does NOT hold, and the fix directly below is what
-      // proves it: `nodes` is read BEFORE the gate takes the memory lock, and
-      // the governed-kind doors serialize per loc rather than on that key, so
-      // a promotion or demotion can commit in between. READ COMMITTED does not
-      // refresh the earlier read. That is precisely why `assertBatchMutable`
-      // re-reads the signals and hands them back for the carry to copy — a
-      // reader must not lean on this snapshot being current.
+      // #1210 requires an authoritative signal carry, not a refusal. #1213 now acquires the source's
+      // coordination key at transaction entry, before even selecting this subtree, so promotion/demotion
+      // cannot land between this snapshot and its copy. The gate still returns its own fresh signals.
       // #1331 — a MOVE removes the subtree from its source memory: each node's role
       // needs its writer level there. A copy writes into a brand-new memory that has
       // no rulebook yet, so nothing narrows it (and it never changes the source).
@@ -263,6 +268,20 @@ export async function extractParentNodeGraph(
         args.rootLoc + oldLoc.slice(args.parentLoc.length);
 
       // ── New memory ───────────────────────────────────────────────────────
+      // #5015/#5016: ONE multi-key call (the owner-limit locks together, in resolved order), the extract's last lock (gate ruling 5), before
+      // any insert and before a node moves: the new memory when its class counts, and the copied rows. A move soft-deletes every copied
+      // source in this same transaction, so a move that stays with one owner adds no node; a copy, or a move to another owner, adds every
+      // row. The source memory row is held FOR SHARE on a move and the new memory is created below, so neither owner changes before commit.
+      const targetOwner = { organizationId: args.targetOrganizationId };
+      const addsNodes = !(args.move && sameOwner(await memoryOwnerInTx(tx, args.sourceMemoryId), targetOwner));
+      await requireOwnerHeadroomMany(tx, {
+        owner: targetOwner,
+        checks: [
+          ...(memoryCountsAgainstOwner({ class: args.newClass, appId: null, isInstallMemory: false }) ? [{ key: 'memories' as const, amount: 1n }] : []),
+          { key: 'nodes', amount: addsNodes ? BigInt(nodes.length) : 0n },
+        ],
+        caller: args.ownerLimitCaller,
+      });
       const memoryId = generateId();
       await tx.memory.create({
         data: {
@@ -415,6 +434,7 @@ export async function extractParentNodeGraph(
           sourceId: idMap.get(e.sourceId)!,
           targetId: idMap.get(e.targetId)!,
           loc,
+          locAuthored: false, // #2947: the copy's loc is derived from its own rebased endpoints
           name: e.name,
           description: e.description,
           isRunnable: e.isRunnable,

@@ -22,10 +22,11 @@ import { managesApp } from '../../../lib/auth/appManagement.js';
 import { requirePersonAsThemselves, requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import { GRANT_MEMORY_SELECT, grantTargetRefusal, isStrictOwnerClass } from '../../../lib/appWriteGrant.js';
+import { refNamesNothing, refHasUnstorableChars } from '../../../lib/entityRef/refNamesNothing.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { parseUrnInput } from '../../../lib/urn.js';
-import { validateLoc, InvalidLocError } from '../../../lib/validateLoc.js';
+import { validateLocOrThrow } from '../../../lib/validateLocOrThrow.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import type { ActAdmission, ActInstruction } from '../../../lib/auth/instructedAct.js';
 import { admitAppManagement, admitCredentialList, lockInstructedActRows } from './resolvers.instruction.js';
@@ -44,10 +45,7 @@ type AppRow = { id: string; organizationId: string | null; ownerUserId: string |
 function parsePrefix(raw: string): string {
   const prefix = raw.trim();
   if (prefix === '') throw badInput('prefix is required: a grant covers one loc prefix, never a whole memory.');
-  try { validateLoc(prefix); } catch (e) {
-    if (e instanceof InvalidLocError) throw badInput(`prefix is not a valid loc: ${e.message}`);
-    throw e;
-  }
+  validateLocOrThrow(prefix, 'prefix');
   return prefix;
 }
 
@@ -55,7 +53,7 @@ function parsePrefix(raw: string): string {
 function parseRegisterUrn(raw: string | null | undefined): string | null {
   if (raw == null || raw.trim() === '') return null;
   const urn = raw.trim();
-  if (urn.length > REGISTER_URN_MAX || parseUrnInput(urn).type !== 'node') {
+  if (urn.length > REGISTER_URN_MAX || refHasUnstorableChars(urn) || parseUrnInput(urn).type !== 'node') {
     throw badInput('registerNodeUrn must be a node URN (hrn:node:<root>:<memory>:<loc>).');
   }
   return urn;
@@ -64,7 +62,10 @@ function parseRegisterUrn(raw: string | null | undefined): string | null {
 async function resolveOrDeny<T>(lookup: () => Promise<T>): Promise<T> {
   try { return await lookup(); } catch (e) {
     if (e instanceof GraphQLError) throw e;
-    if (e instanceof Error && /not found|not fully qualified|URN/i.test(e.message)) throw denied();
+    // #3275: classify expected reference refusals by type, never by words in an infrastructure fault
+    // (#4893: one shared list — refNamesNothing with ambiguity opted in is isAppRefResolutionFailure
+    // generalized to the memory arm this helper also wraps).
+    if (refNamesNothing(e, { ambiguousNamesNothing: true })) throw denied();
     throw e;
   }
 }
@@ -81,15 +82,27 @@ type ProjectionMemory = Prisma.MemoryGetPayload<{ select: typeof PROJECTION_MEMO
  * function the write doors call, judged live at read, derived and never stored, so the mark goes when the memory
  * qualifies again. Where the memory is concealed (`memoryUrn` null) both are null: a reason would describe a memory the
  * caller may not know exists. A revoked row is not marked: `revokedAt` already says it does nothing.
+ *
+ * #4734 (ruling 0222 extended to write grants, cor:agt:010:01:18): `prefix` and `registerNodeUrn` name content inside the
+ * memory (a node path, a node URN), so a row never shows either without its `memoryUrn`: both follow the COMPUTED URN
+ * (the #3526 shape), so the two can never diverge. A viewer who may see the memory keeps all three, unless the URN cannot
+ * be computed (then the mark and its reason go too, as for a concealed row). The row's id,
+ * grantor and timestamps stay: that a grant row exists is accepted, as for read grants.
+ *
+ * Every path that returns this row goes through here: the give door, the revoke door and the list below are the only
+ * resolvers that read `appMemoryWriteGrant` into an answer; there is no MCP projection of the type, and the
+ * `appMemoryWriteGrantEvent` rows (which store the prefix) are written and never read back by any resolver.
  */
 export function project(row: GrantRow, memory: ProjectionMemory | null, app: AppRow, viewerId: string | undefined) {
   const visible = memory !== null && (!isStrictOwnerClass(memory.class) || isStrictOwner({ userId: viewerId }, memory.userId));
-  const refusal = visible && row.revokedAt === null ? grantTargetRefusal(app, memory!) : null;
+  const memoryUrn = visible ? safeCanonicalUrn('memory', memory!.urn) : null;
+  const shown = memoryUrn !== null;
+  const refusal = shown && row.revokedAt === null ? grantTargetRefusal(app, memory!) : null;
   return {
-    id: row.id, appId: row.appId, memoryUrn: visible ? safeCanonicalUrn('memory', memory!.urn) : null,
-    prefix: row.prefix, registerNodeUrn: row.registerNodeUrn, grantedBy: row.grantedBy,
+    id: row.id, appId: row.appId, memoryUrn,
+    prefix: shown ? row.prefix : null, registerNodeUrn: shown ? row.registerNodeUrn : null, grantedBy: row.grantedBy,
     createdAt: row.createdAt, revokedAt: row.revokedAt, revokedBy: row.revokedBy,
-    notEffective: visible ? refusal !== null : null, notEffectiveReason: refusal,
+    notEffective: shown ? refusal !== null : null, notEffectiveReason: refusal,
   };
 }
 

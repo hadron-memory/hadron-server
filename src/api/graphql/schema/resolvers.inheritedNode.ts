@@ -76,6 +76,7 @@ const INHERITED_PROJECTION: Record<string, (value: () => Promise<any>, parent: a
   outgoingEdges: (_value, parent, ctx) => inheritedEdges(parent, ctx, 'out'),
   incomingEdges: (_value, parent, ctx) => inheritedEdges(parent, ctx, 'in'),
   moveLinkWarnings: none,
+  moveEdgeUrnChanges: none,
   // #2048: an inherited boot prompt's link state belongs to the base owner; the child never gets it computed here.
   lintWarnings: none,
   authorship: none,
@@ -85,6 +86,9 @@ const INHERITED_PROJECTION: Record<string, (value: () => Promise<any>, parent: a
   updatedByAgent: none,
   updatedByUser: none,
   createdByUser: none,
+  // #5018: a node's recorded size is the base owner's storage figure (and its revisions are the base owner's records): never served to a child's reader.
+  storedBytes: none,
+  revisionBytes: none,
   asComment: none,
   asset: none,
   signingRequests: empty,

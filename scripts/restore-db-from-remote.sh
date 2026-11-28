@@ -72,21 +72,23 @@ echo
 echo "→ Restoring with $($PG_RESTORE --version)"
 "$PG_RESTORE" -d "$LOCAL_DB" -U "$LOCAL_USER" -h "$LOCAL_HOST" --no-owner --no-privileges "$LOCAL_PATH"
 
-# Prod creates a few PARTIAL indexes (`… WHERE …`) via hand-edited migrations
-# that schema.prisma declares as PLAIN (Prisma's schema language can't express a
-# WHERE clause on @@index/@@unique). The `prisma db push` inside dev-setup.sh
-# below can't see the partial index as matching its desired plain one, so it
-# tries to CREATE a same-named index and dies with "relation … already exists".
-# Only the indexes whose names match Prisma's auto-naming collide; the rest are
-# custom-named raw-SQL indexes db push never touches. Drop the colliding ones
-# here so db push recreates them as the plain versions the dev DB normally has
-# (functionally equivalent locally — Postgres treats NULLs as distinct). If a
-# future schema adds another Prisma-named partial index, append it to this list.
+# Prod carries two PARTIAL indexes that the baseline migration built:
+# memories_user_id_idx and users_external_app_id_external_id_key (WHERE … IS NOT
+# NULL). Since #4335, schema.prisma no longer declares either (Prisma cannot see
+# a partial index, so a declaration made every db push try to create it again and
+# die with "relation … already exists"); prisma/partial-index-invariants.sql,
+# applied by post-push.sql inside dev-setup.sh below, owns both and rebuilds them
+# partial, exactly as prod has them. The drops below name the index AND its table (#4714 N5) and commit
+# before dev-setup.sh runs, so they bypass post-push's definition checks: on a restored prod DB they remove exactly
+# the two partial indexes, which post-push then rebuilds. If a future schema adds another Prisma-named partial
+# index, own it in post-push the same way.
 echo
-echo "→ Dropping prod partial indexes that collide with db push (recreated plain below)"
+echo "→ Dropping the two partial indexes (post-push.sql rebuilds them partial below)"
+# Each drop names its table too (#4714 N5): a same-named index on another table is left alone. Single-quoted for the shell, with
+# dollar-quoted literals for SQL.
 psql -U "$LOCAL_USER" -h "$LOCAL_HOST" -d "$LOCAL_DB" -v ON_ERROR_STOP=1 \
-  -c "DROP INDEX IF EXISTS memories_user_id_idx;" \
-  -c "DROP INDEX IF EXISTS users_external_app_id_external_id_key;"
+  -c 'DO $g$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND tablename = $q$memories$q$ AND indexname = $q$memories_user_id_idx$q$) THEN DROP INDEX memories_user_id_idx; END IF; END $g$;' \
+  -c 'DO $g$ BEGIN IF EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND tablename = $q$users$q$ AND indexname = $q$users_external_app_id_external_id_key$q$) THEN DROP INDEX users_external_app_id_external_id_key; END IF; END $g$;'
 
 # Reconcile the restored (prod-state) schema with the working schema.prisma and
 # rebuild the pgvector HNSW index that a bare `db push` drops. dev-setup.sh runs

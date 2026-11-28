@@ -10,7 +10,7 @@ import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { generateId } from '../../../lib/id.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
-import type { GraphQLError } from 'graphql';
+import { GraphQLError } from 'graphql';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -94,14 +94,27 @@ describe('#1037 — startSession resolver, explicit App reference', () => {
     expect(session.appId).toBe(appA.id);
   });
 
-  it('but an App KEY still refuses a disagreeing appRef', async () => {
-    // The same check, for the principal shape it was actually written for.
+  it('but an App KEY still refuses a disagreeing appRef — concealed as an unknown App (#4836)', async () => {
+    // The same rule, for the principal shape it was actually written for —
+    // re-typed by #4836: a key reaches only its own App, so naming any other
+    // App (existing, as here, or missing) answers the one unknown-App refusal
+    // rather than a typed SESSION_APP_MISMATCH that said the other App exists.
     const keyCtx = { db, appId: appB.id, roles: [] } as unknown as Context;
-    await expect(
-      resolvers.Mutation.startSession(
-        {}, { input: { id: generateId(), appRef: appA.id } }, keyCtx,
-      ),
-    ).rejects.toThrow(/does not name the App this request is authenticated for/);
+    // One call, one non-vacuous assertion (BLIND F1, #4844 fold): the old
+    // shape ran the refusal twice, the second inside a try/catch with no
+    // `expect.fail` — had the call ever resolved, the extensions assertions
+    // were skipped and the test still passed. Capturing the rejection makes
+    // both halves assert on the same single refusal.
+    const e = await resolvers.Mutation.startSession(
+      {}, { input: { id: generateId(), appRef: appA.id } }, keyCtx,
+    ).then(
+      () => { throw new Error('expected the concealed unknown-App refusal'); },
+      (x: unknown) => x,
+    );
+    expect(e).toBeInstanceOf(GraphQLError);
+    expect((e as GraphQLError).message).toBe('App not found.');
+    expect((e as GraphQLError).extensions?.code).toBe('APP_NOT_FOUND');
+    expect(JSON.stringify((e as GraphQLError).extensions)).toBe('{"code":"APP_NOT_FOUND"}');
   });
 
   it('a pure App-KEY principal is never re-pointed by a ref — a credential is not a selection', async () => {
@@ -121,7 +134,7 @@ describe('#1037 — startSession resolver, explicit App reference', () => {
       expect.fail('expected a refusal');
     } catch (e) {
       const err = e as GraphQLError;
-      expect(err.message).toBe(`Worker not found: ${DARA_URN()}`);
+      expect(err.message).toBe('Worker not found'); // #5168: the ref is not quoted back
       expect(err.extensions).toEqual({ code: 'WORKER_NOT_FOUND' });
     }
 

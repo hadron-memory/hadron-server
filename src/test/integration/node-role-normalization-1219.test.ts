@@ -86,7 +86,7 @@ describe('#1219 Node.role empty normalization (cor:dmo:060:02, ruling A)', () =>
   it('createNode: an empty role is stored as null, not ""', async () => {
     await resolvers.Mutation.createNode(
       {},
-      { input: { memoryId: fx.memory.id, loc: 'r-empty', name: 'Empty role', role: '' } },
+      { input: { memoryRef: fx.memory.id, loc: 'r-empty', name: 'Empty role', role: '' } },
       fx.ctx,
     );
     expect((await persisted('r-empty')).role).toBeNull();
@@ -95,7 +95,7 @@ describe('#1219 Node.role empty normalization (cor:dmo:060:02, ruling A)', () =>
   it('createNode: a whitespace-only role is stored as null', async () => {
     await resolvers.Mutation.createNode(
       {},
-      { input: { memoryId: fx.memory.id, loc: 'r-ws', name: 'Whitespace role', role: '   ' } },
+      { input: { memoryRef: fx.memory.id, loc: 'r-ws', name: 'Whitespace role', role: '   ' } },
       fx.ctx,
     );
     expect((await persisted('r-ws')).role).toBeNull();
@@ -104,7 +104,7 @@ describe('#1219 Node.role empty normalization (cor:dmo:060:02, ruling A)', () =>
   it('createNode: a real role is stored verbatim (whitespace inside kept)', async () => {
     await resolvers.Mutation.createNode(
       {},
-      { input: { memoryId: fx.memory.id, loc: 'r-real', name: 'Real role', role: 'scheduling anchor' } },
+      { input: { memoryRef: fx.memory.id, loc: 'r-real', name: 'Real role', role: 'scheduling anchor' } },
       fx.ctx,
     );
     expect((await persisted('r-real')).role).toBe('scheduling anchor');
@@ -113,14 +113,14 @@ describe('#1219 Node.role empty normalization (cor:dmo:060:02, ruling A)', () =>
   it('updateNode: an empty role CLEARS an existing role to null', async () => {
     await resolvers.Mutation.createNode(
       {},
-      { input: { memoryId: fx.memory.id, loc: 'r-clear', name: 'To clear', role: 'ordinary-role' } },
+      { input: { memoryRef: fx.memory.id, loc: 'r-clear', name: 'To clear', role: 'ordinary-role' } },
       fx.ctx,
     );
     expect((await persisted('r-clear')).role).toBe('ordinary-role');
 
     await resolvers.Mutation.updateNode(
       {},
-      { input: { id: (await db.node.findFirstOrThrow({ where: { loc: 'r-clear', memoryId: fx.memory.id }, select: { id: true } })).id, role: '' } },
+      { input: { ref: (await db.node.findFirstOrThrow({ where: { loc: 'r-clear', memoryId: fx.memory.id }, select: { id: true } })).id, role: '' } },
       fx.ctx,
     );
     expect((await persisted('r-clear')).role).toBeNull();
@@ -130,7 +130,7 @@ describe('#1219 Node.role empty normalization (cor:dmo:060:02, ruling A)', () =>
     await writeNodeCore(
       { memoryId: fx.memory.id, loc: 'r-core', name: 'Core path', role: '  ' } as never,
       fx.ctx,
-      'upsert', { authoring: attestedAuthoring(null) },
+      'upsert', { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: attestedAuthoring(null) },
     );
     expect((await persisted('r-core')).role).toBeNull();
   });
@@ -138,7 +138,7 @@ describe('#1219 Node.role empty normalization (cor:dmo:060:02, ruling A)', () =>
   it('positive control: objectType empty behaves identically (the #725 contract)', async () => {
     await resolvers.Mutation.createNode(
       {},
-      { input: { memoryId: fx.memory.id, loc: 'ot-empty', name: 'Empty objectType', objectType: '' } },
+      { input: { memoryRef: fx.memory.id, loc: 'ot-empty', name: 'Empty objectType', objectType: '' } },
       fx.ctx,
     );
     expect((await persisted('ot-empty')).objectType).toBeNull();
@@ -152,7 +152,7 @@ describe('#1219 Node.role empty normalization (cor:dmo:060:02, ruling A)', () =>
       data: { id, memoryId: fx.memory.id, loc: 'r-gov', name: 'Governed', role: 'spec.rule', nodeType: 'record' },
     });
     await expect(
-      resolvers.Mutation.updateNode({}, { input: { id, role: '' } }, fx.ctx),
+      resolvers.Mutation.updateNode({}, { input: { ref: id, role: '' } }, fx.ctx),
     ).rejects.toMatchObject({ extensions: { code: 'ROLE_GOVERNED' } });
     expect((await persisted('r-gov')).role).toBe('spec.rule');
   });
@@ -163,26 +163,26 @@ describe('#1219 Node.role empty normalization (cor:dmo:060:02, ruling A)', () =>
     const id = generateId();
     await resolvers.Mutation.createNode(
       {},
-      { input: { id, memoryId: fx.memory.id, loc: 'r-hist', name: 'History', role: 'first' } },
+      { input: { id, memoryRef: fx.memory.id, loc: 'r-hist', name: 'History', role: 'first' } },
       fx.ctx,
     );
     await resolvers.Mutation.updateNode(
       {},
-      { input: { id, role: 'second' } },
+      { input: { ref: id, role: 'second' } },
       fx.ctx,
     );
     // Revisions snapshot the PRE-write state, so one more write is what puts
     // the 'second' state into history.
     await resolvers.Mutation.updateNode(
       {},
-      { input: { id, role: 'third' } },
+      { input: { ref: id, role: 'third' } },
       fx.ctx,
     );
     const revs = await db.nodeRevision.findMany({ where: { nodeId: id } });
     const second = revs.find((r) => r.role === 'second');
     if (!second) throw new Error('second revision not snapshotted');
     await db.nodeRevision.update({ where: { id: second.id }, data: { role: '' } });
-    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: second.id }, fx.ctx);
+    await resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: second.id }, fx.ctx);
     expect((await persisted('r-hist')).role).toBeNull();
   });
 });

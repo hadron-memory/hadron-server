@@ -1,3 +1,4 @@
+import { isSecretUseHeaderName, isSecretUsePrefix } from '../secrets/useBinding.js';
 /**
  * Run-time secret resolution (#677) — the CSS cascade under the run
  * principal. A bare name resolves most-specific-first — user → org —
@@ -26,6 +27,7 @@ import {
 } from '../secrets.js';
 import type { WebFetchAuth } from '../webfetchClient.js';
 import type { RunToolContext } from './tools/types.js';
+import { orgIdOf, requireOwnerRefOf } from '../owner.js';
 
 export interface ResolvedRunSecret {
   id: string;
@@ -57,9 +59,12 @@ export async function resolveRunSecret(
       case 'user':
         if (ctx.run.userId) candidates.push({ ownerType: 'user', ownerId: ctx.run.userId });
         break;
-      case 'org':
-        candidates.push({ ownerType: 'org', ownerId: ctx.run.organizationId });
+      case 'org': {
+        // #5077: a person's run has no organization scope; it resolves the on-behalf-of user's secrets only.
+        const runOrgId = orgIdOf(requireOwnerRefOf(ctx.run));
+        if (runOrgId !== null) candidates.push({ ownerType: 'org', ownerId: runOrgId });
         break;
+      }
     }
   }
   if (candidates.length === 0) return null;
@@ -121,6 +126,41 @@ export function assertUrlWithinPrefix(rawUrl: string, rawPrefix: string): void {
       : targetPath.startsWith(`${prefixPath}/`));
   if (!matchesPath) {
     throw new Error('Target URL is outside the secret urlPrefix.');
+  }
+}
+
+/**
+ * Enforce both scopes before an S5 credential can leave core: the signed HTTPS
+ * binding and the kind's current metadata prefix (hrn:node:hadronmemory.com:specs:cor:sec:030:01).
+ * The caller must send the returned parsed URL, not reparse a different string.
+ */
+export function assertSecretUseBinding(rawUrl: string, signedPrefix: string, metadataPrefix: string): string {
+  let target: URL;
+  let signed: URL;
+  try {
+    target = new URL(rawUrl);
+    signed = new URL(signedPrefix);
+  } catch {
+    throw new Error('Secret use requires absolute URLs.');
+  }
+  if (target.protocol !== 'https:' || target.username || target.password ||
+      !isSecretUsePrefix(signedPrefix) ||
+      /%(?:2f|5c)/i.test(target.pathname) || /%(?:2f|5c)/i.test(signed.pathname)) {
+    throw new Error('Secret use requires an HTTPS origin and path binding without credentials.');
+  }
+  assertUrlWithinPrefix(target.href, signed.href);
+  assertUrlWithinPrefix(target.href, metadataPrefix);
+  return target.href;
+}
+
+/** Ensure a signed header names the payload's auth channel and is never model-controlled (#4000). */
+export function assertSecretUseHeader(header: string, value: unknown, headers: Record<string, string>): void {
+  // Validate against the capability auth channel before this name reaches an HTTP implementation.
+  if (!isSecretUseHeaderName(header) || !isWebFetchAuth(value)) throw new Error('Invalid secret use header binding.');
+  const derived = value.type === 'header' ? value.name : 'authorization';
+  if (!isSecretUseHeaderName(derived) || derived.toLowerCase() !== header.toLowerCase() ||
+      Object.keys(headers).some((name) => name.toLowerCase() === header.toLowerCase())) {
+    throw new Error('Secret use header does not match its binding.');
   }
 }
 

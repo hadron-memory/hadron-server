@@ -40,7 +40,7 @@ describe('resolveRefArg (unit)', () => {
   });
 
   it('rejects supplying neither', async () => {
-    await expect(resolveRefArg(db, ok, { label: 'org' })).rejects.toThrow(/A org is required/);
+    await expect(resolveRefArg(db, ok, { label: 'org' })).rejects.toThrow(/orgRef is required/);
   });
 
   it('maps an entity NotFound to a uniform NOT_FOUND', async () => {
@@ -49,7 +49,7 @@ describe('resolveRefArg (unit)', () => {
     };
     await expect(
       resolveRefArg(db, missing, { ref: 'ghost', label: 'user' }),
-    ).rejects.toThrow(/No match for userRef "ghost"/);
+    ).rejects.toThrow(/^No match for userRef\.$/);
   });
 
   it('maps AmbiguousUserRefError to BAD_USER_INPUT with guidance', async () => {
@@ -168,7 +168,7 @@ describe('#816 member surfaces do not leak existence via refs', () => {
     );
     // The owner adds `target` as a reader — also proves userRef-by-handle on the
     // authorized path.
-    await M.addMemoryMember({}, { memoryId: mem.id, userRef: target.handle, role: 'reader' }, userCtx(owner.id));
+    await M.addMemoryMember({}, { memoryRef: mem.id, userRef: target.handle, role: 'reader' }, userCtx(owner.id));
   });
 
   const isMember = async (userId: string) =>
@@ -184,31 +184,31 @@ describe('#816 member surfaces do not leak existence via refs', () => {
     // 25-char cuid-shaped id that doesn't exist → resolveMemoryRef misses →
     // must collapse to the same FORBIDDEN a real-but-unauthorized memory gives.
     await expect(
-      M.addMemoryMember({}, { memoryId: 'cnonexistentnonexistent12', userRef: target.handle, role: 'reader' }, userCtx(stranger.id)),
+      M.addMemoryMember({}, { memoryRef: 'cnonexistentnonexistent12', userRef: target.handle, role: 'reader' }, userCtx(stranger.id)),
     ).rejects.toThrow(/not authorized to manage members/);
   });
 
   it('addMemoryMember: a non-owner + real memory + unknown user → FORBIDDEN (gate before user resolution)', async () => {
     await expect(
-      M.addMemoryMember({}, { memoryId: mem.id, userRef: 'ghost-user-ref', role: 'reader' }, userCtx(stranger.id)),
+      M.addMemoryMember({}, { memoryRef: mem.id, userRef: 'ghost-user-ref', role: 'reader' }, userCtx(stranger.id)),
     ).rejects.toThrow(/not authorized to manage members/);
   });
 
   it('removeMemoryMember: a non-owner targeting a REAL other user → FORBIDDEN, not NOT_FOUND', async () => {
     await expect(
-      M.removeMemoryMember({}, { memoryId: mem.id, userRef: target.handle }, userCtx(stranger.id)),
+      M.removeMemoryMember({}, { memoryRef: mem.id, userRef: target.handle }, userCtx(stranger.id)),
     ).rejects.toThrow(/not authorized to manage members/);
     expect(await isMember(target.id)).toBe(true); // untouched
   });
 
   it('removeMemoryMember: a non-owner targeting an UNKNOWN user → same FORBIDDEN (no user oracle)', async () => {
     await expect(
-      M.removeMemoryMember({}, { memoryId: mem.id, userRef: 'ghost-user-ref' }, userCtx(stranger.id)),
+      M.removeMemoryMember({}, { memoryRef: mem.id, userRef: 'ghost-user-ref' }, userCtx(stranger.id)),
     ).rejects.toThrow(/not authorized to manage members/);
   });
 
   it('removeMemoryMember: self-removal by handle is permitted', async () => {
-    await M.removeMemoryMember({}, { memoryId: mem.id, userRef: target.handle }, userCtx(target.id));
+    await M.removeMemoryMember({}, { memoryRef: mem.id, userRef: target.handle }, userCtx(target.id));
     expect(await isMember(target.id)).toBe(false);
   });
 });

@@ -41,9 +41,9 @@ async function rules(...rs: Array<{ role: string; strictSubRoles?: boolean; enab
 }
 
 const create = (loc: string, extra: Record<string, unknown> = {}, opts: Partial<Parameters<typeof writeNodeCore>[3]> = {}) =>
-  writeNodeCore({ memoryId, loc, name: loc, content: 'x', ...extra } as never, ctx(), 'create', { authoring: attestedAuthoring(null), ...opts });
+  writeNodeCore({ memoryId, loc, name: loc, content: 'x', ...extra } as never, ctx(), 'create', { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: attestedAuthoring(null), ...opts });
 const update = (loc: string, extra: Record<string, unknown>) =>
-  writeNodeCore({ memoryId, loc, ...extra } as never, ctx(), 'update', { authoring: attestedAuthoring(null) });
+  writeNodeCore({ memoryId, loc, ...extra } as never, ctx(), 'update', { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: attestedAuthoring(null) });
 
 async function refusal(p: Promise<unknown>) {
   const e = await p.then(() => null, (err: unknown) => err);
@@ -204,7 +204,7 @@ describe('#1330 — restore is exempt from strictSubRoles (Holger, 2026-09-27)',
     await rules({ role: 'doc', strictSubRoles: true }, { role: 'doc.current' });
     // The same assignment through an ordinary write IS refused.
     expect(await refusal(update('r', { role: 'doc.historic' }))).toMatchObject({ code: 'ROLE_NOT_DECLARED' });
-    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: revision.id }, ctx());
+    await resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: revision.id }, ctx());
     expect(await db.node.findUniqueOrThrow({ where: { id: node.id } })).toMatchObject({ role: 'doc.historic', content: 'then' });
   });
 });

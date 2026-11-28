@@ -133,16 +133,24 @@ describe('App CRUD', () => {
     expect(result.urn).toBe('org-a:my-custom-slug');
   });
 
-  it('rejects duplicate URNs', async () => {
-    await resolvers.Mutation.createApp(
+  // #5203 S3 (cor:urn:010:01): a duplicate NAME no longer refuses; the derived URN iterates. A SUPPLIED urn a live
+  // App holds is still refused.
+  it('a duplicate name iterates the derived URN; a supplied duplicate URN is rejected', async () => {
+    const first = await resolvers.Mutation.createApp(
       {},
       { orgRef: orgA.id, agentRef: agent.id, name: 'Dup' },
       adminCtx(),
     );
+    const second = await resolvers.Mutation.createApp(
+      {},
+      { orgRef: orgA.id, agentRef: agent.id, name: 'Dup' },
+      adminCtx(),
+    );
+    expect(second.urn).toBe(`${first.urn}-2`);
     await expect(
       resolvers.Mutation.createApp(
         {},
-        { orgRef: orgA.id, agentRef: agent.id, name: 'Dup' },
+        { orgRef: orgA.id, agentRef: agent.id, name: 'Dup', urn: 'dup' },
         adminCtx(),
       ),
     ).rejects.toThrow(/already exists/);
@@ -298,25 +306,25 @@ describe('startAgentSession', () => {
   it('DY-3: stamps the App ceiling by default; an App with agentSessionsExpire=false stamps none unless asked', async () => {
     const ceilingMs = (await db.app.findUniqueOrThrow({ where: { id: app.id } })).sessionTimeoutSeconds * 1000;
     const before = Date.now();
-    const dflt = await resolvers.Mutation.startAgentSession({}, { agentId: agent.id }, appCtx(app.id));
+    const dflt = await resolvers.Mutation.startAgentSession({}, { agentRef: agent.id }, appCtx(app.id));
     expect(dflt.expiresAt).not.toBeNull();
     expect(new Date(dflt.expiresAt).getTime()).toBeGreaterThanOrEqual(before + ceilingMs);
     expect(new Date(dflt.expiresAt).getTime()).toBeLessThanOrEqual(Date.now() + ceilingMs);
 
     const updated = await resolvers.Mutation.updateApp({}, { ref: app.id, agentSessionsExpire: false }, adminCtx());
     expect(updated.agentSessionsExpire).toBe(false);
-    const open = await resolvers.Mutation.startAgentSession({}, { agentId: agent.id }, appCtx(app.id));
+    const open = await resolvers.Mutation.startAgentSession({}, { agentRef: agent.id }, appCtx(app.id));
     expect(open.expiresAt).toBeNull();
     // A caller that asks for an expiry still gets one, capped by the App ceiling.
     const asked = await resolvers.Mutation.startAgentSession(
-      {}, { agentId: agent.id, sessionTimeoutSeconds: 99_999 }, appCtx(app.id),
+      {}, { agentRef: agent.id, sessionTimeoutSeconds: 99_999 }, appCtx(app.id),
     );
     expect(new Date(asked.expiresAt).getTime()).toBeLessThanOrEqual(Date.now() + ceilingMs);
   });
 
   it('DY-3 end to end (#1661 review, local P1): a no-expiry session BINDS through a real App key, counts its drives, reads live and survives the reaper', async () => {
     await resolvers.Mutation.updateApp({}, { ref: app.id, agentSessionsExpire: false }, adminCtx());
-    const s = await resolvers.Mutation.startAgentSession({}, { agentId: agent.id }, appCtx(app.id));
+    const s = await resolvers.Mutation.startAgentSession({}, { agentRef: agent.id }, appCtx(app.id));
     expect(s.expiresAt).toBeNull();
 
     // Through the real auth path, header and all.
@@ -346,13 +354,13 @@ describe('startAgentSession', () => {
     await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
     const memoryCount = await db.memory.count();
     await expect(resolvers.Mutation.startAgentSession(
-      {}, { agentId: agent.id }, appCtx(app.id),
+      {}, { agentRef: agent.id }, appCtx(app.id),
     )).rejects.toMatchObject({ extensions: { code: 'APP_UNINSTALLED' } });
     expect(await db.session.count()).toBe(0);
     expect(await db.memory.count()).toBe(memoryCount);
     await db.app.update({ where: { id: app.id }, data: { uninstalledAt: null } });
     const session = await resolvers.Mutation.startAgentSession(
-      {}, { agentId: agent.id }, appCtx(app.id),
+      {}, { agentRef: agent.id }, appCtx(app.id),
     );
     expect(session.appId).toBe(app.id);
     expect(await db.memory.count()).toBe(memoryCount + 1);
@@ -372,7 +380,7 @@ describe('startAgentSession', () => {
     await updated;
     try {
       const attempted = expect(resolvers.Mutation.startAgentSession(
-        {}, { agentId: agent.id }, appCtx(app.id),
+        {}, { agentRef: agent.id }, appCtx(app.id),
       )).rejects.toMatchObject({ extensions: { code: 'APP_UNINSTALLED' } });
       await new Promise((resolve) => setTimeout(resolve, 100));
       releaseUninstall();
@@ -394,7 +402,7 @@ describe('startAgentSession', () => {
     );
     const session = await resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-42' },
+      { agentRef: agent.id, externalUserId: 'mm-42' },
       appCtx(app.id),
     );
     expect(session.appId).toBe(app.id);
@@ -419,12 +427,12 @@ describe('startAgentSession', () => {
     );
     const s1 = await resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-42' },
+      { agentRef: agent.id, externalUserId: 'mm-42' },
       appCtx(app.id),
     );
     const s2 = await resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-42' },
+      { agentRef: agent.id, externalUserId: 'mm-42' },
       appCtx(app.id),
     );
     expect(s2.memoryId).toBe(s1.memoryId);
@@ -434,7 +442,7 @@ describe('startAgentSession', () => {
   it('creates an anonymous memory with expiry when no externalUserId', async () => {
     const session = await resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id },
+      { agentRef: agent.id },
       appCtx(app.id),
     );
     const mem = await db.memory.findUnique({ where: { id: session.memoryId! } });
@@ -452,7 +460,7 @@ describe('startAgentSession', () => {
     await expect(
       resolvers.Mutation.startAgentSession(
         {},
-        { agentId: agent.id, externalUserId: 'unknown-user' },
+        { agentRef: agent.id, externalUserId: 'unknown-user' },
         appCtx(app.id),
       ),
     ).rejects.toThrow(/createAppUser/);
@@ -465,7 +473,7 @@ describe('startAgentSession', () => {
     });
     const session = await resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'new-user' },
+      { agentRef: agent.id, externalUserId: 'new-user' },
       appCtx(app.id),
     );
     expect(session.userId).toBeTruthy();
@@ -485,7 +493,7 @@ describe('startAgentSession', () => {
     await expect(
       resolvers.Mutation.startAgentSession(
         {},
-        { agentId: otherAgent.id, externalUserId: 'mm-42' },
+        { agentRef: otherAgent.id, externalUserId: 'mm-42' },
         appCtx(app.id),
       ),
     ).rejects.toThrow(/not allowed to operate/);
@@ -500,7 +508,7 @@ describe('startAgentSession', () => {
     const session = await resolvers.Mutation.startAgentSession(
       {},
       {
-        agentId: agent.id,
+        agentRef: agent.id,
         externalUserId: 'mm-42',
         sessionTimeoutSeconds: 999999, // well above the 900 ceiling
       },
@@ -524,7 +532,7 @@ describe('endAgentSession', () => {
     );
     const session = await resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-42' },
+      { agentRef: agent.id, externalUserId: 'mm-42' },
       appCtx(app.id),
     );
     await resolvers.Mutation.endAgentSession({}, { sessionId: session.id }, appCtx(app.id));
@@ -540,7 +548,7 @@ describe('endAgentSession', () => {
     );
     const session = await resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-42' },
+      { agentRef: agent.id, externalUserId: 'mm-42' },
       appCtx(app.id),
     );
     await resolvers.Mutation.endAgentSession({}, { sessionId: session.id }, appCtx(app.id));
@@ -560,7 +568,7 @@ describe('endAgentSession', () => {
     );
     const session = await resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-42' },
+      { agentRef: agent.id, externalUserId: 'mm-42' },
       appCtx(app.id),
     );
     await expect(
@@ -581,7 +589,7 @@ describe('linkMemoryToUser', () => {
   it('converts an anonymous memory to a user memory', async () => {
     const session = await resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id },
+      { agentRef: agent.id },
       appCtx(app.id),
     );
     const linked = await resolvers.Mutation.linkMemoryToUser(
@@ -629,7 +637,7 @@ describe('linkMemoryToUser', () => {
   it('accepts a URN as memoryId input', async () => {
     const session = await resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id },
+      { agentRef: agent.id },
       appCtx(app.id),
     );
     // Look up the memory's URN; pass that instead of the ID.
@@ -701,7 +709,7 @@ describe('memoryAccessFilter (App Key session scoping)', () => {
     );
     const session = await resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-42' },
+      { agentRef: agent.id, externalUserId: 'mm-42' },
       appCtx(app.id),
     );
 
@@ -815,7 +823,7 @@ describe('Organization memory listing', () => {
     );
     const session = await resolvers.Mutation.startAgentSession(
       {},
-      { agentId: agent.id, externalUserId: 'mm-42' },
+      { agentRef: agent.id, externalUserId: 'mm-42' },
       appCtx(app.id),
     );
     // #697 Stage 3: the per-user memory now has a FLAT single-atom urn (no

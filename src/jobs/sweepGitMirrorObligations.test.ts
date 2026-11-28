@@ -104,7 +104,10 @@ import { existsSync } from 'fs';
 
 const tick = async (now = new Date()) => (await import('./sweepGitMirrorObligations.js')).gitMirrorSweepTick(db, now);
 const old = () => new Date(Date.now()-24*60*60*1000);
-const makeNode = (loc='topic') => db.node.create({data:{id:generateId(),memoryId,loc,name:loc,content:'current content',tags:[]}});
+/** #3444: `count` fresh node ids in ascending order, whatever millisecond they were made in (UUIDv7 ids made in one millisecond sort by random bits). */
+const orderedNodeIds = (count: number, make: () => string = generateId) => Array.from({ length: count }, () => make()).sort();
+const makeNodeWithId = (id: string, loc: string) => db.node.create({ data: { id, memoryId, loc, name: loc, content: 'current content', tags: [] } });
+const makeNode = (loc='topic') => makeNodeWithId(generateId(),loc);
 const owe = async (nodeId:string,extra:Record<string,unknown>={}) => db.gitMirrorObligation.create({data:{memoryId,nodeId,kind:'WRITE',removeLoc:'',state:'FAILED',errorClass:'PUSH_FAILED',attempts:1,attemptSeq:await takeAttemptSeq(db),lastAttemptAt:old(),...extra} as any});
 const rows = () => db.gitMirrorObligation.findMany({where:{memoryId}});
 const remoteFile = (loc='topic') => git(env.bare,'show',`refs/heads/hadron-updates:${loc}.md`);
@@ -248,10 +251,17 @@ it('never logs or stores a token-bearing Git provider error',async()=>{
  await tick();expect((await rows())[0]).toMatchObject({state:'FAILED',errorClass:'TOKEN_UNAVAILABLE',attempts:2});
  expect(JSON.stringify(await rows(),(_,v)=>typeof v==='bigint'?v.toString():v)).not.toContain(TOKEN);expect(errors.join('\n')).not.toContain(TOKEN);
 });
-it('clears a missing or soft-deleted WRITE without Git or republishing a tombstone',async()=>{
+it('clears a missing or pre-#425 tombstoned WRITE without Git or republishing a tombstone',async()=>{
  const n=await makeNode();await owe(n.id);const path=nodeFilePath(local,n.loc,'mirror430-org:mem');writeFileSync(path,'pre-existing tombstone file');
  await db.node.update({where:{id:n.id},data:{deletedAt:new Date()}});await owe('hard-missing');
+ await db.gitMirrorObligation.deleteMany({where:{memoryId,kind:'REMOVE'}}); // a tombstone predating #425 owes no capture
  await tick();expect(await rows()).toEqual([]);expect(commands).toEqual([]);expect(readFileSync(path,'utf8')).toBe('pre-existing tombstone file');
+});
+it('#425: a soft delete owes a REMOVE, and an unidentifiable file is refused, never force-dropped',async()=>{
+ const n=await makeNode();const path=nodeFilePath(local,n.loc,'mirror430-org:mem');writeFileSync(path,'pre-existing tombstone file');
+ await db.node.update({where:{id:n.id},data:{deletedAt:new Date()}});await owe('hard-missing');
+ await tick();expect(await rows()).toEqual([expect.objectContaining({kind:'REMOVE',removeLoc:n.loc,state:'FAILED',errorClass:'TREE_WRITE',attempts:2})]);
+ expect(existsSync(path)).toBe(true);expect(readFileSync(path,'utf8')).toBe('pre-existing tombstone file');
 });
 it('a late cap-reaching settle cannot turn a newer row into EXHAUSTED',async()=>{
  const n=await makeNode();await owe(n.id,{attempts:9});const stale=await takeAttemptSeq(db);const newer=await takeAttemptSeq(db);
@@ -438,18 +448,29 @@ describe('#3056 shared row budget', () => {
 
 
 describe('#3151 second-refresh settlement', () => {
- it('a throwing second refresh settles its own TREE_WRITE attempt and lets the next due row proceed', async () => {
+ // #3444: the in-lock re-read (gitMirrorCheckout.ts, no orderBy) returns rows in physical order, so which row meets beforeGit's
+ // readiness read is not fixed. The pin therefore runs under both insertion orders and throws on `first` by identity on its
+ // first refresh AFTER preparation (any load other than the very first call), wherever `first` sits in the batch.
+ it.each([['first before next',false],['next before first',true]])('a throwing second refresh settles its own TREE_WRITE attempt and lets the next due row proceed (%s)', async (_label,nextInsertedFirst) => {
   const startedAt=Date.now(); // #3444: the one baseline clock read the diagnostic's elapsedMs needs
-  const first=await makeNode('refresh-fails'), next=await makeNode('next'), later=await makeNode('later');
-  const firstDebt=await owe(first.id,{lastAttemptAt:new Date(old().getTime()-1000)});
-  const nextDebt=await owe(next.id);
+  // #3444: the fixture's node ids are ordered on purpose (see orderedNodeIds). The in-lock re-read of the due rows has no
+  // ORDER BY and returns them in physical (heap) order, so which row is read first depends on the ids; two UUIDv7 ids made in
+  // the same millisecond sort by their random bits, and a `next` id below the `first` id made `next` the first row
+  // read, so the second-read throw hit the wrong row and `first` was settled and deleted.
+  const [firstId,nextId,laterId]=orderedNodeIds(3);
+  const first=await makeNodeWithId(firstId,'refresh-fails'), next=await makeNodeWithId(nextId,'next'), later=await makeNodeWithId(laterId,'later');
+  const firstAt={lastAttemptAt:new Date(old().getTime()-1000)};
+  let firstDebt: Awaited<ReturnType<typeof owe>>, nextDebt: Awaited<ReturnType<typeof owe>>;
+  if(nextInsertedFirst){ nextDebt=await owe(next.id); firstDebt=await owe(first.id,firstAt); }
+  else { firstDebt=await owe(first.id,firstAt); nextDebt=await owe(next.id); }
   const untouched=await owe(later.id,{lastAttemptAt:new Date(Date.now()+7*24*60*60_000)});
   const seqs=vi.spyOn(mirrorDebt,'tryTakeAttemptSeq');
   const load=nodeLoader.loadNodeForGit;
-  let firstReads=0, nextReads=0;
+  let firstReads=0, nextReads=0, loads=0, thrown=false, preparedAtThrow=false;
   let nextAtEntry: typeof nextDebt | undefined;
   vi.spyOn(nodeLoader,'loadNodeForGit').mockImplementation(async (...args) => {
-   if(args[1].nodeId===first.id && ++firstReads===2) throw new Error('synthetic second-refresh failure');
+   const priorLoads=loads++;
+   if(args[1].nodeId===first.id) { firstReads++; if(priorLoads>0 && !thrown) { thrown=true; preparedAtThrow=commands.length>0; throw new Error('synthetic second-refresh failure'); } }
    if(args[1].nodeId===next.id && ++nextReads===1) {
     // The first row's failure must not consume, clear or restamp the next row.
     nextAtEntry=await db.gitMirrorObligation.findFirstOrThrow({where:{memoryId,nodeId:next.id}});
@@ -461,18 +482,29 @@ describe('#3151 second-refresh settlement', () => {
    labels:{[first.id]:'first',[next.id]:'next',[later.id]:'later'}, startedAt,
    counters:()=>({firstReads,nextReads,nextAtEntry:nextAtEntry!==undefined,attemptSeqCalls:seqs.mock.calls.length}),
   });
-  expect(firstReads).toBe(2);
+  expect(thrown).toBe(true);
+  expect(preparedAtThrow).toBe(true); // the throw is the refresh AFTER Git preparation (a git command already ran), never beforeGit's readiness read
   expect(failed).toMatchObject({state:'FAILED',errorClass:'TREE_WRITE',attempts:2});
   expect(failed.lastAttemptAt.getTime()).toBeGreaterThan(firstDebt.lastAttemptAt.getTime());
   expect(seqs.mock.calls.length).toBe(1); // one checkout/fence for the admitted branch group
   expect(failed.attemptSeq).toBe(await seqs.mock.results[0].value);
   expect(nextAtEntry).toEqual(nextDebt);
-  expect(nextReads).toBe(1); // readiness short-circuits at first work; healthy payload loads after Git preparation
+  // One read (the post-preparation refresh) or two (it also met beforeGit's readiness check): which one depends on the in-lock
+  // re-read's unordered row order, which this pin must not depend on until that read is ordered (#3444 follow-up).
+  expect(nextReads).toBeGreaterThanOrEqual(1);
+  expect(nextReads).toBeLessThanOrEqual(2);
   expect(await db.gitMirrorObligation.findFirst({where:{memoryId,nodeId:next.id}})).toBeNull();
   expect(remoteFile('next')).toContain('current content');
   expect(commands.filter(a=>a[0]==='push')).toHaveLength(1);
   expect(await db.gitMirrorObligation.findFirstOrThrow({where:{memoryId,nodeId:later.id}})).toEqual(untouched);
   expect(()=>remoteFile('refresh-fails')).toThrow();
+ });
+});
+
+describe('#3444 orderedNodeIds', () => {
+ it('sorts whatever order the generator yields (a descending generator comes out ascending)', () => {
+  const descending = ['c3', 'b2', 'a1'];
+  expect(orderedNodeIds(3, () => descending.shift()!)).toEqual(['a1', 'b2', 'c3']);
  });
 });
 

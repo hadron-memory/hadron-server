@@ -20,9 +20,11 @@ import { chatToolChoiceFor } from '../../../lib/llm/chatToolChoice.js';
 import { resolveChatHomeAgent } from '../../../lib/chatHomeAgent.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
+import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { AppNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
 import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
 import { chatNotFoundError } from '../../../lib/chatNotFound.js';
@@ -39,7 +41,9 @@ function isDirectPerson(ctx: Context): boolean {
 }
 
 async function loadApp(ctx: Context, appRef: string): Promise<AppRow> {
-  const { id } = await resolveAppRef(ctx.db, appRef);
+  let id: string;
+  try { ({ id } = await resolveAppRef(ctx.db, appRef)); }
+  catch (e) { if (isAppRefResolutionFailure(e)) throw new AppNotFoundError(appRef); throw e; }
   const app = await ctx.db.app.findUnique({ where: { id }, select: { id: true, organizationId: true, ownerUserId: true } });
   if (!app) throw new AppNotFoundError(appRef);
   return app;
@@ -87,8 +91,8 @@ async function readableChatForToolChoice(ctx: Context, chatId: string) {
     }),
     chatId,
   );
-  if (!chatNode) throw chatNotFoundError(chatId);
-  if (!(await isMemoryReadableCached(ctx, chatNode.memoryId))) throw chatNotFoundError(chatId);
+  if (!chatNode) throw chatNotFoundError();
+  if (!(await isMemoryReadableCached(ctx, chatNode.memoryId))) throw chatNotFoundError();
   return chatNode;
 }
 
@@ -99,14 +103,14 @@ export const chatbotAiConfigQueries = {
       where: { id: chatNode.memoryId },
       select: { id: true, appId: true, sharedMemoryOfAgentId: true, userMemoryOfAgentId: true },
     });
-    if (!memory) throw chatNotFoundError(chatId);
+    if (!memory) throw chatNotFoundError();
     const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
     const readable = memEncInfo.isEncrypted ? translateSessionExpired(memEncInfo.id, () => decryptNodeFields(chatNode, memEncInfo)) : chatNode;
     const storedChoice = ((readable.data as Record<string, unknown> | null) ?? {}).aiConfigChoice;
     try {
       // The Agent comes from the turn's own lookup (#4076), so a retained pointer, an uninstalled Agent, a soft-deleted
       // one and the legacy-link order all resolve exactly as the turn resolves them.
-      const { agent } = await resolveChatHomeAgent(ctx.db, memory, ctx);
+      const { agent } = await resolveChatHomeAgent(ctx.db, memory, ctx, chatNode.id);
       return await effectiveChatToolChoice(ctx.db, { appId: memory.appId, agentId: (agent as { id: string } | null)?.id ?? null, storedChoice });
     } catch (e) {
       return rethrowAiConfigTyped(e);
@@ -124,7 +128,9 @@ export const chatbotAiConfigQueries = {
       if (!isDirectPerson(ctx)) throw new AppNotFoundError(appRef);
       const app = await loadApp(ctx, appRef);
       // One answer for a missing App and an App the caller is not in.
-      if (!(await isMember(ctx, app)) && !isPlatformAdmin(ctx)) throw new AppNotFoundError(appRef);
+      // #5076: or the owner of a person's App (no member row needed); `isDirectPerson` above already refused an App key,
+      // an impersonated session, a run and a worker-bound request.
+      if (!(await isMember(ctx, app)) && !isStrictOwner(ctx, app.ownerUserId) && !isPlatformAdmin(ctx)) throw new AppNotFoundError(appRef);
       return await listChatAiConfigChoices(ctx.db, app.id);
     } catch (e) {
       return rethrowAiConfigTyped(e);
@@ -191,9 +197,9 @@ export async function storedChatAiConfigChoice(ctx: Context, chatId: string, app
     }),
     chatId,
   );
-  if (!chatNode || !appId) throw chatNotFoundError(chatId);
+  if (!chatNode || !appId) throw chatNotFoundError();
   const memory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId }, select: { appId: true } });
-  if (!memory || memory.appId !== appId) throw chatNotFoundError(chatId);
+  if (!memory || memory.appId !== appId) throw chatNotFoundError();
   const memEncInfo = await getMemoryEncryptionInfo(ctx.db, chatNode.memoryId);
   if (memEncInfo.isEncrypted) translateSessionExpired(memEncInfo.id, () => decryptNodeFields(chatNode, memEncInfo));
   return ((chatNode.data as Record<string, unknown> | null) ?? {}).aiConfigChoice;

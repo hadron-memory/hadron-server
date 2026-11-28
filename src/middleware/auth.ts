@@ -1,11 +1,10 @@
 import { refuseSupersededSession } from '../lib/sessionSuperseded.js';
 import { AuthStoreBusyError, authStoreBusyReason } from '../lib/authStoreBusy.js';
 import { transportRateIdentity, type RateIdentity } from '../lib/rateLimit/identity.js';
-import { ownsSession } from '../lib/sessionOwnership.js';
+import { loadSessionBinding, type SessionBinding } from '../lib/sessionBinding.js';
 import { createHash, randomBytes } from 'crypto';
-import { DEFAULT_SESSION_DORMANCY_DAYS, isSessionDormant, loadLastEventBySession } from '../lib/sessionActivity.js';
 import type { Request } from 'express';
-import type { Prisma, PrismaClient, UserApiKey } from '../generated/prisma/index.js';
+import { Role, type Prisma, type PrismaClient, type UserApiKey } from '../generated/prisma/index.js';
 import { lockAuthorityAnchors } from '../lib/auth/authorityAnchors.js';
 import { type verifyJwt } from '../auth/jwt.js';
 import { verifyAuthenticatedJwt, lockLiveSignInRoot, SignInNotLive } from '../auth/signIn.js';
@@ -49,7 +48,8 @@ export interface AuthContext {
   // Current User-row roles for ordinary user principals. HTTP auth resolves
   // them per request; an existing MCP transport refreshes them before every
   // request because its AuthContext otherwise outlives the credential check.
-  roles?: ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[];
+  // #5012: the generated `Role` enum, so it includes BILLING; a role is never a threshold by itself.
+  roles?: Role[];
   organizationId?: string; // set when the Client is scoped to an organization
   /** #1897: the live factor-protected sign-in this credential descends from (JWT `sid` or key root). */
   signInId?: string;
@@ -357,42 +357,12 @@ export async function validateSessionBinding(
   db: PrismaClient,
   principal: AuthContext,
   sessionId: string,
-): Promise<{ sessionId: string; actor: { workerId: string | null; agentId: string | null } } | null> {
-  const isPureAppKey = !!principal.appId && !principal.userId;
-  const isUserPrincipal = !!principal.userId && !principal.impersonation;
-  if (!isPureAppKey && !isUserPrincipal) return null;
-  const session = await db.session.findUnique({
-    where: { id: sessionId },
-    select: {
-      id: true, appId: true, userId: true, expiresAt: true, endedAt: true, workerId: true, agentId: true,
-      startedAt: true, updatedAt: true, autoExpiredAt: true, launchOperationId: true,
-      app: { select: { sessionDormancyDays: true } },
-    },
-  });
-  if (session?.endedAt) {
-    await refuseSupersededSession({ ...principal, db }, sessionId);
-  }
-  if (!session || session.endedAt) return null;
-  const now = new Date();
-  if (session.expiresAt && session.expiresAt <= now) return null;
-  if (!ownsSession(principal, session)) return null;
-  // Ruling DY-5, completed for sessions with NO hard expiry (#1661 review,
-  // Rook P2-1): a session nobody has driven for longer than its App's
-  // dormancy threshold no longer binds. Without this, an App with
-  // `agentSessionsExpire: false` left a chatbot session, and its session-
-  // scoped reach into an end user's personal memory, bindable by any key of
-  // that App forever: Holger's "5 year old session, forgotten by everyone,
-  // starts acting unexpectedly". A session WITH a hard expiry is already
-  // bounded by it. Only an explicit new session brings a dormant one back.
-  // Here, in the ONE check, so it guards BOTH doors: the X-Hadron-Session
-  // header and the MCP connection binding (#1665): a dormant session neither
-  // binds nor attributes writes.
-  if (!session.expiresAt) {
-    const lastEvent = (await loadLastEventBySession(db as never, [session.id])).get(session.id);
-    const days = session.app?.sessionDormancyDays ?? DEFAULT_SESSION_DORMANCY_DAYS;
-    if (isSessionDormant(session, lastEvent, days, now)) return null;
-  }
-  return { sessionId: session.id, actor: { workerId: session.workerId, agentId: session.agentId } };
+): Promise<SessionBinding | null> {
+  // #3401: the check itself lives in a leaf module the shared App-key session predicate can import; this wrapper
+  // adds only the #3818 V24 typed refusal of a superseded execution binding, judged (as before) only for an ended row.
+  const { binding, ended } = await loadSessionBinding(db, principal, sessionId);
+  if (ended) await refuseSupersededSession({ ...principal, db }, sessionId);
+  return binding;
 }
 
 async function resolveAppKey(
@@ -429,22 +399,19 @@ async function resolveAppKey(
   };
 }
 
-// Valid runtime values for AuthContext.roles. Mirrors the Prisma `Role`
-// enum exactly (prisma/schema.prisma `enum Role { OWNER ADMIN
-// CONTRIBUTOR READER }`). Used to filter User.roles at the middleware
-// boundary so any drift between DB content and the type annotation
-// can't smuggle unknown role strings into request context.
-const ALLOWED_ROLES = new Set<NonNullable<AuthContext['roles']>[number]>([
-  'OWNER',
-  'ADMIN',
-  'CONTRIBUTOR',
-  'READER',
-]);
+/**
+ * Valid runtime values for AuthContext.roles: exactly the generated Prisma `Role` enum (#5012). Used to filter
+ * User.roles at the middleware boundary so a string that is not an enum value (direct SQL, legacy data) can't reach
+ * request context. Derived from the enum, not hand-listed: the hand-listed set silently dropped BILLING, and a value
+ * added to the enum later must not be dropped again. A role that is NOT a threshold (BILLING) stays harmless here
+ * because `ROLE_ORDER` ranks it -1 and `isPlatformAdmin` names ADMIN/OWNER only.
+ */
+export const ALLOWED_ROLES: ReadonlySet<Role> = new Set(Object.values(Role));
 
 function validatedUserRoles(roles: readonly string[]): NonNullable<AuthContext['roles']> {
   return roles.filter(
     (role): role is NonNullable<AuthContext['roles']>[number] =>
-      ALLOWED_ROLES.has(role as NonNullable<AuthContext['roles']>[number]),
+      ALLOWED_ROLES.has(role as Role),
   );
 }
 
@@ -521,7 +488,7 @@ async function resolveUserApiKey(
 
   // User.roles is typed Role[] by Prisma. Filter to the runtime
   // allow-list as defense in depth against any DB drift (direct SQL,
-  // legacy data, future enum-value additions). `appId` is intentionally
+  // legacy data, any string outside the enum). `appId` is intentionally
   // absent — App resolution for user credentials happens at the MCP
   // boundary per FR-020, not in auth middleware.
   const validatedRoles = validatedUserRoles(user.roles);

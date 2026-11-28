@@ -106,6 +106,71 @@ describe('createMcpServer', () => {
     await expect(createServer({ headers: { 'X-Ok': 'bad\r\nvalue' } })).rejects.toThrow(/Invalid header/);
   });
 
+  /** #5158: the refusal names the rule and never repeats what the caller typed (the #2898 no-echo policy); a credential typed without its
+   *  `Name: ` part reaches the server as the header NAME, so the name is input too. */
+  describe('#5158 the malformed-header refusal does not echo typed input', () => {
+    const SECRET_NAME = 'Basic dXNlcjpwYXNzd29yZA==';
+    let updates = 0;
+    const refusal = async (headers: Record<string, string>, run: 'create' | 'update' = 'create') => {
+      const err: any = await (run === 'create'
+        ? createServer({ headers })
+        : createServer({ slug: `upd-${++updates}` }).then((server: any) => resolvers.Mutation.updateMcpServer({}, { ref: server.id, headers } as never, ctxFor(admin.id)))
+      ).then(() => null, (e: unknown) => e);
+      expect(err?.extensions?.code).toBe('BAD_USER_INPUT');
+      return String(err.message);
+    };
+
+    it('a credential typed as the header name is not repeated (create and update)', async () => {
+      for (const run of ['create', 'update'] as const) {
+        const message = await refusal({ [SECRET_NAME]: 'oops' }, run);
+        expect(message).not.toContain(SECRET_NAME);
+        expect(message).not.toContain('dXNlcjpwYXNzd29yZA');
+        expect(message).toMatch(/^Invalid header/);
+      }
+    });
+
+    it('a name too long, and a valid name with a line-break value, repeat neither the name nor the value', async () => {
+      const longName = 'X-' + 'a'.repeat(200);
+      expect(await refusal({ [longName]: 'v' })).not.toContain(longName);
+      const message = await refusal({ 'X-Ok-Name': 'line one\nline two' });
+      expect(message).not.toContain('X-Ok-Name');
+      expect(message).not.toContain('line one');
+    });
+
+    it('every other malformed shape is refused the same way, on create and on update, without repeating its text', async () => {
+      const cases: Array<[string, Record<string, unknown>, string[]]> = [
+        ['a value over the maximum length', { 'X-Long-Value': 'v'.repeat(4097) }, ['X-Long-Value', 'vvvvvvvv']],
+        ['a non-string value', { 'X-Num': 5 as unknown as string }, ['X-Num']],
+        ['an empty name', { '': 'secret-value-123' }, ['secret-value-123']],
+      ];
+      for (const [label, headers, typed] of cases) {
+        for (const run of ['create', 'update'] as const) {
+          const message = await refusal(headers as Record<string, string>, run);
+          expect(message, `${label} (${run})`).toMatch(/^Invalid header \(entry 1\)/);
+          for (const text of typed) expect(message, `${label} (${run})`).not.toContain(text);
+        }
+      }
+    });
+
+    it('names the rule and the entry position, and a later bad entry is told apart from an earlier good one', async () => {
+      const message = await refusal({ Authorization: 'Bearer fine', [SECRET_NAME]: 'oops' });
+      expect(message).toContain('entry 2');
+      expect(message).toMatch(/HTTP token/);
+      expect(message).toMatch(/line break/);
+    });
+
+    it('a valid header still registers (control)', async () => {
+      const server = await createServer({ headers: { Authorization: 'Bearer fine' } });
+      expect(JSON.parse(decryptToken(server.headersEncrypted!))).toEqual({ Authorization: 'Bearer fine' });
+    });
+
+    it('a plain member and an outsider are Forbidden before any header is read', async () => {
+      for (const who of [member, outsider]) {
+        await expect(createServer({ headers: { [SECRET_NAME]: 'oops' } }, ctxFor(who.id))).rejects.toThrow('Forbidden');
+      }
+    });
+  });
+
   it('rejects a duplicate slug in the same org, allows it in another org', async () => {
     await createServer();
     await expect(createServer()).rejects.toThrow(/already exists/);
@@ -188,7 +253,7 @@ describe('mcpServer / mcpServers reads', () => {
     expect(page.total).toBe(1);
     expect(page.items[0].id).toBe(server.id);
 
-    const outsiderPage = await resolvers.Query.mcpServers({}, { orgId: org.id }, ctxFor(outsider.id));
+    const outsiderPage = await resolvers.Query.mcpServers({}, { orgRef: org.id }, ctxFor(outsider.id));
     expect(outsiderPage).toEqual({ items: [], total: 0 });
 
     expect(resolvers.McpServer.hasHeaders(server)).toBe(true);

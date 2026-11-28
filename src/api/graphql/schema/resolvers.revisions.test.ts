@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, beforeEach, vi, beforeAll, afterAll } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { cleanDb, createMintMarker } from '../../../test/helpers.js';
 import { resolvers, type Context } from './resolvers.js';
 import { generateId } from '../../../lib/id.js';
 import { archivedTombstoneLoc } from '../../../lib/tombstoneArchive.js';
@@ -66,10 +66,8 @@ beforeEach(async () => {
 
   // Seed a conversation + stage + prompt
   for (const n of [
-    { loc: 'conversations', name: 'conversations', nodeType: 'system' },
     { loc: 'conversations:hello', name: 'hello', nodeType: 'system', data: { stageOrder: ['greet'], isSetup: false } },
     { loc: 'conversations:hello:greet', name: 'greet', nodeType: 'system', data: { promptRef: 'prompts:hello:greet' } },
-    { loc: 'prompts', name: 'prompts', nodeType: 'system' },
     { loc: 'prompts:hello', name: 'hello', nodeType: 'system' },
     { loc: 'prompts:hello:greet', name: 'greet', nodeType: 'system', content: 'Hello world!' },
   ] as any[]) {
@@ -503,7 +501,11 @@ describe('Editor lock', () => {
 describe('#1468 — minted specs in an agent system memory', () => {
   const permanent = (e: unknown) =>
     (e as { extensions?: { code?: string } }).extensions?.code === 'SPEC_MINTED_PERMANENT';
-  const stamp = () => db.memory.update({ where: { id: systemMemory.id }, data: { corpusDraft: false, corpusMintedAt: new Date() } });
+  /** The mint record the re-keyed guard reads (#5063): a tombstoned, non-spec marker node. */
+  const stamp = () => {
+    const mintedAt = new Date();
+    return createMintMarker(db, systemMemory.id, { mintedAt });
+  };
 
   it('restoreRevision refuses a snapshot that would drop a live minted spec', async () => {
     await resolvers.Mutation.createRevision({}, { agentRef: agent.id, description: 'before the spec' }, adminCtx());

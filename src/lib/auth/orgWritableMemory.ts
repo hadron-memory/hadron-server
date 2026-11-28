@@ -17,17 +17,20 @@
 
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
+import { memoryIdFilter, type OnlyMemoryIds } from './memoryIdScope.js';
+import { SUBSCRIPTION_WRITE_CLASSES } from './memorySubscriptionAccess.js';
+import { groupMemberMemoryWhere } from './groupMemberMemory.js';
 
 export async function getOrgWritableMemoryIds(
   db: PrismaClient,
   userId: string,
-  onlyMemoryId?: string,
+  onlyMemoryId?: OnlyMemoryIds,
 ): Promise<string[]> {
   // Prisma drops an `undefined` filter, which would read as "every membership".
   if (!userId) return [];
 
   const free = {
-    ...(onlyMemoryId ? { id: onlyMemoryId } : {}),
+    ...(onlyMemoryId ? { id: memoryIdFilter(onlyMemoryId) } : {}),
     deletedAt: null, appId: null, ownerUserId: null, userMemoryOfAgentId: null,
   };
 
@@ -42,11 +45,13 @@ export async function getOrgWritableMemoryIds(
       where: { ...free, class: 'knowledge' as never, organizationId: { in: orgIds } },
       select: { id: true },
     }),
-    // Group write is MemoryMember writer/owner only; an org role adds nothing.
+    // Group write is MemoryMember writer/owner only; an org role adds nothing. #5027 (Holger R1): the shared group
+    // predicate, so a group made in an App is written by its MemoryMember writers too (no `appId: null` here).
     db.memory.findMany({
       where: {
-        ...free, class: 'group' as never, organizationId: { not: null },
-        memberships: { some: { userId, role: { in: ['writer', 'owner'] } } },
+        ...(onlyMemoryId ? { id: memoryIdFilter(onlyMemoryId) } : {}),
+        deletedAt: null, organizationId: { not: null },
+        ...groupMemberMemoryWhere(userId, { roles: ['writer', 'owner'] }),
       },
       select: { id: true },
     }),
@@ -56,7 +61,7 @@ export async function getOrgWritableMemoryIds(
 
 /** #3280: independent subscription WRITE on live item-eligible rows, matching the GraphQL user gate's role rule. */
 export async function getSubscribedWritableMemoryIds(
-  db: PrismaClient, userId: string, onlyMemoryId?: string,
+  db: PrismaClient, userId: string, onlyMemoryId?: OnlyMemoryIds,
 ): Promise<string[]> {
   if (!userId) return [];
   const memberships = await db.orgMember.findMany({
@@ -65,8 +70,10 @@ export async function getSubscribedWritableMemoryIds(
   });
   const rows = await db.memory.findMany({
     where: {
-      ...(onlyMemoryId ? { id: onlyMemoryId } : {}),
-      deletedAt: null, class: 'knowledge', appId: null, ownerUserId: null, userMemoryOfAgentId: null,
+      ...(onlyMemoryId ? { id: memoryIdFilter(onlyMemoryId) } : {}),
+      // The write-class list is the SAME export the gate's own arm and the
+      // #329 audit use — one list, three readers, no drift.
+      deletedAt: null, class: { in: [...SUBSCRIPTION_WRITE_CLASSES] }, appId: null, ownerUserId: null, userMemoryOfAgentId: null,
       subscriptions: { some: {
         organizationId: { in: memberships.map(m => m.organizationId) }, deletedAt: null,
         role: { in: ['CONTRIBUTOR', 'ADMIN', 'OWNER'] },

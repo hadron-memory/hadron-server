@@ -252,7 +252,7 @@ describe('#2045 target checks, after the gate', () => {
   it('a recompile (a new unapproved revision of the same node) keeps the pointer set and live', async () => {
     const f = await fixture();
     await write(ctxOf(f.admin.id), f.targets.WORKER, f.nodes.install1.id);
-    await withCompileWrite(() => resolvers.Mutation.updateNode(null, { input: { id: f.nodes.install1.id, content: 'recompiled' } }, ctxOf(f.admin.id)));
+    await withCompileWrite(() => resolvers.Mutation.updateNode(null, { input: { ref: f.nodes.install1.id, content: 'recompiled' } }, ctxOf(f.admin.id)));
     const after = await stored(f, 'WORKER');
     expect(after.bootPromptNodeId).toBe(f.nodes.install1.id);
     expect(await resolveBootPromptPointer(db, after)).toMatchObject({ deleted: false });

@@ -15,6 +15,7 @@ import { chatLocFilter, pickChatNode } from '../../../lib/chatLoc.js';
 import { recordNodeUsage, toUsageNodeRefs } from '../../../lib/usageRecorder.js';
 import { excludeTeamChat, excludeChannelRoots } from '../../../lib/teamChatLoc.js';
 import { teamSpaceAudienceFilter } from '../../../lib/auth/teamSpace.js';
+import { groupMemberMemoryWhere } from '../../../lib/auth/groupMemberMemory.js';
 import {
   type Context,
   deriveChatTitle,
@@ -24,14 +25,15 @@ import {
 } from './resolvers.helpers.js';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { chatServedPromptsById } from './resolvers.servedPrompt.js';
+import { safeEntityUrnV2 } from '../../../lib/urnEmit.js';
 import { forbiddenError, unauthenticatedError } from '../../../lib/refusals.js';
 
 /**
  * #3223 (#2212 A3): the ONE gate and readable-chat scope behind `myChats` and `myChatsPage`. It is the #876 chat
  * surface, which authorizes on raw caller identity and bypasses `memoryAccessFilter`, so a copy of it would drift
  * exactly where that incident was. Throws for an unauthenticated caller and for impersonation (before any read);
- * answers `null` (the caller lists nothing) for an unknown Agent (#1946, no existence oracle) and for a caller with
- * no readable memory; otherwise the `where` of the chat-root rows the caller may list.
+ * answers `null` (the caller lists nothing) for an unknown Agent (#1946, no existence oracle); otherwise the `where`
+ * of the chat-root rows the caller may list.
  */
 async function myChatsScope(ctx: Context, agentRef: string): Promise<Prisma.NodeWhereInput | null> {
   if (!ctx.userId) throw unauthenticatedError();
@@ -114,7 +116,21 @@ async function myChatsScope(ctx: Context, agentRef: string): Promise<Prisma.Node
     for (const m of sharedMemories) readableMemoryIds.push(m.id);
   }
 
-  if (readableMemoryIds.length === 0) return null;
+  // #5027 Ask 6 (d), cor:acl:030:01 (Holger R1/R4): a chat started in a named home (a group, a private memory, a
+  // personal memory that is not this Agent's per-user holding) carries no per-Agent pointer on its memory, so it is
+  // found by the Agent its root recorded (`chat_root_counters.agent_id`) inside a home the caller reads, with the same
+  // identity arms as `chatLocFilter` (group: the shared MemoryMember predicate; personal/private: the owner). A chat
+  // with no recorded Agent lists exactly as before. Impersonation was refused above, so no support-session bound.
+  const recordedHomeArm: Prisma.NodeWhereInput = {
+    chatRootCounter: { is: { agentId: resolvedAgentId } },
+    memory: {
+      deletedAt: null,
+      OR: [
+        groupMemberMemoryWhere(ctx.userId),
+        { class: { in: ['personal', 'private'] as never }, userId: ctx.userId },
+      ],
+    },
+  };
 
   // Top-level chat nodes live at loc "chats:<id>" (depth 2). Message
   // shapes — `chats:<id>:messages` (container) and
@@ -139,7 +155,7 @@ async function myChatsScope(ctx: Context, agentRef: string): Promise<Prisma.Node
   // ordering, sortable at the DB layer with `take`/`skip` — no
   // application-side resort, no JS slice.
   return {
-    memoryId: { in: readableMemoryIds },
+    OR: [...(readableMemoryIds.length > 0 ? [{ memoryId: { in: readableMemoryIds } }] : []), recordedHomeArm],
     loc: { startsWith: 'chats:' },
     NOT: { loc: { contains: ':messages' } },
     deletedAt: null,
@@ -151,11 +167,25 @@ async function myChatsScope(ctx: Context, agentRef: string): Promise<Prisma.Node
 }
 
 /** #3223: the `Chat` rows for one page of chat-root nodes, shared by `myChats` and `myChatsPage`. */
-type ChatRootRow = { id: string; loc: string; memoryId: string; data: unknown; createdAt: Date; createdBy: string | null };
+
+/**
+ * #3229: exactly the `ChatRootRow` columns — the narrow `select` both chat-root fetches share, so neither ships full
+ * `Node` rows (content, abstract, properties) that `toChatRows` never reads. If `toChatRows` ever needs a seventh
+ * column it lands here only: `ChatRootRow` follows `CHAT_ROOT_SELECT`, and the #3229 select pin fails a dropped column.
+ */
+const CHAT_ROOT_SELECT = { id: true, loc: true, memoryId: true, data: true, createdAt: true, createdBy: true } as const satisfies Prisma.NodeSelect;
+
+type ChatRootRow = Prisma.NodeGetPayload<{ select: typeof CHAT_ROOT_SELECT }>;
 
 async function toChatRows(ctx: Context, tops: ChatRootRow[]) {
   const counters = await readChatCounters(ctx.db,tops,ctx.sessionId);
   const engine = await readChatEngineStates(ctx.db, tops);
+  // #5027 (cor:acl:030:01, R2): every surface shows the home memory's own class and URN. One read for the page; the
+  // rows were already selected through the caller's chat scope, so this discloses nothing the row did not.
+  const homes = new Map((await ctx.db.memory.findMany({
+    where: { id: { in: [...new Set(tops.map((t) => t.memoryId))] } },
+    select: { id: true, class: true, urn: true },
+  })).map((m) => [m.id, m]));
   // First-message lookup, scoped to the visible page only (was: every
   // candidate chat). Parallelized via Promise.all.
   const firstMessageEntries = await Promise.all(
@@ -202,6 +232,9 @@ async function toChatRows(ctx: Context, tops: ChatRootRow[]) {
       createdAt: node.createdAt,
       lastMessageAt: counters.get(node.id)?.lastMessageAt ?? null,
       scope,
+      homeMemoryClass: homes.get(node.memoryId)!.class,
+      // Charles QA F1 on #5391: the same canonical v2 form Memory.urn emits (`hrn:mem:<root>:<slug>`), never the bare stored urn.
+      homeMemoryUrn: safeEntityUrnV2('memory', homes.get(node.memoryId)!.urn),
       createdBy: node.createdBy ?? null,
       // #3957: the AI config choice stored with the chat, or null.
       aiConfigChoice: typeof data.aiConfigChoice === 'string' ? data.aiConfigChoice : null,
@@ -227,6 +260,7 @@ export const chatQueries = {
         orderBy: { updatedAt: 'desc' as const },
         take: limit ?? 20,
         skip: offset ?? 0,
+        select: CHAT_ROOT_SELECT,
       });
       if (tops.length === 0) return [];
       return toChatRows(ctx, tops);
@@ -248,7 +282,7 @@ export const chatQueries = {
       if (!where) return { items: [], total: 0, hasMore: false };
       const [total, tops] = await ctx.db.$transaction([
         ctx.db.node.count({ where }),
-        ctx.db.node.findMany({ where, orderBy: [{ updatedAt: 'desc' as const }, { id: 'desc' as const }], take, skip }),
+        ctx.db.node.findMany({ where, orderBy: [{ updatedAt: 'desc' as const }, { id: 'desc' as const }], take, skip, select: CHAT_ROOT_SELECT }),
       ]);
       return pageEnvelope(tops.length === 0 ? [] : await toChatRows(ctx, tops), total, skip);
     },
@@ -278,7 +312,7 @@ export const chatQueries = {
         }),
         chatId,
       );
-      if (!chatNode) throw chatNotFoundError(chatId);
+      if (!chatNode) throw chatNotFoundError();
       // #1196 — the SHARED node-content gate, replacing a hand-rolled
       // per-class one. `cor:acl:030:01`: a chat has no access layer of its own;
       // read falls through the host memory's per-class rules. This resolver

@@ -49,6 +49,7 @@ import { managesApp } from '../../../lib/auth/appManagement.js';
 import { appKeyCaller, refuseSessionBound } from '../../../lib/appKeyScopes/scopes.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { generateId } from '../../../lib/id.js';
 import { keyEverHeldHostOperate, keyHostId, recordHostKeyUse, recordHostKeyUseApart, type HostKey, type HostKeyAction } from '../../../lib/hostOperations/hostKey.js';
@@ -100,8 +101,10 @@ import {
   type ResetHost,
 } from '../../../lib/contextReset/contextReset.js';
 
-const appNotFound = (appRef: string): GraphQLError => taskError('APP_NOT_FOUND', 'App not found.', { appRef });
-const opNotFound = (id: string): GraphQLError => taskError('HOST_OPERATION_NOT_FOUND', 'Host operation not found.', { id });
+// #5168: the refusal never relays the caller's ref (it is their own text, possibly a pasted secret).
+const appNotFound = (_appRef: string): GraphQLError => taskError('APP_NOT_FOUND', 'App not found.');
+// #5168: the miss does not relay the caller's id.
+const opNotFound = (_id: string): GraphQLError => taskError('HOST_OPERATION_NOT_FOUND', 'Host operation not found.');
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
 
 /** At most this many operations per collection or page. */
@@ -133,7 +136,10 @@ export async function hostKeyEntry(ctx: Context, appRef: string): Promise<{ app:
   try {
     const { id } = await resolveAppRef(ctx.db, appRef);
     app = id === key.appId ? await loadApp(ctx, id) : null;
-  } catch {
+  } catch (e) {
+    // #4893/#2975: only a name-resolution outcome takes the not-found path below; a
+    // database fault propagates (it is not "app not found").
+    if (!isAppRefResolutionFailure(e)) throw e;
     app = null;
   }
   if (!app || app.deletedAt || app.uninstalledAt) throw appNotFound(appRef);
@@ -562,7 +568,7 @@ export const hostOperationMutations = {
    * The server builds what it stores (`buildWorkerTerminal`): `host` is the key's host and its registration's label,
    * `reportedAt` is the server's clock. #4225 S4a: a report may carry the worker's context size (`contextTokens` with
    * `contextMeasuredAt`, or neither); a malformed size refuses the batch like any other malformed field, and a worker
-   * this host does not run is refused for its row as before, so its size is never stored. The report decides nothing. The alarm verdict is computed from the stored
+   * this host does not run is refused for its row as before, so its size is never stored. The report decides one thing (#4933): no desired-running start for a worker whose agent this host already runs; nothing else. The alarm verdict is computed from the stored
    * rows after the write and returned, never stored, and names only coordinators THIS host registers.
    */
   setHostWorkerTerminals: async (
@@ -717,7 +723,7 @@ export const hostOperationMutations = {
       }
       const [reg] = await tx.$queryRaw<{ id: string }[]>`
         SELECT id FROM host_registrations WHERE app_id = ${freshApp.id} AND host_id = ${hostId} FOR SHARE`;
-      if (!reg) throw taskError('HOST_NOT_FOUND', 'No host with that id is registered in this App.', { hostId });
+      if (!reg) throw taskError('HOST_NOT_FOUND', 'No host with that id is registered in this App.'); // #5225: hostId not relayed
       if (validated.type === 'worker.end') {
         const listed = await tx.hostRegistrationWorker.findFirst({ where: { registrationId: reg.id, workerId }, select: { workerId: true } });
         if (!listed) throw taskError('BAD_HOST_OPERATION_ARGS', 'That host does not register this worker.');
@@ -845,7 +851,7 @@ async function issueWorkerStart(
       // Diego P2-2: the registration, its worktree and the lapse count hold still through the insert.
       await fenceHostDecision(tx, freshApp.id);
       const [reg] = await liveRegistrationsFor(tx, freshApp.id, workerId, now, hostId);
-      if (!reg) throw taskError('HOST_NOT_FOUND', 'No live host with that id registers this worker.', { hostId });
+      if (!reg) throw taskError('HOST_NOT_FOUND', 'No live host with that id registers this worker.'); // #5225: hostId not relayed
       if (!reg.worktrees.includes(args.worktree!)) {
         throw taskError('BAD_HOST_OPERATION_ARGS', 'A worker starts only in a worktree that host registers for it (cor:agt:070:06).');
       }
@@ -1079,10 +1085,41 @@ export const hostOperationFieldResolvers = {
  * An `AppKey` reaches callers through fields that do not re-check (App.keys), so this field does.
  */
 export async function appKeyHostUses(key: { id: string; appId: string }, a: { first?: number | null }, ctx: Context) {
+  const scope = await hostUsesScope(key, ctx);
+  const first = Math.min(Math.max(a.first ?? 20, 1), PAGE_MAX);
+  return ctx.db.hostKeyUse.findMany({ ...scope, take: first });
+}
+
+/**
+ * #5061 (#2212 A4b) — the one gate and order both host-use reads share (cor:agt:070:07 S3): whoever manages the key's
+ * App, as a person (an App key, an impersonation session and an unauthenticated caller are refused by `managesApp`).
+ * Refuses with the same `FORBIDDEN` and text before any host-use row is counted or read, so the paged sibling's `total`
+ * reaches exactly the callers the old list already reaches. Order is `usedAt desc, id desc` (total, so pages never
+ * overlap or skip).
+ */
+async function hostUsesScope(key: { id: string; appId: string }, ctx: Context) {
   const app = await ctx.db.app.findUnique({ where: { id: key.appId }, select: { id: true, organizationId: true, ownerUserId: true } });
   if (!app || !(await managesApp(ctx, app))) {
     throw taskError('FORBIDDEN', "Only whoever manages this App can read what its keys did.");
   }
-  const first = Math.min(Math.max(a.first ?? 20, 1), PAGE_MAX);
-  return ctx.db.hostKeyUse.findMany({ where: { appKeyId: key.id }, orderBy: [{ usedAt: 'desc' }, { id: 'desc' }], take: first });
+  return {
+    where: { appKeyId: key.id },
+    orderBy: [{ usedAt: 'desc' as const }, { id: 'desc' as const }],
+  };
+}
+
+/**
+ * #5061 (#2212 A4b, hrn:node:hadronmemory.com:specs:cor:api:120:04) — `AppKey.hostUsesPage`, the paged sibling of
+ * {@link appKeyHostUses}: `{ items, total, hasMore }` through the shared `pageArgs` (omitted 20, 0 count-only, a negative
+ * limit 0, over 200 served as 200; a negative offset 0). Gate first ({@link hostUsesScope}), then count and page in one
+ * RepeatableRead snapshot so `total` and `hasMore` agree with the rows.
+ */
+export async function appKeyHostUsesPage(key: { id: string; appId: string }, args: { limit?: number | null; offset?: number | null }, ctx: Context) {
+  const { take, skip } = pageArgs(args);
+  const scope = await hostUsesScope(key, ctx);
+  const [total, items] = await ctx.db.$transaction([
+    ctx.db.hostKeyUse.count({ where: scope.where }),
+    ctx.db.hostKeyUse.findMany({ ...scope, take, skip }),
+  ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+  return pageEnvelope(items, total, skip);
 }

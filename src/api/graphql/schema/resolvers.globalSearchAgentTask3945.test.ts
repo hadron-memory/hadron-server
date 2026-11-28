@@ -142,7 +142,7 @@ describe('agentTask global search (#3945)', () => {
   it('the App\'s own key gets no task hits, even for its own App (ruled userless carve-out)', async () => {
     const keyCtx: Context = { db, appId: appX.id, appKeyId: keyX.id, roles: [] };
     // The direct read admits the key…
-    expect((await Q.agentTask({}, { id: taskX.id }, keyCtx))?.id).toBe(taskX.id);
+    expect((await Q.agentTask({}, { ref: taskX.id }, keyCtx))?.id).toBe(taskX.id);
     // …the search does not.
     const r = await search(keyCtx, 'zebra');
     expect(r.hits).toEqual([]);
@@ -299,9 +299,9 @@ describe('agentTask global search (#3945)', () => {
     expect(all.hits.some((h: any) => h.entityType === 'agentTask' && h.id === taskX.id)).toBe(true);
     const other = await db.organization.create({ data: { id: generateId(), name: 'o2', urn: `o2-${generateId()}.com` } });
     await db.orgMember.create({ data: { id: generateId(), organizationId: other.id, userId: participant.id, role: 'ADMIN' } });
-    const narrowed = await search(userCtx(participant), 'zebra', { orgId: other.id });
+    const narrowed = await search(userCtx(participant), 'zebra', { orgRef: other.id });
     expect(narrowed.hits).toEqual([]);
-    expect(agentTaskHits(await search(userCtx(participant), 'zebra', { orgId })).map((h: any) => h.id)).toEqual([taskX.id]); // own org: still only the gated task
+    expect(agentTaskHits(await search(userCtx(participant), 'zebra', { orgRef: orgId })).map((h: any) => h.id)).toEqual([taskX.id]); // own org: still only the gated task
   });
 });
 
@@ -325,7 +325,7 @@ describe('the candidate-App scope keeps every arm the gate admits (#3964 §10 F4
 
   it('a platform admin reads wherever the direct read admits it', async () => {
     const actx = { db, userId: stranger.id, roles: ['ADMIN'] } as Context;
-    expect((await Q.agentTask({}, { id: taskX.id }, actx))?.id).toBe(taskX.id);
+    expect((await Q.agentTask({}, { ref: taskX.id }, actx))?.id).toBe(taskX.id);
     const r = await search(actx, 'zebra');
     expect(agentTaskHits(r).map((h: any) => h.id).sort()).toEqual([taskX.id, taskY.id].sort());
   });

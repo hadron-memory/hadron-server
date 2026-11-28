@@ -100,7 +100,7 @@ async function upsertNode(input: Record<string, unknown>) {
   return writeNodeCore(
     { memoryId: fx.memory.id, ...input } as never,
     fx.ctx,
-    'upsert', { authoring: attestedAuthoring(null) },
+    'upsert', { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: attestedAuthoring(null) },
   );
 }
 
@@ -234,7 +234,7 @@ describe('createNode — create-only + abstract', () => {
       {},
       {
         input: {
-          memoryId: fx.memory.id,
+          memoryRef: fx.memory.id,
           loc: 'co1',
           name: 'co1',
           abstract: SHORT_ABSTRACT,
@@ -258,7 +258,7 @@ describe('createNode — create-only + abstract', () => {
         {},
         {
           input: {
-            memoryId: fx.memory.id,
+            memoryRef: fx.memory.id,
             loc: 'co2',
             name: 'co2',
             abstract: 'Should not land.',
@@ -300,7 +300,7 @@ describe('restoreNodeRevision — abstract round-trips through history', () => {
     // Restore that revision. Node abstract should revert to "A".
     const restored = await resolvers.Mutation.restoreNodeRevision(
       {},
-      { revisionId: vA.id },
+      { nodeRevRef: vA.id },
       fx.ctx,
     );
     expect(restored.abstract).toBe('A');
@@ -323,7 +323,7 @@ describe('restoreNodeRevision — abstract round-trips through history', () => {
 
     const restored = await resolvers.Mutation.restoreNodeRevision(
       {},
-      { revisionId: vNullAbs.id },
+      { nodeRevRef: vNullAbs.id },
       fx.ctx,
     );
     expect(restored.abstract).toBeNull();
@@ -347,7 +347,7 @@ describe('restoreNodeRevision — abstract round-trips through history', () => {
     // must record the CURRENT abstract ("Y") so we can round-trip back.
     await resolvers.Mutation.restoreNodeRevision(
       {},
-      { revisionId: vX.id },
+      { nodeRevRef: vX.id },
       fx.ctx,
     );
 
@@ -388,7 +388,7 @@ describe('spec 032 — upsertNode maintains abstractOriginHash', () => {
       const update = async (fields: Record<string, unknown>) => {
         const response = await gqlServer.executeOperation({
           query: 'mutation($input: UpdateNodeInput!) { updateNode(input: $input) { id revision abstract abstractOriginHash content } }',
-          variables: { input: { id: created.id, ...fields } },
+          variables: { input: { ref: created.id, ...fields } },
         }, { contextValue: fx.ctx });
         if (response.body.kind !== 'single') throw new Error('unexpected incremental response');
         expect(response.body.singleResult.errors).toBeUndefined();
@@ -447,7 +447,7 @@ describe('spec 032 — upsertNode maintains abstractOriginHash', () => {
         return result;
       }) as never);
       try {
-        await writeNodeCore({ memoryId: fx.memory.id, loc, name: loc, abstract: 'A' }, fx.ctx, mode, { authoring: attestedAuthoring(null) });
+        await writeNodeCore({ memoryId: fx.memory.id, loc, name: loc, abstract: 'A' }, fx.ctx, mode, { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: attestedAuthoring(null) });
       } finally {
         probe.mockRestore();
       }
@@ -479,7 +479,7 @@ describe('spec 032 — upsertNode maintains abstractOriginHash', () => {
     }) as never);
     try {
       await expect(writeNodeCore(
-        { memoryId: fx.memory.id, loc, abstract: 'A' }, fx.ctx, 'update', { authoring: attestedAuthoring(null), guardRevSeq: 1 },
+        { memoryId: fx.memory.id, loc, abstract: 'A' }, fx.ctx, 'update', { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: attestedAuthoring(null), guardRevSeq: 1 },
       )).rejects.toSatisfy(
         (error: unknown) => error instanceof GraphQLError && error.extensions.code === 'NODE_WRITE_CONFLICT',
       );
@@ -500,7 +500,7 @@ describe('spec 032 — upsertNode maintains abstractOriginHash', () => {
     expect(history[0]!.revLabel).toMatch(/Reconciled state changed outside a revisioned writer/);
 
     const affirmed = await writeNodeCore(
-      { memoryId: fx.memory.id, loc, abstract: 'A' }, fx.ctx, 'update', { authoring: attestedAuthoring(null), guardRevSeq: stored.revSeq },
+      { memoryId: fx.memory.id, loc, abstract: 'A' }, fx.ctx, 'update', { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: attestedAuthoring(null), guardRevSeq: stored.revSeq },
     );
     expect(affirmed.revSeq).toBe(3);
     expect(affirmed.content).toBe("B'");
@@ -542,7 +542,7 @@ describe('spec 032 — restoreNodeRevision round-trips abstractOriginHash', () =
 
     const restored = await resolvers.Mutation.restoreNodeRevision(
       {},
-      { revisionId: v0.id },
+      { nodeRevRef: v0.id },
       fx.ctx,
     );
     // After restore, the live row should have the revision's stored hash.
@@ -563,7 +563,7 @@ describe('spec 032 — restoreNodeRevision round-trips abstractOriginHash', () =
 
     // Restore the original. This creates a NEW NodeRevision snapshot
     // capturing the pre-restore live state (which has hash(B')).
-    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: v0.id }, fx.ctx);
+    await resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: v0.id }, fx.ctx);
 
     const allVersions = await db.nodeRevision.findMany({
       where: { nodeId: created.id },
@@ -628,7 +628,7 @@ describe('searchReplaceInNodes — abstract-cap refusal headroom (#1117)', () =>
     return resolvers.Mutation.searchReplaceInNodes(
       {},
       {
-        input: { oldText, newText, nodeIds, fields: ['abstract'], dryRun: false },
+        input: { oldText, newText, nodeRefs: nodeIds, fields: ['abstract'], dryRun: false },
       },
       fx.ctx,
     );

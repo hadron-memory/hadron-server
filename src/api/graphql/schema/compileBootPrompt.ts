@@ -472,6 +472,8 @@ async function decide(
       txCtx,
       existing ? 'update' : 'create',
       {
+        ownerLimit: 'count-only',
+        sizeCeiling: 'skip',
         authoring: { kind: 'platform', record: 'boot-prompt-compile' },
         transaction: { tx, pooledDb: ctx.db, afterCommit: (effect) => effects.push(effect) },
         ...(existing ? { targetNodeId: existing.id } : {}),
@@ -500,7 +502,7 @@ async function decide(
     await tx.edge.create({
       data: {
         id: generateId(), memoryId: node.memoryId, sourceId: node.id, targetId: source.id,
-        loc: deriveEdgeLoc(node.loc, 'compiled-from', source.loc), name: 'compiled-from',
+        loc: deriveEdgeLoc(node.loc, 'compiled-from', source.loc), locAuthored: false /* #2947: derived */, name: 'compiled-from',
         description: JSON.stringify({
           revNo: node.revSeq,
           nodes: plan.occurrences.map((o) => ({ nodeId: o.nodeId, revNo: o.revNo, kind: o.kind, ...(o.replacesNodeId ? { replacesNodeId: o.replacesNodeId } : {}) })),

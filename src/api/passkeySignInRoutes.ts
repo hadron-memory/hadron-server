@@ -28,6 +28,7 @@
  * Every POST failure is one uniform 403 `{"error":"forbidden"}`; the page is one fixed invalid-flow answer for a
  * missing, expired, completed or foreign pending flow.
  */
+import { AUTH_COOKIE_NAME } from '../auth/cookieName.js';
 import { createHash } from 'node:crypto';
 import express, { type Express, type Request, type Response } from 'express';
 import rateLimit from 'express-rate-limit';
@@ -288,11 +289,11 @@ export function mountPasskeySignInRoutes(app: Express, env: NodeJS.ProcessEnv = 
       const u = done.user;
       const jwt = await signJwt({
         login: done.login, sid: done.signInId, sub: u.id,
-        roles: u.roles as ('OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER')[],
+        roles: u.roles,
         ...(u.email ? { email: u.email } : {}),
       });
       const exp = JSON.parse(Buffer.from(jwt.split('.')[1]!, 'base64url').toString()).exp as number | undefined;
-      res.cookie('hadron_token', jwt, {
+      res.cookie(AUTH_COOKIE_NAME, jwt, {
         httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax',
         maxAge: exp ? exp * 1000 - Date.now() : 7 * 24 * 60 * 60 * 1000, path: '/',
       });

@@ -17,7 +17,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildSchema, GraphQLObjectType } from 'graphql';
+import { buildSchema, GraphQLObjectType, GraphQLInputObjectType } from 'graphql';
 import { typeDefs } from './typeDefs.js';
 
 /** The expected reference-argument names, per cor:api:140. */
@@ -32,6 +32,12 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
   addMemoryToAgent: ['agentRef', 'memoryRef'],
   updateAgentMemoryRole: ['agentRef', 'memoryRef'],
   removeMemoryFromAgent: ['agentRef', 'memoryRef'],
+  // #4138 (S2): the node-revision mutations take a revision ref (URN or PK); Query.nodeRevision is in EXPECTED_QUERY_REF_ARGS.
+  restoreNodeRevision: ['nodeRevRef'],
+  deleteNodeRevision: ['nodeRevRef'],
+  updateNodeRevision: ['nodeRevRef'],
+  // #5080 (gap 2): the mutation twin of AiServiceConfigFilter.ownerRef (the same owner gate).
+  createAiServiceConfig: ['ownerRef'],
   updateApp: ['ref'],
   deleteApp: ['ref'],
   regenerateAppKey: ['appRef'],
@@ -101,38 +107,149 @@ const EXPECTED_REF_ARGS: Record<string, string[]> = {
   addOrgMember: ['orgRef', 'userRef'],
   updateOrgMember: ['orgRef', 'userRef'],
   removeOrgMember: ['orgRef', 'userRef'],
+  // #4137 (S1): the memory share/member mutations — memoryId, granteeId and
+  // userId gone with no alias.
+  createMemoryShare: ['memoryRef', 'granteeRef'],
+  updateMemoryShareRole: ['memoryRef', 'granteeRef'],
+  deleteMemoryShare: ['memoryRef', 'granteeRef'],
+  addMemoryMember: ['memoryRef', 'userRef'],
+  updateMemoryMemberRole: ['memoryRef', 'userRef'],
+  removeMemoryMember: ['memoryRef', 'userRef'],
+  // #4148 (S7): the agent-task family's own-task argument is `taskRef` (gate pin 1; the family precedent).
+  updateAgentTask: ['taskRef'],
+  assignAgentTask: ['taskRef'],
+  reassignAgentTask: ['taskRef'],
+  startAgentTask: ['taskRef'],
+  recordAgentTaskProgress: ['taskRef'],
+  finishAgentTask: ['taskRef'],
+  cancelAgentTask: ['taskRef'],
+  releaseAgentTaskExternalId: ['taskRef'],
+  parkAgentTask: ['taskRef'],
+  cloneAgentTask: ['taskRef'],
+  makeAgentTaskReady: ['taskRef'],
+  // #5081 (gap 3): the signing switch's organization argument is `orgRef`, not `org`.
+  setOrgBootPromptSigning: ['orgRef'],
 };
 
 /**
- * Args that legitimately stay `<entity>Id` because they are genuine PKs, per
- * the convention ("output fields, DB columns, resolved locals" → `<entity>Id`).
+ * #4136 (S0): the Query fields that already take refs, so the extension is exercised before any rename lands. Keyed by the
+ * bare field name and checked against `schema.getQueryType()`; the Mutation table above is checked against the Mutation
+ * type. A Query field a later slice renames (#4141's `appRuns(parentRunRef)`, S2/S3's reads) adds or changes its entry here.
+ */
+const EXPECTED_QUERY_REF_ARGS: Record<string, string[]> = {
+  node: ['ref', 'memoryRef'],
+  memory: ['ref'],
+  app: ['ref'],
+  agent: ['ref'],
+  appRun: ['ref'],
+  nodeRevisions: ['nodeRef'],
+  nodeRevision: ['nodeRevRef'], // #4138 (S2)
+  appRuns: ['appRef', 'orgRef', 'parentRunRef'],
+  // #4139 (S3): nodeExport takes the node's ref (PK or URN).
+  nodeExport: ['ref'],
+  // #4142 (S6 chunk A): the memory reads.
+  usageEvents: ['memoryRef', 'nodeRef'],
+  usageEventsPage: ['memoryRef', 'nodeRef'],
+  memoryAssets: ['memoryRef'],
+  memoryLocSegments: ['memoryRefs'],
+  // #4148 (S7): the agent-task family (gate pin 1: `ref` for the field's own subject, `parentTaskRef` / `taskRef`).
+  agentTask: ['ref'],
+  agentTasks: ['appRef', 'parentTaskRef'],
+  agentTasksPage: ['appRef', 'parentTaskRef'], // shares agentTasks' ListArgs (Bridget's LOCAL P2-1)
+  agentTeamEvents: ['appRef', 'taskRef'],
+  agentTeamEventsPage: ['appRef', 'taskRef'],
+  // #5081 (gap 3): the 20 Query fields whose organization argument was `orgId` (18) or `org` (2) are `orgRef`.
+  findNodes: ['orgRef'],
+  globalSearch: ['orgRef'],
+  edges: ['orgRef'],
+  impersonationSessions: ['orgRef'],
+  memories: ['orgRef'],
+  exchangeConnections: ['orgRef'],
+  exchangeConnectionsPage: ['orgRef'],
+  slackConnections: ['orgRef'],
+  telegramConnections: ['orgRef'],
+  mcpServers: ['orgRef'],
+  homeAssistantInstances: ['orgRef'],
+  resendSenders: ['orgRef'],
+  apps: ['orgRef'],
+  agents: ['orgRef'],
+  scopes: ['orgRef'],
+  channels: ['orgRef'],
+  registerEntries: ['orgRef'],
+  assets: ['orgRef'],
+  orgBootPromptSigning: ['orgRef'],
+  orgBootPromptSigningPreview: ['orgRef'],
+};
+
+/**
+ * Args that legitimately stay `<entity>Id` because they are genuine PKs or external-system labels, per
+ * the convention ("output fields, DB columns, resolved locals" → `<entity>Id`). Each entry names ONE field
+ * (`field.arg`), so `appId` is allowed on `updateOrgGithubApp` and still flagged anywhere else (#4357 P3-8:
+ * `appId` is also a Hadron entity name; a global allowance would have waved a stray `joinApp.appId` through).
  */
 const ALLOWED_ID_ARGS = new Set([
   // startChat.userId: a PK compare-and-set against the session's user, not an
   // entity the caller names (#4142 S6 ruling A). S4 (#4140) already renamed
   // systemMemoryId away, so it no longer appears here.
-  'userId',
+  'startChat.userId',
   // #4142 (S6): external-system / label args the stray regex catches by
   // spelling, not Hadron entity PK refs.
   // linkGithubApp.installationId: a GitHub App INSTALLATION id (external
   // system, an Int) — pairs with orgRef, which names the Hadron org.
-  'installationId',
+  'linkGithubApp.installationId',
   // updateOrgGithubApp.appId: the GitHub App's own numeric id (external
   // system), not a Hadron App ref — the Hadron org is named by orgRef.
-  'appId',
+  'updateOrgGithubApp.appId',
   // linkMemoryToUser.externalUserId: the external identity's label at the
   // App's IdP; the Hadron memory is named by memoryRef.
-  'externalUserId',
+  'linkMemoryToUser.externalUserId',
+  // #4136 (S0): Query fields are keyed `Query.<field>.<arg>` so a Query field can never share a Mutation field's allowance.
+  // #4148 (S7): agentTasks.externalId is an external-system label (an outside item's id, e.g. an issue URL; cor:agt:120:02),
+  // not a Hadron entity reference, so it keeps its name per the convention ("external-system labels" stay `<x>Id`).
+  'Query.agentTasks.externalId',
+  'Query.agentTasksPage.externalId',
 ]);
 
-const mutationFields = () => {
-  const schema = buildSchema(typeDefs);
-  const mutation = schema.getType('Mutation') as GraphQLObjectType;
-  return mutation.getFields();
+/** The legacy-`Id` check, one (field, arg) at a time, against a per-field allow-list. */
+const isStrayLegacyIdArg = (field: string, arg: string, allowed: ReadonlySet<string> = ALLOWED_ID_ARGS): boolean =>
+  /^(id|org|.*Id)$/.test(arg) && !allowed.has(`${field}.${arg}`);
+
+type Root = 'Query' | 'Mutation';
+
+/** The fields of one root type of `schema` (the real SDL unless a fixture is passed). */
+const fieldsOf = (root: Root, sdl: string = typeDefs) => {
+  const schema = buildSchema(sdl);
+  const type = (root === 'Query' ? schema.getQueryType() : schema.getMutationType()) as GraphQLObjectType;
+  return type.getFields();
+};
+
+/** Every way `table` disagrees with the fields: a missing field, or a missing declared ref argument. Empty = agrees. */
+const refArgProblems = (root: Root, table: Record<string, string[]>, sdl: string = typeDefs): string[] => {
+  const fields = fieldsOf(root, sdl);
+  const problems: string[] = [];
+  for (const [name, expected] of Object.entries(table)) {
+    const field = fields[name];
+    if (!field) { problems.push(`${root}.${name} is missing from the SDL`); continue; }
+    const argNames = field.args.map((a) => a.name);
+    for (const want of expected) if (!argNames.includes(want)) problems.push(`${root}.${name} should declare "${want}"`);
+  }
+  return problems;
+};
+
+/** Every listed field that still declares a legacy `<entity>Id` argument not on the per-field allow-list. */
+const strayIdProblems = (root: Root, table: Record<string, string[]>, sdl: string = typeDefs, allowed: ReadonlySet<string> = ALLOWED_ID_ARGS): string[] => {
+  const fields = fieldsOf(root, sdl);
+  const offenders: string[] = [];
+  for (const name of Object.keys(table)) {
+    // A Query field's allowance key is `Query.<field>`, a Mutation's the bare field name (the table's existing keys).
+    const key = root === 'Query' ? `Query.${name}` : name;
+    for (const arg of fields[name]?.args ?? []) if (isStrayLegacyIdArg(key, arg.name, allowed)) offenders.push(`${name}.${arg.name}`);
+  }
+  return offenders;
 };
 
 describe('#789 — SDL ref-argument names match the resolvers', () => {
-  const fields = mutationFields();
+  const fields = fieldsOf('Mutation');
 
   it.each(Object.entries(EXPECTED_REF_ARGS))(
     '%s declares %s',
@@ -147,15 +264,268 @@ describe('#789 — SDL ref-argument names match the resolvers', () => {
   );
 
   it('none of them still declares a legacy <entity>Id reference arg', () => {
-    const offenders: string[] = [];
-    for (const name of Object.keys(EXPECTED_REF_ARGS)) {
-      for (const arg of fields[name]?.args ?? []) {
-        const isLegacy = /^(id|.*Id)$/.test(arg.name) && !ALLOWED_ID_ARGS.has(arg.name);
-        if (isLegacy) offenders.push(`${name}.${arg.name}`);
-      }
-    }
     // `createApp.agentId` was exactly this — SDL saying Id while the resolver
     // read agentRef, so the mutation was unusable through the real API.
-    expect(offenders).toEqual([]);
+    expect(strayIdProblems('Mutation', EXPECTED_REF_ARGS)).toEqual([]);
+  });
+});
+
+describe('#4136 (S0) — the same guard over Query fields', () => {
+  const fields = fieldsOf('Query');
+
+  it.each(Object.entries(EXPECTED_QUERY_REF_ARGS))(
+    'Query.%s declares %s',
+    (name, expected) => {
+      const field = fields[name];
+      expect(field, `Query.${name} is missing from the SDL`).toBeDefined();
+      const argNames = field.args.map((a) => a.name);
+      for (const want of expected) {
+        expect(argNames, `Query.${name} should declare "${want}"`).toContain(want);
+      }
+    },
+  );
+
+  it('none of the listed Query fields still declares a legacy <entity>Id reference arg', () => {
+    expect(strayIdProblems('Query', EXPECTED_QUERY_REF_ARGS)).toEqual([]);
+  });
+});
+
+/**
+ * #4368: an input-object field that names an entity takes `<entity>Ref` too. `setAgentAssetUploadEnabled` carries its ref in
+ * `input`, which the argument tables above never see. The two deprecated v1 asset calls (beginAssetUpload, agentAssets) keep
+ * `agentUrn` until their deprecation window ends (gate decision, #4368).
+ */
+describe('#4368 — setAgentAssetUploadEnabled names its Agent with agentRef', () => {
+  const input = buildSchema(typeDefs).getType('SetAgentAssetUploadEnabledInput') as GraphQLInputObjectType;
+  it('declares agentRef (required) and no agentUrn alias', () => {
+    const f = input.getFields();
+    expect(f.agentRef?.type.toString()).toBe('String!');
+    expect(f.agentUrn).toBeUndefined();
+  });
+});
+
+/**
+ * #5080 (gap 2): the input-type counterpart of the argument guards above. Every input-object field that names a ref-able entity
+ * takes `<entity>Ref` (cor:api:140:01); `<entity>Id` is reserved for a genuine primary key, an external label or a token. The walk
+ * covers EVERY input type: a field matching `^(id|.*Ids?)$` fails unless `ALLOWED_INPUT_ID_FIELDS` lists it with a reason.
+ */
+const EXPECTED_INPUT_REF_FIELDS: string[] = [
+  'NodeFilter.memoryRefs',
+  'EdgeFilter.memoryRef', 'EdgeFilter.sourceRef', 'EdgeFilter.targetRef',
+  'AppFilter.agentRef',
+  'AiServiceConfigFilter.ownerRef',
+  'NodeAuthoringCheckInput.memoryRef',
+  'CreateNodeInput.memoryRef',
+  'UpdateNodeInput.ref', 'UpdateNodeInput.memoryRef',
+  'ImportNodeInput.memoryRef',
+  'NodeEdgeInput.targetRef',
+  'SearchReplaceInNodesInput.nodeRefs', 'SearchReplaceInNodesInput.memoryRefs',
+  'SpecSearchReplaceInput.nodeRefs',
+  'BeginAssetUploadV2Input.memoryRef',
+  'CreateAgentTaskInput.parentTaskRef', 'CloneAgentTaskInput.parentTaskRef',
+  'TickerInput.channelRefs', 'TickerPatch.channelRefs',
+  'BatchThrough.channelRef',
+  // #5163: the compare-and-set guard of resumeSession, an id or a worker URN through resolveWorkerRef.
+  'ResumeSessionInput.expectedWorkerRef',
+];
+
+/** `Type.field` -> why it stays `*Id`. An empty reason, or an entry that no longer matches a field, fails. */
+const ALLOWED_INPUT_ID_FIELDS: Record<string, string> = {
+  // Ref-able entity, but exempt.
+  'NodeInput.memoryId': 'the legacy shape of the retired replaceSubtree, which refuses without writing (#4219 kept replaceSubtree(memoryId:) so legacy callers still reach REPLACE_SUBTREE_RETIRED)',
+  'LegacyNodeEdgeInput.targetId': 'the frozen edge shape of NodeInput.edges (the retired replaceSubtree); NodeEdgeInput is the live one',
+  'RegisterContextResetRecoveryInput.taskId': "an echo of the reset's own task, compared raw: it confirms a value the server handed the host and looks nothing up",
+  'SkillFileFactsInput.nodeId': "a value read from a provenance header on the caller's disk and reported as a fact, not a lookup",
+  // Names no ref-able entity.
+  'CreateNodeInput.id': 'a forced primary key for a create (importer/sync), never a selector (D2)',
+  'NodeInput.id': 'a forced primary key for a create, never a selector (D2)',
+  'SessionInput.id': 'Session: excluded, no ref resolver',
+  'SessionInput.parentSessionId': 'Session: excluded, no ref resolver',
+  'SessionInput.prevSessionId': 'Session: excluded, no ref resolver',
+  'UsageEventInput.sessionId': 'Session: excluded, no ref resolver',
+  'RegisterContextResetRecoveryInput.sessionId': 'Session: excluded, no ref resolver',
+  'EndAgentlessSessionInput.sessionId': 'Session: excluded, no ref resolver',
+  'SessionInput.customerId': 'an external label',
+  'GrantCreditsInput.sourceId': 'provenance: the id of the thing that sourced the credit, not a Hadron entity ref',
+  // Added after the #5080 walk (Billing A1, A7): the same provenance pair as GrantCreditsInput.sourceType/sourceId.
+  'AdjustCreditsInput.sourceId': 'provenance: the id of the thing that sourced the adjustment, not a Hadron entity ref',
+  'SetOwnerLimitsInput.sourceId': 'provenance: the id of the thing that sourced the change, not a Hadron entity ref',
+  'ClearOwnerLimitsInput.sourceId': 'provenance: the id of the thing that sourced the change, not a Hadron entity ref',
+  'CreateAgentTaskInput.externalId': 'an external label (an outside item URL, cor:agt:120:02)',
+  'ContextResetStepInput.resetId': 'a context reset has no URN or resolver',
+  'ClaimContextResetInput.resetId': 'a context reset has no URN or resolver',
+  'RegisterContextResetRecoveryInput.resetId': 'a context reset has no URN or resolver',
+  'AuthorizeContextResetStopInput.resetId': 'a context reset has no URN or resolver',
+  'ReportContextResetRelaunchedInput.resetId': 'a context reset has no URN or resolver',
+  'ReportContextResetRelaunchFailedInput.resetId': 'a context reset has no URN or resolver',
+  'AssignHostWorkerInput.hostId': "the host's token within the App (the one its key's host:operate scope names); no resolver",
+  'UnassignHostWorkerInput.hostId': "the host's token within the App; no resolver",
+  'JoinAgentTeamHostInput.hostId': "#5259: the host's token within the App (the one its key's host:operate scope will name); no resolver",
+  'UpdateAgentTeamHostInput.hostId': "#5259: the host's token within the App; no resolver",
+  'RemoveAgentTeamHostInput.hostId': "#5259: the host's token within the App; no resolver",
+  'IssueHostOperationInput.hostId': "the host's token within the App; no resolver",
+  'ReportHostOperationInput.id': 'a HostOperation primary key',
+  'RecordHostSweepRunInput.runId': 'a caller-chosen idempotency token',
+  'BeginAssetUploadInput.uploadRequestId': 'asset uploads: excluded',
+  'BeginAssetUploadV2Input.uploadRequestId': 'asset uploads: excluded',
+  'CompleteAssetUploadInput.uploadId': 'asset uploads: excluded',
+  'AgentTaskFindingInput.id': 'a finding label (F1, F2, ...)',
+  'DashboardWidgetInput.id': 'a widget-placement primary key',
+};
+
+const INPUT_ID_FIELD = /^(id|.*Ids?)$/;
+
+/** Every input field matching `INPUT_ID_FIELD` that is not allow-listed, every allow-list entry with no reason, and every stale one. */
+const inputIdProblems = (sdl: string = typeDefs, allowed: Record<string, string> = ALLOWED_INPUT_ID_FIELDS): string[] => {
+  const types = Object.values(buildSchema(sdl).getTypeMap()).filter(
+    (t): t is GraphQLInputObjectType => t instanceof GraphQLInputObjectType && !t.name.startsWith('__'),
+  );
+  const seen = new Set<string>();
+  const problems: string[] = [];
+  for (const t of types) {
+    for (const f of Object.keys(t.getFields())) {
+      const key = `${t.name}.${f}`;
+      seen.add(key);
+      if (INPUT_ID_FIELD.test(f) && !(key in allowed)) {
+        problems.push(`${key}: an input field naming an entity takes <entity>Ref (cor:api:140:01); list it in ALLOWED_INPUT_ID_FIELDS with a reason if it is a genuine primary key`);
+      }
+    }
+  }
+  for (const [key, reason] of Object.entries(allowed)) {
+    if (reason.trim() === '') problems.push(`${key}: allow-list entry has no reason (cor:api:140:01)`);
+    if (!seen.has(key)) problems.push(`${key}: stale allow-list entry, no such input field (cor:api:140:01)`);
+  }
+  return problems;
+};
+
+describe('#5080 — input-type fields that name an entity take <entity>Ref', () => {
+  const schema = buildSchema(typeDefs);
+  it.each(EXPECTED_INPUT_REF_FIELDS)('%s is declared', (key) => {
+    const [type, field] = key.split('.') as [string, string];
+    const t = schema.getType(type) as GraphQLInputObjectType | undefined;
+    expect(t, `${type} is missing from the SDL`).toBeDefined();
+    expect(Object.keys(t!.getFields()), `${key}: cor:api:140:01`).toContain(field);
+  });
+  it('lists all 22 renamed input fields (21 from #5080, ResumeSessionInput.expectedWorkerRef from #5163)', () => {
+    expect(EXPECTED_INPUT_REF_FIELDS).toHaveLength(22);
+  });
+  it('no input type declares an unlisted <entity>Id / id field', () => {
+    expect(inputIdProblems()).toEqual([]);
+  });
+  it('the old names are refused: each is an unknown input field', () => {
+    const old: Array<[string, string]> = [
+      ['NodeFilter', 'memoryIds'], ['EdgeFilter', 'memoryId'], ['EdgeFilter', 'sourceNodeId'], ['EdgeFilter', 'targetNodeId'],
+      ['AppFilter', 'agentId'], ['AiServiceConfigFilter', 'ownerId'], ['NodeAuthoringCheckInput', 'memoryId'],
+      ['CreateNodeInput', 'memoryId'], ['UpdateNodeInput', 'id'], ['UpdateNodeInput', 'memoryId'], ['ImportNodeInput', 'memoryId'],
+      ['NodeEdgeInput', 'targetId'], ['SearchReplaceInNodesInput', 'nodeIds'], ['SearchReplaceInNodesInput', 'memoryIds'],
+      ['SpecSearchReplaceInput', 'nodeIds'], ['BeginAssetUploadV2Input', 'memoryId'], ['CreateAgentTaskInput', 'parentTaskId'],
+      ['CloneAgentTaskInput', 'parentTaskId'], ['TickerInput', 'channelIds'], ['TickerPatch', 'channelIds'], ['BatchThrough', 'channelId'],
+      ['ResumeSessionInput', 'expectedWorkerId'],
+    ];
+    for (const [type, field] of old) {
+      expect(Object.keys((schema.getType(type) as GraphQLInputObjectType).getFields()), `${type}.${field} still exists`).not.toContain(field);
+    }
+    const arg = (schema.getMutationType() as GraphQLObjectType).getFields().createAiServiceConfig!.args.map((a) => a.name);
+    expect(arg).not.toContain('ownerId');
+  });
+  it('NodeInput (the retired replaceSubtree shape) keeps memoryId, and its edges keep targetId', () => {
+    const f = (schema.getType('NodeInput') as GraphQLInputObjectType).getFields();
+    expect(f.memoryId).toBeDefined();
+    expect(f.edges!.type.toString()).toBe('[LegacyNodeEdgeInput!]');
+    expect(Object.keys((schema.getType('LegacyNodeEdgeInput') as GraphQLInputObjectType).getFields())).toContain('targetId');
+  });
+});
+
+const INPUT_FIXTURE_SDL = `
+  type Query { x: String }
+  input Plain { name: String  ownerRef: ID }
+  input Strays { memoryId: ID  parentIds: [ID!]  id: ID  fine: String }
+`;
+describe('#5080 — the input walk fails where it must (fixture schema)', () => {
+  it('flags an unlisted id, <x>Id and <x>Ids field, and passes a Ref and a plain field', () => {
+    const problems = inputIdProblems(INPUT_FIXTURE_SDL, {});
+    expect(problems.map((p) => p.split(':')[0])).toEqual(['Strays.memoryId', 'Strays.parentIds', 'Strays.id']);
+    expect(problems[0]).toContain('cor:api:140:01');
+  });
+  it('an allow-listed field with a reason passes', () => {
+    expect(inputIdProblems(INPUT_FIXTURE_SDL, { 'Strays.memoryId': 'a pk', 'Strays.parentIds': 'a pk', 'Strays.id': 'a pk' })).toEqual([]);
+  });
+  it('an allow-list entry with an empty reason fails', () => {
+    const problems = inputIdProblems(INPUT_FIXTURE_SDL, { 'Strays.memoryId': ' ', 'Strays.parentIds': 'a pk', 'Strays.id': 'a pk' });
+    expect(problems).toEqual(['Strays.memoryId: allow-list entry has no reason (cor:api:140:01)']);
+  });
+  it('a stale allow-list entry fails', () => {
+    const problems = inputIdProblems(INPUT_FIXTURE_SDL, { 'Strays.memoryId': 'a pk', 'Strays.parentIds': 'a pk', 'Strays.id': 'a pk', 'Gone.thingId': 'old' });
+    expect(problems).toEqual(['Gone.thingId: stale allow-list entry, no such input field (cor:api:140:01)']);
+  });
+});
+
+/** A fixture schema (never the real SDL), so the negative cases pin the CHECKER and not today's drift. */
+const FIXTURE_SDL = `
+  type Query { thing(ref: ID!, thingId: ID): String  other(otherRef: ID, filterId: ID): String  plain(limit: Int): String }
+  type Mutation { change(ref: ID!, thingId: ID): String }
+`;
+
+describe('#4136 (S0) — the checker fails where it must (fixture schema)', () => {
+  it('a Query entry naming an arg the SDL does not declare fails', () => {
+    expect(refArgProblems('Query', { thing: ['ref'] }, FIXTURE_SDL)).toEqual([]);
+    expect(refArgProblems('Query', { thing: ['ref', 'memoryRef'] }, FIXTURE_SDL)).toEqual(['Query.thing should declare "memoryRef"']);
+  });
+  it('a Query entry naming a field the SDL does not have fails', () => {
+    expect(refArgProblems('Query', { gone: ['ref'] }, FIXTURE_SDL)).toEqual(['Query.gone is missing from the SDL']);
+  });
+  it('a Query field is judged against the Query type and a Mutation field against the Mutation type, never crossed', () => {
+    expect(refArgProblems('Query', { change: ['ref'] }, FIXTURE_SDL)).toEqual(['Query.change is missing from the SDL']);
+    expect(refArgProblems('Mutation', { thing: ['ref'] }, FIXTURE_SDL)).toEqual(['Mutation.thing is missing from the SDL']);
+    expect(refArgProblems('Mutation', { change: ['ref'] }, FIXTURE_SDL)).toEqual([]);
+  });
+  it('a stray <entity>Id arg on a listed Query field is flagged, an unlisted field is not looked at', () => {
+    expect(strayIdProblems('Query', { thing: ['ref'], other: ['otherRef'] }, FIXTURE_SDL, new Set())).toEqual(['thing.thingId', 'other.filterId']);
+    expect(strayIdProblems('Query', { plain: [] }, FIXTURE_SDL, new Set())).toEqual([]);
+  });
+  it('a Query allowance is per field and keyed Query.<field>.<arg>: it neither covers another field nor a Mutation of the same name', () => {
+    expect(strayIdProblems('Query', { thing: ['ref'], other: ['otherRef'] }, FIXTURE_SDL, new Set(['Query.thing.thingId']))).toEqual(['other.filterId']);
+    // the bare Mutation-style key does not wave a Query arg through, and a Query key does not wave a Mutation arg through
+    expect(strayIdProblems('Query', { thing: ['ref'] }, FIXTURE_SDL, new Set(['thing.thingId']))).toEqual(['thing.thingId']);
+    expect(strayIdProblems('Mutation', { change: ['ref'] }, FIXTURE_SDL, new Set(['Query.change.thingId']))).toEqual(['change.thingId']);
+  });
+  it('the Mutation behavior is unchanged: a Mutation entry still fails on a missing arg and a stray Id', () => {
+    expect(refArgProblems('Mutation', { change: ['ref', 'orgRef'] }, FIXTURE_SDL)).toEqual(['Mutation.change should declare "orgRef"']);
+    expect(strayIdProblems('Mutation', { change: ['ref'] }, FIXTURE_SDL, new Set())).toEqual(['change.thingId']);
+    expect(strayIdProblems('Mutation', { change: ['ref'] }, FIXTURE_SDL, new Set(['change.thingId']))).toEqual([]);
+  });
+  it('the appRuns.parentRunId allowance is gone (#4141 renamed it parentRunRef), so the old name is a stray Id arg', () => {
+    expect(isStrayLegacyIdArg('Query.appRuns', 'parentRunId')).toBe(true);
+    expect(isStrayLegacyIdArg('Query.appRuns', 'orgId')).toBe(true);
+    expect(isStrayLegacyIdArg('Query.agentTasks', 'parentRunId')).toBe(true);
+  });
+});
+
+describe('#4357 P3-8 — the legacy-Id allowance is per field', () => {
+  it('allows each documented arg on its own field only', () => {
+    expect(isStrayLegacyIdArg('updateOrgGithubApp', 'appId')).toBe(false);
+    expect(isStrayLegacyIdArg('startChat', 'userId')).toBe(false);
+  });
+  it('still flags the same spelling on any other field (appId is a Hadron entity name too)', () => {
+    expect(isStrayLegacyIdArg('joinApp', 'appId')).toBe(true);
+    expect(isStrayLegacyIdArg('leaveApp', 'appId')).toBe(true);
+    expect(isStrayLegacyIdArg('createMemory', 'userId')).toBe(true);
+    expect(isStrayLegacyIdArg('syncMemory', 'id')).toBe(true);
+  });
+});
+
+
+describe('#5081 (gap 3) — the 21 organization-scope arguments stay named in the guard tables', () => {
+  const QUERY = ['findNodes', 'globalSearch', 'edges', 'impersonationSessions', 'memories', 'exchangeConnections', 'exchangeConnectionsPage', 'slackConnections', 'telegramConnections', 'mcpServers', 'homeAssistantInstances', 'resendSenders', 'apps', 'agents', 'scopes', 'channels', 'registerEntries', 'assets', 'orgBootPromptSigning', 'orgBootPromptSigningPreview'];
+  it.each(QUERY)('Query.%s is in EXPECTED_QUERY_REF_ARGS with orgRef', (name) => {
+    expect(EXPECTED_QUERY_REF_ARGS[name]).toContain('orgRef');
+  });
+  it('Mutation.setOrgBootPromptSigning is in EXPECTED_REF_ARGS with orgRef', () => {
+    expect(EXPECTED_REF_ARGS.setOrgBootPromptSigning).toContain('orgRef');
+  });
+  it('a bare `org` argument is a stray legacy arg, as is orgId', () => {
+    expect(isStrayLegacyIdArg('Query.orgBootPromptSigning', 'org')).toBe(true);
+    expect(isStrayLegacyIdArg('Query.apps', 'orgId')).toBe(true);
+    expect(isStrayLegacyIdArg('Query.apps', 'orgRef')).toBe(false);
   });
 });

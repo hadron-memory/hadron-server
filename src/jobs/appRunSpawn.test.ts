@@ -54,7 +54,7 @@ function deps(overrides: Partial<RunExecutionDeps> = {}): RunExecutionDeps {
 
 async function mintParent(eventData: Record<string, unknown> = { topic: 'digest' }): Promise<AppRun> {
   return mintAppRun(db, {
-    organizationId: orgId, appId, agentId, triggerKind: 'MANUAL', entryNodeUrn: ENTRY, eventData,
+    owner: { organizationId: orgId }, appId, agentId, triggerKind: 'MANUAL', entryNodeUrn: ENTRY, eventData,
   });
 }
 
@@ -149,7 +149,7 @@ describe('hadron_spawn — dispatch (D-SP-1/-3/-5)', () => {
   it('the depth cap stops fork bombs (D-SP-7): a grandchild-lineage run cannot spawn', async () => {
     const grandparent = await mintParent();
     const parent = await mintAppRun(db, {
-      organizationId: orgId, appId, agentId, triggerKind: 'SPAWN', triggerId: grandparent.id,
+      owner: { organizationId: orgId }, appId, agentId, triggerKind: 'SPAWN', triggerId: grandparent.id,
       parentRunId: grandparent.id, entryNodeUrn: CHILD_ENTRY,
     });
     // Lineage depth 1 → allowed.
@@ -239,7 +239,7 @@ describe('spawn completion — callbacks (D-SP-4)', () => {
   });
 });
 
-describe('appRuns(parentRunId:) — the run-tree filter (#548)', () => {
+describe('appRuns(parentRunRef:) — the run-tree filter (#548)', () => {
   it('returns exactly one fan-out\'s children (+ its coordination runs), org-scoped', async () => {
     const { resolvers } = await import('../api/graphql/schema/resolvers.js');
     const admin = await db.user.create({
@@ -256,7 +256,7 @@ describe('appRuns(parentRunId:) — the run-tree filter (#548)', () => {
 
     const page = (await resolvers.Query.appRuns(
       {},
-      { appRef: appId, parentRunId: parentA.id },
+      { appRef: appId, parentRunRef: parentA.id },
       ctx,
     )) as { items: Array<{ parentRunId: string | null }>; total: number };
     expect(page.total).toBe(4); // 3 children + the callback run
@@ -287,7 +287,7 @@ describe('hadron_child_runs (D-SP-6)', () => {
     });
     await db.appAgent.create({ data: { appId: otherApp.id, agentId } });
     const foreign = await mintAppRun(db, {
-      organizationId: orgId, appId: otherApp.id, agentId, triggerKind: 'MANUAL', entryNodeUrn: ENTRY,
+      owner: { organizationId: orgId }, appId: otherApp.id, agentId, triggerKind: 'MANUAL', entryNodeUrn: ENTRY,
     });
     await expect(
       hadronChildRuns.execute(toolCtx(foreign as AppRun), { parentRunId: parent.id }),

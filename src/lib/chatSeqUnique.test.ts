@@ -250,13 +250,57 @@ describe('#2622 — the P2002 detector is exact (Gene P3-1)', () => {
     expect(isChatSeqUniqueViolation(p2002(['loc', 'memory_id']))).toBe(false);
   });
 
-  it('raw fallback requires unique-violation phrasing alongside the index name', () => {
+});
+
+describe('#2634 — the chat-seq detector: no substring target, SQLSTATE 23505 on the raw path', () => {
+  const p2002 = (target: unknown) =>
+    new Prisma.PrismaClientKnownRequestError('dup', {
+      code: 'P2002', clientVersion: '6.19.2', meta: { target },
+    } as never);
+  // Message text is never evidence of a unique violation; SQLSTATE 23505 is.
+  const NAME = 'nodes_chat_message_seq_unique_idx';
+  const rawPg = (code: string | undefined, message: string) =>
+    Object.assign(new Error(message), code === undefined ? {} : { code });
+  const DUP = `duplicate key value violates unique constraint "${NAME}"`;
+
+  it('raw fallback needs SQLSTATE 23505 AND the index name; phrasing alone is not a violation (#2634)', () => {
+    expect(isChatSeqUniqueViolation(rawPg('23505', DUP))).toBe(true);
+    // the old rule's accepted shape, no SQLSTATE: message text only
+    expect(isChatSeqUniqueViolation(new Error(DUP))).toBe(false);
+    // a different SQLSTATE (foreign-key violation) whose text carries the unique-violation phrasing and the index name
+    expect(isChatSeqUniqueViolation(rawPg('23503', DUP))).toBe(false);
+    // 23505 on a LONGER index name that merely starts with ours (#2634 BLIND P3-4): the quoted name must match exactly
+    expect(isChatSeqUniqueViolation(rawPg('23505', `duplicate key value violates unique constraint "${NAME}_v2"`))).toBe(false);
+    // the driver's own `constraint` field is accepted without the message
+    expect(isChatSeqUniqueViolation(Object.assign(rawPg('23505', 'duplicate key'), { constraint: NAME }))).toBe(true);
+    // 23505 on some OTHER index
+    expect(isChatSeqUniqueViolation(rawPg('23505', 'duplicate key value violates unique constraint "nodes_pkey"'))).toBe(false);
+    // the name alone, no unique-violation evidence
     expect(isChatSeqUniqueViolation(
-      new Error('relation "nodes_chat_message_seq_unique_idx" does not exist, skipping'),
+      rawPg(undefined, `relation "${NAME}" does not exist, skipping`),
     )).toBe(false);
-    expect(isChatSeqUniqueViolation(
-      new Error('duplicate key value violates unique constraint "nodes_chat_message_seq_unique_idx"'),
-    )).toBe(true);
+  });
+
+  it('refuses a P2002 whose target merely CONTAINS the index name (#2634: no substring fallback)', () => {
+    expect(isChatSeqUniqueViolation(p2002(`${NAME}_v2`))).toBe(false);
+    expect(isChatSeqUniqueViolation(p2002(`prefix_${NAME}`))).toBe(false);
+    expect(isChatSeqUniqueViolation(p2002({ index: NAME }))).toBe(false);
+    expect(isChatSeqUniqueViolation(p2002([NAME]))).toBe(false);
+  });
+
+  it('refuses a raw-SQL P2010 carrying SQLSTATE 23505 on this index, on purpose (#2634, Beryl P3-2, Elena P2-2)', () => {
+    // No raw statement writes a chat message's (loc, seq), so a P2010 is not this refusal; a future raw writer adds its own branch.
+    const raw = new Prisma.PrismaClientKnownRequestError(DUP, {
+      code: 'P2010', clientVersion: '6.19.2', meta: { code: '23505', message: DUP },
+    } as never);
+    expect(isChatSeqUniqueViolation(raw)).toBe(false);
+  });
+
+  it('refuses a non-P2002 Prisma error that carries the name and unique phrasing (#2634)', () => {
+    const notUnique = new Prisma.PrismaClientKnownRequestError(DUP, {
+      code: 'P2003', clientVersion: '6.19.2', meta: { target: NAME },
+    } as never);
+    expect(isChatSeqUniqueViolation(notUnique)).toBe(false);
   });
 });
 
@@ -311,7 +355,7 @@ describe('#992 — the constraint refuses duplicates the allocator cannot see', 
     await expectCode(
       M.createNode({}, {
         input: {
-          memoryId: legacyMem.id,
+          memoryRef: legacyMem.id,
           loc: `${TEAM_CHAT_LOC}:messages:003-dupe`,
           name: '003-dupe', nodeType: 'chat-message', seq: 3, content: 'dupe',
         },
@@ -329,7 +373,7 @@ describe('#992 — the constraint refuses duplicates the allocator cannot see', 
     await expectCode(
       M.createNode({}, {
         input: {
-          memoryId: legacyMem.id,
+          memoryRef: legacyMem.id,
           loc: `${TEAM_CHAT_LOC}:messages:005-next`,
           name: '005-next', nodeType: 'chat-message', content: 'next',
         },
@@ -355,7 +399,7 @@ describe('#992 — the constraint refuses duplicates the allocator cannot see', 
     const b = await seedMessage(legacyMem.id, 7);
 
     await expectCode(
-      M.updateNode({}, { input: { id: b, seq: 3 } }, ctx(admin.id)),
+      M.updateNode({}, { input: { ref: b, seq: 3 } }, ctx(admin.id)),
       'SEQ_PROTECTED',
     );
   });

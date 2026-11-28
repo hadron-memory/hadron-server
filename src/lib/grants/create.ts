@@ -1,3 +1,7 @@
+import { isSecretUseHeaderName, isSecretUsePrefix } from '../secrets/useBinding.js';
+import { currentAppSecretValue, lockSecretRow } from '../secrets/appSecrets.js';
+import { isStoreFault } from '../secrets/storeFault.js';
+import { assertSecretUseHeader, assertUrlWithinPrefix } from '../runner/secrets.js';
 /**
  * #3690 PR 2 (Grants S2a create; cor:acl:140:05 Create, :03 pending, :01, :02; rulings 0099, 0253, 0255 items 6 and 20): the ONE
  * writer of a grant row. It makes a PENDING grant and nothing else: there is no input for activation, a verifier, a signature,
@@ -8,6 +12,11 @@
  * refusal is the rule). And (#3711) a PERSON who manages the App, for any live worker of it or an agent installed in it; the row
  * records that person as requester and no worker or session. The other callers rulings 0253 and 0255 allow (an installed
  * agent's headless run or session) are a later slice; their absence here is an omission, not the rule.
+ *
+ * A RUN (#3753, S2c; cor:acl:140:05 S5): a headless AppRun naming the agent asks for a grant held by ITS OWN agent in ITS OWN App, and
+ * for nothing else. The holder is the run row's agent, passed by the caller from the row and checked here against the run row read
+ * under lock; no input names a holder. The row records the RUN (`requested_by_run_id`) and no user, worker or session: the person a run
+ * acts for is not the requester (ruling 0255 item 21). A run that is not RUNNING in this App with this agent is {@link GrantRunGone}.
  *
  * HOLDER. A grant for an agent is held by that agent IN THIS APP, so the agent must be installed and licensed here (item 20:
  * "it makes no sense to issue a grant to an agent that isn't installed"). A worker holder must belong to the grant's own App and
@@ -32,20 +41,24 @@
  * transaction and ends the new row through `endHeldGrants` (src/lib/grants/departure.ts; the insert guard's own FOR SHARE on the
  * holder is the backstop). Anchors before rows, agent before worker: the order every departure door takes.
  */
-import type { Prisma } from '../../generated/prisma/index.js';
+import { Prisma } from '../../generated/prisma/index.js';
 import { isAgentInstalledAndLicensed } from '../appAgent.js';
 import { generateId } from '../id.js';
+import { autoDeleteLimitRefusal } from '../secrets/autoDelete.js';
 import { isModelReadableKind } from '../secrets.js';
 import { grantTermsBytes, GrantTermsError, type GrantHolderKind } from './terms.js';
+import { MEMORY_READ_ACTION, READ_GRANT_TARGET_SELECT, memoryReadTargetRefusal } from './readGrant.js';
 
 export type GrantCreateCode =
   | 'GRANT_REQUESTER_NOT_WORKER'
   | 'GRANT_HOLDER_NOT_ALLOWED'
   | 'GRANT_ACTION_UNKNOWN'
   | 'GRANT_VALUES_INVALID'
-  | 'GRANT_TERMS_INVALID';
+  | 'GRANT_TERMS_INVALID'
+  | 'SECRET_AUTO_DELETE_NEEDS_LIMIT';
 
 const MESSAGES: Record<GrantCreateCode, string> = {
+  SECRET_AUTO_DELETE_NEEDS_LIMIT: 'An auto-delete mark needs a window or a read budget.',
   GRANT_REQUESTER_NOT_WORKER: 'A grant can be requested only from a bound worker session in its own App.',
   GRANT_HOLDER_NOT_ALLOWED: 'A grant can be asked for only for a worker of the App or an agent installed in it (a worker session: only itself or its role agent).',
   GRANT_ACTION_UNKNOWN: 'That action is not registered.',
@@ -68,12 +81,20 @@ export class GrantCreateRefusal extends Error {
   }
 }
 
+/** The asker is a headless run (#3753): its own id and the agent the run row names (the only holder it may have). */
+export interface RunRequester { runId: string; agentId: string }
+
+/** A run that is not a live run of this App for this agent, judged on the locked row. Concealing: the tool answers it as APP_NOT_FOUND. */
+export class GrantRunGone extends Error {
+  constructor() { super('App not found.'); this.name = 'GrantRunGone'; }
+}
+
 /** The asker. `workerId` null is a PERSON who manages the App (#3711, the caller's gate has judged `managesApp` under the same locks); a worker id is a bound worker session. */
 export interface GrantRequester { userId: string; workerId: string | null; sessionId: string | null }
 
 export interface CreateGrantArgs {
   appId: string;
-  requester: GrantRequester;
+  requester: GrantRequester | RunRequester;
   holder: { kind: GrantHolderKind; id: string };
   action: string;
   values: unknown;
@@ -101,10 +122,26 @@ function valueMatchesType(type: string, value: unknown): boolean {
   // #3998 (cor:acl:140:09, secret forms): a secret id is ONE stored id, never a list or the wildcard; the mark is one of two tokens, exactly.
   if (type === 'secret-ref') return typeof value === 'string' && NODE_ID_RE.test(value);
   if (type === 'secret-mark') return value === 'keep' || value === 'delete';
+  // #4855: a worker is named by its stored id, one or a list, never the wildcard (the parameter refuses it and a list holds no '*').
+  if (type === 'worker-ref') {
+    const oneWorker = (v: unknown) => typeof v === 'string' && NODE_ID_RE.test(v);
+    return Array.isArray(value) ? value.length > 0 && value.every(oneWorker) : oneWorker(value);
+  }
+  // #5321: memories are named by their stored ids, one or a non-empty list, never the wildcard; a single value may instead be the
+  // grant's App's own organization id (form (a), judged below with the rows).
+  if (type === 'memory-ref') {
+    const one = (v: unknown) => typeof v === 'string' && NODE_ID_RE.test(v);
+    return Array.isArray(value) ? value.length > 0 && value.every(one) : one(value);
+  }
+  if (type === 'https-prefix') return isSecretUsePrefix(value);
+  if (type === 'header-name') return isSecretUseHeaderName(value);
   if (type !== 'node-ref') return false;
   const one = (v: unknown) => v === '*' || (typeof v === 'string' && NODE_ID_RE.test(v));
   return Array.isArray(value) ? value.every(one) : one(value);
 }
+
+/** #5321: the read-grant action, held only by the grant's own App (cor:acl:140:02). */
+const APP_READ_ACTIONS: ReadonlySet<string> = new Set([MEMORY_READ_ACTION]);
 
 /** The one action a person may hold (#3998). */
 const SECRET_REVEAL_ACTION = 'secret.reveal';
@@ -130,20 +167,40 @@ function declaredParameters(parameters: unknown): Array<{ name: string; type: st
 export async function createPendingGrant(tx: Prisma.TransactionClient, args: CreateGrantArgs): Promise<string> {
   const { appId, requester, holder } = args;
 
+  // A run asks (#3753): the run row, locked FOR SHARE after the caller's anchors, must be RUNNING in this App and name this agent, so a run
+  // that finished first is seen here and one that finishes next waits for this transaction. No person or worker is read or credited.
+  const run = 'runId' in requester ? requester : null;
+  const person = 'runId' in requester ? null : requester;
+  if (run) {
+    const rows = await tx.$queryRaw<Array<{ app_id: string; agent_id: string | null; status: string }>>`
+      SELECT app_id, agent_id, status::text AS status FROM app_runs WHERE id = ${run.runId} FOR SHARE`;
+    if (rows.length !== 1 || rows[0]!.app_id !== appId || rows[0]!.agent_id !== run.agentId || rows[0]!.status !== 'RUNNING') throw new GrantRunGone();
+    // The holder is exactly the run's own agent, anchored by the caller: any other kind or id is the one holder refusal.
+    if (holder.kind !== 'agent' || holder.id !== run.agentId) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
+  }
+
   // The requester: a live person (and, for a worker session, a live worker of THIS App), locked so a retirement either committed (seen here) or waits.
-  const users = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM users WHERE id = ${requester.userId} AND deleted_at IS NULL FOR SHARE`;
-  if (users.length === 0) throw new GrantCreateRefusal('GRANT_REQUESTER_NOT_WORKER');
+  if (person) {
+    const users = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM users WHERE id = ${person.userId} AND deleted_at IS NULL FOR SHARE`;
+    if (users.length === 0) throw new GrantCreateRefusal('GRANT_REQUESTER_NOT_WORKER');
+  }
   let me: WorkerRow | null = null;
-  if (requester.workerId !== null) {
+  if (person && person.workerId !== null) {
     const workers = await tx.$queryRaw<WorkerRow[]>`
-      SELECT id, app_id, agent_id, retired_at FROM workers WHERE id = ${requester.workerId} FOR SHARE`;
+      SELECT id, app_id, agent_id, retired_at FROM workers WHERE id = ${person.workerId} FOR SHARE`;
     me = workers[0] ?? null;
     if (!me || me.retired_at !== null || me.app_id !== appId) throw new GrantCreateRefusal('GRANT_REQUESTER_NOT_WORKER');
   }
 
   // The holder. A worker session: itself or its role agent. A manager (no `me`): any live worker of this App, or an agent installed
   // and licensed in it (#3711, cor:acl:140:05; ruling 0253 item 4). Anything else, and anything outside this App, is the one refusal.
+  // #5321 (cor:acl:140:02): a read grant is held by the grant's own App and nothing else; the read judge (readGrant.ts) reads only
+  // App-held rows, so a worker-, agent- or person-held one would be signed and allow nothing. Refused here, not left to fail at use.
+  if (APP_READ_ACTIONS.has(args.action) && holder.kind !== 'app') throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
   if (holder.kind === 'worker') {
+    // A use grant is consumed only by a run of its agent or App (readClientReveal prepareSecretUse); a worker holder could never consume it,
+    // so signing one would mint a live read client nothing can read. Refused here, not left to fail at use.
+    if (args.action === 'secret.use') throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
     if (me && holder.id !== me.id) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
     // Carry 1 (#3792, Ralion): the insert guard checks that a worker holder EXISTS, not that it belongs to this App.
     const held = await tx.$queryRaw<WorkerRow[]>`SELECT id, app_id, agent_id, retired_at FROM workers WHERE id = ${holder.id} FOR SHARE`;
@@ -156,6 +213,10 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
     // Held by the agent in this App: installed, licensed and not deleted here, judged on the locked state.
     const agents = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM agents WHERE id = ${holder.id} AND deleted_at IS NULL FOR SHARE`;
     if (agents.length === 0 || !(await isAgentInstalledAndLicensed(tx, appId, holder.id))) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
+  } else if (holder.kind === 'app' && (args.action === 'secret.use' || APP_READ_ACTIONS.has(args.action)) && !me && holder.id === appId) {
+    // Only this App's run may consume an App-held use grant; keep the holder alive until insertion.
+    const apps = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM apps WHERE id = ${holder.id} AND deleted_at IS NULL FOR SHARE`;
+    if (apps.length === 0) throw new GrantCreateRefusal('GRANT_HOLDER_NOT_ALLOWED');
   } else if (holder.kind === 'user' && args.action === SECRET_REVEAL_ACTION) {
     // #3998: a PERSON holds a secret.reveal grant (the one action that reads its secret on a server-hosted passkey page). Live,
     // locked FOR SHARE so an erasure that comes next waits and ends the new row through endHeldGrants. No other action has a person holder.
@@ -201,12 +262,68 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
     if (!ok) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
   }
 
+  // #4855: a worker-ref names a live worker of THIS App. A missing, other-App or retired worker is the same refusal as a malformed id
+  // (no existence oracle, no cross-App naming). The worker rows are locked FOR SHARE, so a retirement that comes next waits for this
+  // insert. (A retired HOLDER is reached by nothing, workersReachedByGrant; a retired TARGET named by a live grant is refused by the door as WORKER_RETIRED.)
+  // A worker holder may not name itself (a worker never restarts itself, so that term could never be used).
+  for (const p of declared) {
+    if (p.type !== 'worker-ref') continue;
+    const v = (values as Record<string, unknown>)[p.name];
+    const ids = [...new Set((Array.isArray(v) ? v : [v]).filter((x): x is string => typeof x === 'string'))];
+    if (ids.length === 0) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+    if (args.holder.kind === 'worker' && ids.includes(args.holder.id)) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+    const rows = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM workers WHERE id IN (${Prisma.join(ids)}) AND app_id = ${appId} AND retired_at IS NULL ORDER BY id FOR SHARE`;
+    if (rows.length !== ids.length) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+  }
+
   // #3998: a secret-ref names a secret of THIS App whose kind a model may read (an inject-only kind has no reveal client). A missing,
   // other-App, org, user or inject-only secret is the same refusal as a malformed id, so this is no existence oracle.
   for (const p of declared) {
     if (p.type !== 'secret-ref') continue;
-    const secret = await tx.secret.findFirst({ where: { id: (values as Record<string, unknown>)[p.name] as string, ownerType: 'app', ownerId: appId }, select: { kind: true } });
-    if (!secret || !isModelReadableKind(secret.kind)) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+    const secretId = (values as Record<string, unknown>)[p.name] as string;
+    // Judge ownership before locking, so a secret of another App is never locked on a requester's say-so.
+    if (action.name === 'secret.use' && !(await tx.secret.findFirst({ where: { id: secretId, ownerType: 'app', ownerId: appId }, select: { id: true } }))) {
+      throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+    }
+    if (action.name === 'secret.use' && !(await lockSecretRow(tx, secretId))) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+    const secret = await tx.secret.findFirst({ where: { id: secretId, ownerType: 'app', ownerId: appId }, select: { kind: true, metadata: true } });
+    if (!secret || (action.name === 'secret.use' ? secret.kind !== 'webfetch-auth' : !isModelReadableKind(secret.kind))) throw new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+    if (action.name === 'secret.use') {
+      try {
+        const value = await currentAppSecretValue(tx, { id: secretId, ownerId: appId });
+        assertSecretUseHeader((values as Record<string, unknown>)['binding-header'] as string, value, {});
+        // The same judgment prepareSecretUse makes at use (blind seat P2-1, #4776): a grant whose signed prefix lies outside the secret's own
+        // urlPrefix, or whose secret has no urlPrefix or a different auth type, could never be used, so it is never signable.
+        const metadata = secret.metadata as Record<string, unknown> | null;
+        if (!metadata || typeof metadata.urlPrefix !== 'string' || metadata.type !== (value as { type?: unknown }).type) throw new Error('metadata');
+        assertUrlWithinPrefix((values as Record<string, unknown>)['binding-prefix'] as string, metadata.urlPrefix);
+      } catch (e) {
+        if (isStoreFault(e)) throw e; // #4775: a database outage is not an invalid binding
+        throw new GrantCreateRefusal('GRANT_VALUES_INVALID', 'Invalid secret use binding');
+      }
+    }
+  }
+
+  // #5321 (cor:acl:140:02, two forms): a memory-ref value is either (a) the grant's App's OWN organization id, as a single value (anyone
+  // may create it; an ADMIN or OWNER of that organization signs it), or (b) one or more memory ids, each a memory the requester can read
+  // and that a read grant may name (memoryReadTargetRefusal, judged again at every read), none repeated. A missing, deleted, unreadable
+  // or inadmissible target, another organization, and a repeat are the same refusal as a malformed id, so this is no existence oracle.
+  // A read grant is held by the App only (the holder rule above refuses every other kind).
+  for (const p of declared) {
+    if (p.type !== 'memory-ref') continue;
+    const v = (values as Record<string, unknown>)[p.name];
+    const refuse = () => new GrantCreateRefusal('GRANT_VALUES_INVALID', `${p.name} is not a ${p.type}`);
+    if (!Array.isArray(v)) {
+      const app = await tx.app.findFirst({ where: { id: appId, deletedAt: null }, select: { organizationId: true } });
+      if (app?.organizationId != null && v === app.organizationId) continue; // form (a)
+    }
+    const ids = (Array.isArray(v) ? v : [v]) as string[];
+    if (new Set(ids).size !== ids.length) throw refuse();
+    for (const id of ids) {
+      const memory = await tx.memory.findFirst({ where: { id, deletedAt: null }, select: READ_GRANT_TARGET_SELECT });
+      if (!memory || !(await args.canReadMemory(id)) || (await memoryReadTargetRefusal(tx as never, appId, memory)) !== null) throw refuse();
+    }
   }
 
   // Count Unicode code points like task findings, with a UTF-16 fast bound so counting work is bounded.
@@ -220,6 +337,8 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
   const startsAt = args.startsAt ?? null;
   const expiresAt = args.expiresAt ?? null;
   const maxUses = args.maxUses ?? null;
+  const limit = autoDeleteLimitRefusal(['secret.reveal', 'secret.use'].includes(args.action) && (values as Record<string, unknown>)['auto-delete'] === 'delete', expiresAt, maxUses);
+  if (limit) throw new GrantCreateRefusal(limit.code);
   try {
     grantTermsBytes({ appId, holder, action: action.name, values, startsAt, expiresAt, maxUses, reason: args.reason });
   } catch (e) {
@@ -239,10 +358,12 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
   const userId = holder.kind === 'user' ? holder.id : null;
   const agentId = holder.kind === 'agent' ? holder.id : null;
   const workerId = holder.kind === 'worker' ? holder.id : null;
+  const granteeAppId = holder.kind === 'app' ? holder.id : null;
+  const asker = person ? { ...person, runId: null } : { userId: null, workerId: null, sessionId: null, runId: run!.runId };
   await tx.$executeRaw`
-    INSERT INTO grants (id, app_id, user_id, agent_id, worker_id, requested_by_user_id, requested_by_worker_id, requested_by_session_id,
+    INSERT INTO grants (id, app_id, user_id, agent_id, worker_id, grantee_app_id, requested_by_user_id, requested_by_worker_id, requested_by_session_id, requested_by_run_id,
                         action, action_values, starts_at, expires_at, max_uses, reason, created_at, updated_at)
-    VALUES (${id}, ${appId}, ${userId}, ${agentId}, ${workerId}, ${requester.userId}, ${requester.workerId}, ${requester.sessionId},
+    VALUES (${id}, ${appId}, ${userId}, ${agentId}, ${workerId}, ${granteeAppId}, ${asker.userId}, ${asker.workerId}, ${asker.sessionId}, ${asker.runId},
             ${action.name}, ${JSON.stringify(values)}::jsonb, ${startsAt?.toISOString() ?? null}::timestamptz AT TIME ZONE 'UTC', ${expiresAt?.toISOString() ?? null}::timestamptz AT TIME ZONE 'UTC', ${maxUses}, ${args.reason},
             (clock_timestamp() AT TIME ZONE 'UTC'), (clock_timestamp() AT TIME ZONE 'UTC'))`;
   return id;

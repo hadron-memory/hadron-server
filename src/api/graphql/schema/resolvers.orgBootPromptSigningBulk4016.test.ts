@@ -293,7 +293,7 @@ describe('#4016 a 2,000-row organisation', () => {
     await seedInstalls(2000);
     const ctx: Context = { db, userId: admin.id, roles: [] };
     const t0 = Date.now();
-    const page = await (resolvers.Query as any).orgBootPromptSigningPreview({}, { org: org.id, first: 50 }, ctx);
+    const page = await (resolvers.Query as any).orgBootPromptSigningPreview({}, { orgRef: org.id, first: 50 }, ctx);
     const previewMs = Date.now() - t0;
     expect(page.total).toBe(2000);
     const t1 = Date.now();
@@ -323,7 +323,7 @@ describe('#4016 the audience gates still run before any preview read', () => {
     };
     const attempt = async (orgRef: string) => {
       const spy = new Proxy(logged, {}) as never;
-      try { await (resolvers.Query as any).orgBootPromptSigningPreview({}, { org: orgRef, first: 1 }, { db: spy, userId: outsider.id, roles: [] } as Context); return null; }
+      try { await (resolvers.Query as any).orgBootPromptSigningPreview({}, { orgRef, first: 1 }, { db: spy, userId: outsider.id, roles: [] } as Context); return null; }
       catch (e: any) { return { code: e?.extensions?.code, message: e?.message }; }
     };
     const member = await run(org.id);

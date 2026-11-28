@@ -37,7 +37,7 @@ let agent: { id: string; urn: string };
 const auth = (userId: string): AuthContext => ({ userId, roles: ['READER'], clientId: `user:${userId}` });
 const gqlCtx = (userId: string): Context => ({ db, userId, roles: ['READER'] });
 const actionUrn = (agentUrn: string, code = CODE) => `hrn:action:${agentUrn}:${code}`;
-const notFound = (urn: string) => `Node "${urn}" not found.`;
+const notFound = (urn: string) => 'Node not found.';
 const getNode = async (as: string, urn: string) =>
   (await createTestableMcpServer(auth(as)).callTool('hadron_get_node', { urn })) as ToolResult;
 const runAction = async (as: string, urn: string) =>

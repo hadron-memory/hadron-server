@@ -74,7 +74,7 @@ describe('edges', () => {
   const edgeLocs = (res: any) => res.items.map((e: any) => e.loc).sort();
   for (const [name, v, want] of variants) {
     it(name, async () => {
-      const res = await Q.edges(null, { filter: { memoryId, ...runnable(v) } }, admin());
+      const res = await Q.edges(null, { filter: { memoryRef: memoryId, ...runnable(v) } }, admin());
       const map: Record<string, string> = { [LOCS.unset]: 'e.unset', [LOCS.no]: 'e.no', [LOCS.yes]: 'e.yes' };
       expect(edgeLocs(res)).toEqual(want.map((l) => map[l]!).sort());
     });
@@ -84,7 +84,7 @@ describe('edges', () => {
 describe('findNodes filter-only list', () => {
   for (const [name, v, want] of variants) {
     it(name, async () => {
-      const res = await Q.findNodes(null, { filter: { memoryIds: [memoryId], ...runnable(v) } }, admin());
+      const res = await Q.findNodes(null, { filter: { memoryRefs: [memoryId], ...runnable(v) } }, admin());
       expect(res.hits.map((h: any) => h.node.loc).sort()).toEqual(want);
     });
   }
@@ -106,7 +106,7 @@ describe('ranked retrieval (findNodes with a query)', () => {
         it(name, async () => {
           const res = await Q.findNodes(
             null,
-            { query: 'tristate marker', mode, filter: { memoryIds: [memoryId], ...runnable(v) } },
+            { query: 'tristate marker', mode, filter: { memoryRefs: [memoryId], ...runnable(v) } },
             admin(),
           );
           expect(res.hits.map((h: any) => h.node.loc).sort()).toEqual(want);

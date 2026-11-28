@@ -85,6 +85,7 @@ export async function liveRegistrationsFor(
     WHERE r.app_id = ${appId}
       AND ${ASSIGNMENT_IN_EFFECT}
       ${hostId ? Prisma.sql`AND r.host_id = ${hostId}` : Prisma.empty}
+      AND r.lost_at IS NULL
       AND r.refreshed_at + make_interval(secs => r.poll_interval_seconds * COALESCE(s.host_lapse_check_ins, ${HOST_LAPSE_CHECK_INS_DEFAULT})) >= ${toNaiveUtc(now)}::timestamp
     ORDER BY r.host_id`;
   return rows.flatMap(({ model, effort, accountProfile, server, ...r }) => {
@@ -274,6 +275,32 @@ export async function insertWorkerStart(
 }
 
 /**
+ * The host, worktree and run settings a platform start of `workerId` carries, decided under the caller's worker row
+ * lock and after {@link fenceHostDecision}: null when no live host registers the worker with a worktree (nothing can
+ * be started). Shared by the start for an assignment ({@link launchForAssignment}) and the dark-session restart
+ * (`restartDarkSession`), so the two choose a host and settings the same way.
+ *
+ * #4291: once the task or the worker's record settles the family, the start runs as that, whatever family the host
+ * registered: no host is ruled out, and one that states the same family goes first (else the first by id). While
+ * neither settles it (an empty record), the host's own statement is the family, exactly as before: the matcher's
+ * family, when it named one, still picks the host, so a start never runs as another family than matched. #4302: the
+ * task's settings count only for a SHORT_LIVED worker, here as in the args (launchTaskSettings).
+ */
+export async function planStart(
+  tx: Prisma.TransactionClient,
+  a: { appId: string; workerId: string; taskId: string | null; now: Date; family?: string },
+): Promise<{ reg: { hostId: string; family: string; worktrees: string[]; profile: LauncherProfile | null }; settings: StartSettings } | null> {
+  const regs = (await liveRegistrationsFor(tx, a.appId, a.workerId, a.now)).filter((r) => r.worktrees.length > 0);
+  const taskRun = a.taskId ? await launchTaskSettings(tx, a.workerId, a.taskId) : null;
+  const settled = runFamilyOf(taskRun) ?? (await loadWorkerRunRecord(tx, a.workerId)).family;
+  const reg = settled
+    ? regs.find((r) => r.family === settled) ?? regs[0]
+    : regs.find((r) => !a.family || r.family === normalizeFamily(a.family));
+  if (!reg) return null;
+  return { reg, settings: await startSettingsFor(tx, a.workerId, a.taskId, reg, taskRun) };
+}
+
+/**
  * cor:agt:070:08 — the platform's start for an assignment: if the task's worker
  * assignee is held, has no open session (V16, Proposed in the rule; #4237) and an
  * existing worktree on a live host,
@@ -319,21 +346,11 @@ export async function launchForAssignment(
         throw e;
       }
       await fenceHostDecision(tx, a.appId);
-      // #4291: once the task or the worker's record settles the family, the start runs as that, whatever family the
-      // host registered: no host is ruled out, and one that states the same family goes first (else the first by id).
-      // While neither settles it (an empty record), the host's own statement is the family, exactly as before: the
-      // matcher's family, when it named one, still picks the host, so a start never runs as another family than matched.
-      const regs = (await liveRegistrationsFor(tx, a.appId, a.workerId, now)).filter((r) => r.worktrees.length > 0);
-      // #4302: the task's settings count only for a SHORT_LIVED worker, here as in the args (launchTaskSettings).
-      const taskRun = await launchTaskSettings(tx, a.workerId, a.taskId);
-      const settled = runFamilyOf(taskRun) ?? (await loadWorkerRunRecord(tx, a.workerId)).family;
-      const reg = settled
-        ? regs.find((r) => r.family === settled) ?? regs[0]
-        : regs.find((r) => !a.family || r.family === normalizeFamily(a.family));
-      if (!reg) return null;
+      const plan = await planStart(tx, { appId: a.appId, workerId: a.workerId, taskId: a.taskId, now, ...(a.family ? { family: a.family } : {}) });
+      if (!plan) return null;
       return insertWorkerStart(tx, {
-        appId: a.appId, hostId: reg.hostId, workerId: a.workerId, worktree: reg.worktrees[0]!, family: reg.family,
-        profile: reg.profile, settings: await startSettingsFor(tx, a.workerId, a.taskId, reg, taskRun),
+        appId: a.appId, hostId: plan.reg.hostId, workerId: a.workerId, worktree: plan.reg.worktrees[0]!, family: plan.reg.family,
+        profile: plan.reg.profile, settings: plan.settings,
         taskId: a.taskId, issuer: { issuedBy: 'platform' }, hold,
       });
     });

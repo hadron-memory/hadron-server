@@ -11,6 +11,7 @@ import { revisionApprovalOf, endApprovalsOnEncryptedEntry } from './nodeApproval
 import { revisionsExemptFromPruning } from './nodeRevisionSnapshot.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from '../mcp/server.js';
+import { encryptWithSecret } from '../test/encryptMemoryWithSecret.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -25,8 +26,8 @@ const mk = (loc: string) => db.node.create({
   data: { id: generateId(), memoryId: memory.id, loc, name: `Title ${loc}`, abstract: `Abstract ${loc}`, content: 'v1' },
 });
 const approve = (nodeRef: string) => resolvers.Mutation.approveNode(null, { nodeRef }, as());
-const edit = (id: string, content: string) => resolvers.Mutation.updateNode(null, { input: { id, content } }, as());
-const touchMeta = (id: string, tags: string[]) => resolvers.Mutation.updateNode(null, { input: { id, tags } }, as());
+const edit = (id: string, content: string) => resolvers.Mutation.updateNode(null, { input: { ref: id, content } }, as());
+const touchMeta = (id: string, tags: string[]) => resolvers.Mutation.updateNode(null, { input: { ref: id, tags } }, as());
 const stateOf = async (nodeId: string, revNo: number) => (await revisionApprovalOf(db, nodeId, revNo)).state;
 
 beforeEach(async () => {
@@ -211,7 +212,7 @@ describe('entering an encrypted memory ends approvals (#1838, cor:dmo:120:04)', 
     await resolvers.Mutation.approveNode(null, { nodeRef: gone.id }, as());
     await resolvers.Mutation.deleteNode(null, { nodeRef: gone.id }, as());
     const dataKey = Buffer.alloc(32, 9).toString('base64');
-    await resolvers.Mutation.encryptMemory(null, { memoryRef: enc.id, dataKey }, as());
+    await encryptWithSecret(null, { memoryRef: enc.id, dataKey }, as());
     for (const id of [n.id, gone.id]) {
       const row = await db.node.findUniqueOrThrow({ where: { id } });
       expect(row.approvalHash).toBeNull();
@@ -241,7 +242,7 @@ describe('a hashless record authorizes nothing, on any surface (#1838)', () => {
     for (const viaSql of [false, true]) {
       for (const state of ['APPROVED', 'NOT_APPROVED', 'SUPERSEDED'] as const) {
         const res = await resolvers.Query.findNodes(null, {
-          filter: { memoryIds: [memory.id], approvalState: state, ...(viaSql ? { where: { path: ['marker'], eq: 'yes' } } : {}) },
+          filter: { memoryRefs: [memory.id], approvalState: state, ...(viaSql ? { where: { path: ['marker'], eq: 'yes' } } : {}) },
         }, as());
         const ids = res.hits.map((h: { node: { id: string } }) => h.node.id);
         expect(ids.includes(ended.id)).toBe(state === 'NOT_APPROVED');

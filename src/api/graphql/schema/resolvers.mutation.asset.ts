@@ -53,10 +53,13 @@ export const assetMutations = {
     // v2 (spec 006): memory-addressed begin.
     beginAssetUploadV2: async (
       _: unknown,
-      { input }: { input: BeginAssetUploadV2Input },
+      { input: wire }: { input: Omit<BeginAssetUploadV2Input, 'memoryId'> & { memoryRef: string } },
       ctx: Context,
     ) => {
       if (!ctx.userId) throw unauthenticatedError();
+      // #5080: the wire name is `memoryRef`; the controller keeps `memoryId`.
+      const { memoryRef, ...rest } = wire;
+      const input: BeginAssetUploadV2Input = { ...rest, memoryId: memoryRef };
       const ticket = await beginAssetUploadV2(
         ctx.db,
         {
@@ -119,13 +122,13 @@ export const assetMutations = {
 
     setAgentAssetUploadEnabled: async (
       _: unknown,
-      { input }: { input: { agentUrn: string; enabled: boolean } },
+      { input }: { input: { agentRef: string; enabled: boolean } },
       ctx: Context,
     ) => {
       if (!ctx.userId) throw unauthenticatedError();
       // #1946: an Agent the caller can't read answers the op's own "agent not
       // found", never PERMISSION_DENIED or the user-owned message.
-      await requireReadableAgentForAssetOp(ctx, input.agentUrn, () => new SetAssetEnabledError('NOT_FOUND', 'agent not found'));
+      await requireReadableAgentForAssetOp(ctx, input.agentRef, () => new SetAssetEnabledError('NOT_FOUND', 'agent not found'));
       return setAgentAssetUploadEnabled(
         ctx.db,
         { userId: ctx.userId },

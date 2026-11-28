@@ -26,13 +26,16 @@ import { GraphQLError as GraphQLErrorClass, Kind, type GraphQLError, type GraphQ
 import { publicErrorExtensions } from '../../lib/errorDiagnostics.js';
 import { faultRequestId, INTERNAL_ERROR_CODE, INTERNAL_ERROR_MESSAGE, logInternalFault } from '../../lib/internalFault.js';
 import { UrnNotQualifiedError, UrnParseError } from '../../lib/urn.js';
+import { concealRefEcho } from '../../lib/refEcho.js';
 import { AmbiguousLegacyUrnError, EncryptedVectorIndexNotAcknowledgedError, InvalidChunkConfigError } from '../../lib/entityRef/errors.js';
 import { EntityNotFoundError } from '../../lib/entityRef/entityNotFound.js';
 import { AssetUploadError } from '../../controller/operations/beginAssetUpload.js';
 import { SetAssetEnabledError } from '../../controller/operations/setAgentAssetUploadEnabled.js';
 import { QueryTooComplexError } from './admissionComplexity.js';
 import { TeamReadBusyError } from '../../lib/agentTasks/teamReadBudget.js';
-import { AuthStoreBusyError } from '../../lib/authStoreBusy.js';
+import { OwnerLimitReachedError } from '../../lib/ownerLimits/errors.js';
+import { NodeContentTooLargeError } from '../../lib/nodeContentLimit.js';
+import { AuthStoreBusyError, authStoreBusyMessage, normalizeAuthStoreBusyReason } from '../../lib/authStoreBusy.js';
 import { GitCommandError } from '../../integrations/github/execGit.js';
 import { SessionExpiredError } from '../../lib/nodeCrypto.js';
 
@@ -53,18 +56,41 @@ interface ClientErrorMapping {
    * `instanceof` chain in the plugin.
    */
   silenceInSentry: boolean;
+  /**
+   * #4591: when set, the mapping renders the WHOLE public error. The message is this value (never
+   * the thrown one) and the extensions are exactly `extensionsFor`'s: nothing Apollo copied off
+   * the thrown error is merged under them.
+   */
+  fixedMessageFor?: (err: unknown) => string;
 }
 
 /** Type-safe definition site; the cast is contained here. */
 function mapping<E>(
   matches: (err: unknown) => err is E,
   extensionsFor: (err: E) => Record<string, unknown>,
-  { silenceInSentry }: { silenceInSentry: boolean },
+  { silenceInSentry, fixedMessageFor }: { silenceInSentry: boolean; fixedMessageFor?: (err: E) => string },
 ): ClientErrorMapping {
-  return { matches, extensionsFor: (err) => extensionsFor(err as E), silenceInSentry };
+  return {
+    matches,
+    extensionsFor: (err) => extensionsFor(err as E),
+    silenceInSentry,
+    fixedMessageFor: fixedMessageFor && ((err) => fixedMessageFor(err as E)),
+  };
 }
 
 const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
+  // #5009: an owner reached a limit. The caller's to resolve (delete, or ask the owner), so silenced; the extensions are the contract.
+  // #5019: `NODE_CONTENT_TOO_LARGE` with `maxBytes` only, never the measured size. A caller's input is not a server fault.
+  mapping(
+    (err): err is NodeContentTooLargeError => err instanceof NodeContentTooLargeError,
+    (err) => ({ ...err.extensions, code: 'NODE_CONTENT_TOO_LARGE' }),
+    { silenceInSentry: true },
+  ),
+  mapping(
+    (err): err is OwnerLimitReachedError => err instanceof OwnerLimitReachedError,
+    (err) => ({ ...err.extensions }),
+    { silenceInSentry: true },
+  ),
   // #4455: the bounded team read (roster/composition/utilization) surfacing its budget expiry typed and RETRYABLE.
   // The error is already a GraphQLError carrying its code, but mapping it here guarantees the extensions merge at
   // the Apollo boundary and states the Sentry column. NOT silenced: these are the availability signal — the
@@ -79,10 +105,20 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
   // it as an untyped INTERNAL_SERVER_ERROR. Availability signal like TEAM_READ_BUSY — NOT silenced:
   // pool exhaustion during auth is countable evidence, the shape the P2028 incident (#4380) was
   // found by counting.
+  // #4591 (cor:aut:010:05, cor:api:260:01): the public error is fixed values only. `instanceof` proves the class, not
+  // that a subclass or a late mutation kept the message and extensions intact. The 503 does not depend on this render:
+  // Apollo consumes the thrown `extensions.http` before `formatError` runs.
   mapping(
     (err): err is AuthStoreBusyError => err instanceof AuthStoreBusyError,
-    (err) => ({ ...err.extensions }),
-    { silenceInSentry: false },
+    (err) => ({
+      code: 'AUTH_STORE_BUSY',
+      retryable: true,
+      reason: normalizeAuthStoreBusyReason(err.extensions?.reason),
+    }),
+    {
+      silenceInSentry: false,
+      fixedMessageFor: (err) => authStoreBusyMessage(err.extensions?.reason),
+    },
   ),
   // #3009: declining the encrypted-vector disclosure is a caller refusal on both consumers of this list.
   mapping(
@@ -98,12 +134,12 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
     { silenceInSentry: true },
   ),
   // Spec 022: surface UrnNotQualifiedError with a stable error code so external
-  // callers can branch on it programmatically.
+  // callers can branch on it programmatically. #5168: never the value the caller typed (no `offendingValue`, and the
+  // message is concealed by `concealRefEcho` in `formatGraphQLError`): a token pasted into a ref came back verbatim.
   mapping(
     (err): err is UrnNotQualifiedError => err instanceof UrnNotQualifiedError,
     (err) => ({
       code: 'URN_NOT_QUALIFIED',
-      offendingValue: err.offendingValue,
       expectedType: err.expectedType,
     }),
     { silenceInSentry: true },
@@ -111,13 +147,13 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
   // A malformed-grammar / bad-slug URN is caller error, not a server fault.
   // parseUrn / validateUserSlug (create boundaries, e.g. cloneMemory's
   // targetUrn) throw UrnParseError; without this it would surface as
-  // INTERNAL_SERVER_ERROR.
+  // INTERNAL_SERVER_ERROR. #5168: the `reason` is the contract; the offending segment is the caller's own text and is
+  // not relayed.
   mapping(
     (err): err is UrnParseError => err instanceof UrnParseError,
     (err) => ({
       code: 'BAD_USER_INPUT',
       reason: err.reason,
-      offendingValue: err.offendingSegment,
     }),
     { silenceInSentry: true },
   ),
@@ -125,7 +161,8 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
   // LOUDLY with this typed code (never a silent wrong resolve).
   mapping(
     (err): err is AmbiguousLegacyUrnError => err instanceof AmbiguousLegacyUrnError,
-    (err) => ({ code: 'AmbiguousLegacyUrnError', offendingValue: err.ref }),
+    // #5168: the code only; the ref is the caller's own text.
+    (err) => ({ code: 'AmbiguousLegacyUrnError' }),
     { silenceInSentry: true },
   ),
   // #3136 review (local seat F1): AmbiguousUserRefError is deliberately NOT
@@ -152,7 +189,8 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
   ),
   // #3136: encrypt/decrypt on an encrypted memory with no active session key
   // used to be a bare Error('SESSION_EXPIRED: …') that only the surfaces which
-  // hand-wrapped it (comments/teamChat/teamRole/teamAttention/channels) typed;
+  // hand-wrapped it (comments/teamChat/teamRole/channels, and teamAttention
+  // before #2027 S11 retired its scan) typed;
   // every other read/write path surfaced INTERNAL_SERVER_ERROR. Throwing the
   // typed class at the source (nodeCrypto) and mapping it once gives every path
   // the code those wrapped sites already deliver — message prefix unchanged, so
@@ -172,17 +210,18 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
   // than enumerating its codes is the point: a new refusal reaches the wire
   // typed without anyone remembering to come back here.
   //
-  // Sentry: NOT silenced. Mapping these for the wire and silencing them in the
-  // issue stream were proposed together; @Holger split them (2026-09-06) and
-  // took only the wire half. The reason is `ASSET_BYTES_GONE` — a row whose
-  // object is missing is genuine server-state inconsistency, and dropping it
-  // here would remove the only alarm without adding one anywhere else. The
-  // right home for that alarm is the purge/janitor path where the
-  // inconsistency is DISCOVERED, and it does not exist yet (#1140).
+  // Sentry: silenced (#1140). Mapping these for the wire and silencing them in
+  // the issue stream were proposed together; @Holger split them (2026-09-06)
+  // and took the wire half first, because of `ASSET_BYTES_GONE`: a row whose
+  // object is missing is genuine server-state inconsistency, and this was its
+  // only alarm. That alarm now lives where the inconsistency is DISCOVERED:
+  // the bytes-missing sweep (src/jobs/sweepAssetBytes.ts, #1140 slice B) and
+  // the restore path raise `asset.bytes_missing` (src/lib/asset/bytesMissingAlarm.ts).
+  // A caller meeting the refusal is not a fault to report here.
   mapping(
     (err): err is AssetUploadError => err instanceof AssetUploadError,
     (err) => ({ code: err.code }),
-    { silenceInSentry: false },
+    { silenceInSentry: true },
   ),
   // #2979: setAgentAssetUploadEnabled's refusals (PERMISSION_DENIED, NOT_FOUND) are caller errors with a code on the
   // instance, exactly as AssetUploadError above. The message is the operation's fixed text (no ref, no id), so it is
@@ -219,7 +258,8 @@ const CLIENT_ERROR_MAPPINGS: readonly ClientErrorMapping[] = [
   // taken for URN_NOT_QUALIFIED above.
   mapping(
     (err): err is EntityNotFoundError => err instanceof EntityNotFoundError,
-    (err) => ({ code: err.code, ref: err.ref }),
+    // #5168: the code only. The `ref` extension relayed the caller's value verbatim; the instance keeps it for logs.
+    (err) => ({ code: err.code }),
     { silenceInSentry: true },
   ),
 ];
@@ -292,9 +332,19 @@ export function formatGraphQLError(
   if (formattedError.extensions && ('stacktrace' in formattedError.extensions || 'exception' in formattedError.extensions)) {
     formattedError = { ...formattedError, extensions: publicErrorExtensions(formattedError.extensions) };
   }
+  // #5168: a URN library refusal quotes the caller's value; conceal it before any message is read below.
+  concealRefEcho(error);
   const original = unwrap(error);
   for (const m of CLIENT_ERROR_MAPPINGS) {
     if (!m.matches(original)) continue;
+    if (m.fixedMessageFor) {
+      return {
+        message: m.fixedMessageFor(original),
+        locations: formattedError.locations,
+        path: formattedError.path,
+        extensions: m.extensionsFor(original),
+      };
+    }
     return {
       ...formattedError,
       // The domain message, not Apollo's decoration of it.

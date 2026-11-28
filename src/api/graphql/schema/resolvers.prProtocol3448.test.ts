@@ -35,16 +35,16 @@ const freeze = (head = H, who = author.id) => command('freezePullRequestHead', {
 const events = (id = build.id) => db.agentTeamEvent.findMany({ where: { taskId: id, type: { in: ['review.scheduled', 'pr.frozen', 'review.seat.assigned', 'review.verdict', 'pr.ready'] } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
 const stored = (id = build.id) => db.agentTask.findUniqueOrThrow({ where: { id } });
 async function seat(slot: string, head = H, who = reviewer.id, supersedes?: string) {
-  const t = await M.createAgentTask!({}, { input: { parentTaskId: build.id, title: slot, assignee: { user: who }, source: 'synthetic' } }, ctx(author.id));
+  const t = await M.createAgentTask!({}, { input: { parentTaskRef: build.id, title: slot, assignee: { user: who }, source: 'synthetic' } }, ctx(author.id));
   await command('assignReviewSeat', { taskRef: t.id, slot, head, supersedes }, author.id);
   return t;
 }
 async function verdict(t: any, value = 'APPROVE', head = H, who = reviewer.id) {
-  await M.startAgentTask!({}, { taskId: t.id }, ctx(who));
+  await M.startAgentTask!({}, { taskRef: t.id }, ctx(who));
   return command('recordReviewVerdict', { taskRef: t.id, head, verdict: value, node: 'hrn:node:example.test:reviews:one', receipt: 'https://example.test/receipt' }, who);
 }
 async function finish(t: any, who = reviewer.id) {
-  return M.finishAgentTask!({}, { taskId: t.id, result: { outcome: 'approved' } }, ctx(who));
+  return M.finishAgentTask!({}, { taskRef: t.id, result: { outcome: 'approved' } }, ctx(who));
 }
 async function readySeats() {
   await schedule(); await freeze();
@@ -108,7 +108,7 @@ describe('typed PR schedule and freeze', () => {
     await expect(freeze(H, owner.id)).rejects.toMatchObject(error('TASK_NOT_ASSIGNEE')); expect(await events()).toHaveLength(0);
   });
   it('requires a pull_request reference', async () => {
-    await M.updateAgentTask!({}, { taskId: build.id, input: { references: [] } }, ctx());
+    await M.updateAgentTask!({}, { taskRef: build.id, input: { references: [] } }, ctx());
     await expect(freeze()).rejects.toMatchObject(error('PR_REFERENCE_MISSING')); expect(await events()).toHaveLength(0);
   });
 });
@@ -136,7 +136,7 @@ describe('seat binding and verdicts', () => {
   });
   it.each(['CHANGES_REQUESTED', 'FAIL', 'REFUSED'])('cannot shop away %s at the same head, but a new head permits replacement', async value => {
     await schedule(['local']); await freeze(); const old = await seat('local'); await verdict(old, value); await finish(old);
-    const replacement = await M.createAgentTask!({}, { input: { parentTaskId: build.id, title: 'Replacement', assignee: { user: other.id }, source: 'synthetic' } }, ctx(author.id));
+    const replacement = await M.createAgentTask!({}, { input: { parentTaskRef: build.id, title: 'Replacement', assignee: { user: other.id }, source: 'synthetic' } }, ctx(author.id));
     const args = { taskRef: replacement.id, slot: 'local', head: H, supersedes: old.id };
     await expect(command('assignReviewSeat', args, author.id)).rejects.toMatchObject(error('REVIEW_SEAT_NOT_SUPERSEDABLE'));
     expect(await events(replacement.id)).toHaveLength(0); expect((await stored(replacement.id)).properties).toBeNull();
@@ -169,7 +169,7 @@ describe('seat binding and verdicts', () => {
   });
   it('two concurrent first assignments cannot both become current for a slot', async () => {
     await schedule(['local']); await freeze();
-    const tasks = await Promise.all(['one', 'two'].map(title => M.createAgentTask!({}, { input: { parentTaskId: build.id, title, source: 's', assignee: { user: reviewer.id } } }, ctx(author.id))));
+    const tasks = await Promise.all(['one', 'two'].map(title => M.createAgentTask!({}, { input: { parentTaskRef: build.id, title, source: 's', assignee: { user: reviewer.id } } }, ctx(author.id))));
     const results = await Promise.allSettled(tasks.map(t => command('assignReviewSeat', { taskRef: t.id, slot: 'local', head: H }, author.id)));
     expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(1);
     const rejected = results.find(r => r.status === 'rejected') as PromiseRejectedResult;
@@ -196,18 +196,18 @@ describe('seat binding and verdicts', () => {
   it('verdict requires assignment, matching head, STARTED and the assignee', async () => {
     await schedule(); await freeze(); const t = await seat('local');
     await expect(command('recordReviewVerdict', { taskRef: t.id, head: H, verdict: 'APPROVE' }, reviewer.id)).rejects.toMatchObject(error('TASK_INVALID_TRANSITION'));
-    await M.startAgentTask!({}, { taskId: t.id }, ctx(reviewer.id));
+    await M.startAgentTask!({}, { taskRef: t.id }, ctx(reviewer.id));
     await expect(command('recordReviewVerdict', { taskRef: t.id, head: H2, verdict: 'APPROVE' }, reviewer.id)).rejects.toMatchObject(error('REVIEW_HEAD_MISMATCH'));
     await expect(command('recordReviewVerdict', { taskRef: t.id, head: H, verdict: 'APPROVE' }, other.id)).rejects.toMatchObject(error('TASK_NOT_ASSIGNEE'));
     await expect(command('recordReviewVerdict', { taskRef: build.id, head: H, verdict: 'APPROVE' }, author.id)).rejects.toMatchObject(error('TASK_INVALID_TRANSITION'));
     expect((await events(t.id)).filter(e => e.type === 'review.verdict')).toHaveLength(0);
   });
   it('a started task without an assignment cannot record a verdict', async () => {
-    await M.startAgentTask!({}, { taskId: build.id }, ctx(author.id));
+    await M.startAgentTask!({}, { taskRef: build.id }, ctx(author.id));
     await expect(command('recordReviewVerdict', { taskRef: build.id, head: H, verdict: 'APPROVE' }, author.id)).rejects.toMatchObject(error('REVIEW_SEAT_UNASSIGNED'));
   });
   it('untyped resolver callers cannot invent a verdict enum value', async () => {
-    await schedule(); await freeze(); const t = await seat('local'); await M.startAgentTask!({}, { taskId: t.id }, ctx(reviewer.id));
+    await schedule(); await freeze(); const t = await seat('local'); await M.startAgentTask!({}, { taskRef: t.id }, ctx(reviewer.id));
     await expect(command('recordReviewVerdict', { taskRef: t.id, head: H, verdict: 'APPROVED' }, reviewer.id)).rejects.toMatchObject(error('BAD_USER_INPUT'));
     expect((await events(t.id)).filter(e => e.type === 'review.verdict')).toHaveLength(0);
   });
@@ -224,7 +224,7 @@ describe('readiness uses only event facts', () => {
     await schedule(['local']); await freeze(); const t = await seat('local');
     expect((await readiness()).ready).toBe(false);
     await verdict(t); expect((await readiness()).ready).toBe(false);
-    await M.cancelAgentTask!({}, { taskId: t.id }, ctx(author.id)); expect((await readiness()).ready).toBe(false);
+    await M.cancelAgentTask!({}, { taskRef: t.id }, ctx(author.id)); expect((await readiness()).ready).toBe(false);
     const before = await events(); const props = (await stored()).properties;
     await expect(command('recordReadyCall', { taskRef: build.id, head: H }, author.id)).rejects.toMatchObject(error('PR_NOT_READY'));
     expect(await events()).toEqual(before); expect((await stored()).properties).toEqual(props);
@@ -252,14 +252,14 @@ describe('readiness uses only event facts', () => {
     expect((await readiness()).slots[0].counts).toBe(false);
   });
   it('opaque property edits still succeed but cannot forge a schedule or freeze', async () => {
-    await M.updateAgentTask!({}, { taskId: build.id, input: { properties: { 'review.schedule': ['local'], 'pr.head': H, 'pr.ready': true } } }, ctx(author.id));
+    await M.updateAgentTask!({}, { taskRef: build.id, input: { properties: { 'review.schedule': ['local'], 'pr.head': H, 'pr.ready': true } } }, ctx(author.id));
     await expect(readiness()).rejects.toMatchObject(error('PR_HEAD_NOT_FROZEN'));
     await freeze(); await expect(readiness()).rejects.toMatchObject(error('REVIEW_SCHEDULE_MISSING'));
   });
   it('opaque edits cannot forge a verdict, assigned slot or head, or lower the schedule', async () => {
     await schedule(); await freeze(); const t = await seat('local');
-    await M.updateAgentTask!({}, { taskId: t.id, input: { properties: { 'review.slot': 'security', 'review.head': H, 'review.verdict': 'APPROVE' } } }, ctx(reviewer.id));
-    await M.updateAgentTask!({}, { taskId: build.id, input: { properties: { 'review.schedule': [] } } }, ctx(author.id));
+    await M.updateAgentTask!({}, { taskRef: t.id, input: { properties: { 'review.slot': 'security', 'review.head': H, 'review.verdict': 'APPROVE' } } }, ctx(reviewer.id));
+    await M.updateAgentTask!({}, { taskRef: build.id, input: { properties: { 'review.schedule': [] } } }, ctx(author.id));
     const r = await readiness(); expect(r.ready).toBe(false); expect(r.slots).toHaveLength(3);
     expect(r.slots[0]).toMatchObject({ slot: 'local', currentTaskId: t.id, verdict: null, counts: false });
   });
@@ -394,7 +394,7 @@ describe('protocol event feed compatibility', () => {
     const api = new ApolloServer({ typeDefs, resolvers: { ...resolvers, Query: settledTeamEventQueries(resolvers.Query, db) } });
     try {
       const r = await api.executeOperation({
-        query: 'query($app: ID!, $task: ID!) { agentTeamEvents(appRef:$app,taskId:$task) { type payload } }',
+        query: 'query($app: ID!, $task: ID!) { agentTeamEvents(appRef:$app,taskRef:$task) { type payload } }',
         variables: { app: app.id, task: build.id },
       }, { contextValue: ctx() });
       const body = (r.body as any).singleResult;
@@ -404,7 +404,7 @@ describe('protocol event feed compatibility', () => {
         { type: 'pr.frozen', payload: { head: H, pullRequest: 'https://github.com/example/project/pull/1' } },
         { type: 'pr.ready', payload: { head: H } },
       ]));
-      const child=await api.executeOperation({query:'query($app: ID!, $task: ID!) { agentTeamEvents(appRef:$app,taskId:$task) { type payload } }',variables:{app:app.id,task:seats[0]!.id}}, {contextValue:ctx()});
+      const child=await api.executeOperation({query:'query($app: ID!, $task: ID!) { agentTeamEvents(appRef:$app,taskRef:$task) { type payload } }',variables:{app:app.id,task:seats[0]!.id}}, {contextValue:ctx()});
       const answer=(child.body as any).singleResult;expect(answer.errors).toBeUndefined();
       expect(answer.data.agentTeamEvents).toEqual(expect.arrayContaining([
         {type:'review.seat.assigned',payload:{slot:'local',head:H,supersedes:null}},
@@ -421,7 +421,7 @@ describe('gate amendment: frozen actor and negative schedule', () => {
     const t = await seat('local', H, author.id);
     await verdict(t, 'APPROVE', H, author.id); await finish(t, author.id);
     expect((await readiness()).ready).toBe(false);
-    await M.reassignAgentTask!({}, { taskId: build.id, assignee: { user: other.id } }, ctx());
+    await M.reassignAgentTask!({}, { taskRef: build.id, assignee: { user: other.id } }, ctx());
     expect((await readiness()).slots[0].counts).toBe(false);
     expect((await readiness()).ready).toBe(false);
   });
@@ -455,7 +455,7 @@ describe('LOCAL delta: finished negative verdicts and seat provenance', () => {
     expect((await events()).filter(e => e.type === 'pr.ready')).toHaveLength(0);
   });
   it('only the build assignee can create its seat and cannot give it another owner', async () => {
-    const input = { parentTaskId: build.id, title: 'Seat', source: 'synthetic', assignee: { user: reviewer.id } };
+    const input = { parentTaskRef: build.id, title: 'Seat', source: 'synthetic', assignee: { user: reviewer.id } };
     await expect(M.createAgentTask!({}, { input }, ctx(other.id))).rejects.toMatchObject(error('TASK_NOT_ASSIGNEE'));
     await expect(M.createAgentTask!({}, { input: { ...input, owner: { user: other.id } } }, ctx(author.id)))
       .rejects.toMatchObject(error('TASK_CHILD_OWNER_MISMATCH'));
@@ -483,12 +483,12 @@ describe('SECURITY delta: negative history survives bounce and reassignment', ()
   });
   it.each(['CHANGES_REQUESTED', 'FAIL', 'REFUSED'])('another reviewer cannot replace %s on the same seat and head, but its author may re-rate', async v => {
     await schedule(['local']); await freeze(); const t = await seat('local'); await verdict(t, v);
-    await M.reassignAgentTask!({}, { taskId: t.id, assignee: { user: other.id } }, ctx(author.id));
+    await M.reassignAgentTask!({}, { taskRef: t.id, assignee: { user: other.id } }, ctx(author.id));
     const before = await events(t.id); const properties = (await stored(t.id)).properties;
     await expect(command('recordReviewVerdict', { taskRef:t.id, head:H, verdict:'APPROVE' }, other.id))
       .rejects.toMatchObject(error('REVIEW_SEAT_NOT_SUPERSEDABLE'));
     expect(await events(t.id)).toEqual(before); expect((await stored(t.id)).properties).toEqual(properties);
-    await M.reassignAgentTask!({}, { taskId: t.id, assignee: { user: reviewer.id } }, ctx(author.id));
+    await M.reassignAgentTask!({}, { taskRef: t.id, assignee: { user: reviewer.id } }, ctx(author.id));
     await command('recordReviewVerdict', { taskRef:t.id, head:H, verdict:'APPROVE' }, reviewer.id);
     await finish(t); expect((await readiness()).ready).toBe(true);
     await freeze(); // newest verdict per child wins, not any historical negative
@@ -498,8 +498,8 @@ describe('SECURITY delta: negative history survives bounce and reassignment', ()
 
 describe('SECURITY delta: ended rows and mirrored property history', () => {
   async function end(id:string, who:string, ownerId:string, status:string) {
-    if (status === 'cancelled') await M.cancelAgentTask!({}, { taskId:id }, ctx(ownerId));
-    else { await M.startAgentTask!({}, { taskId:id }, ctx(who)); await M.finishAgentTask!({}, { taskId:id, result:{outcome:'done'} }, ctx(who)); }
+    if (status === 'cancelled') await M.cancelAgentTask!({}, { taskRef:id }, ctx(ownerId));
+    else { await M.startAgentTask!({}, { taskRef:id }, ctx(who)); await M.finishAgentTask!({}, { taskRef:id, result:{outcome:'failed'} }, ctx(who)); } // #5036: a seat with no verdict finishes only as failed or cancelled
   }
   it.each(['cancelled','finished'])('schedule and freeze refuse a %s build without an event or property change', async status => {
     await end(build.id, author.id, owner.id, status);
@@ -516,7 +516,7 @@ describe('SECURITY delta: ended rows and mirrored property history', () => {
   });
   it.each(['cancelled','finished'])('assignment refuses a %s seat', async status => {
     await schedule(['local']); await freeze();
-    const t=await M.createAgentTask!({}, {input:{parentTaskId:build.id,title:'Seat',source:'synthetic',assignee:{user:reviewer.id}}},ctx(author.id));
+    const t=await M.createAgentTask!({}, {input:{parentTaskRef:build.id,title:'Seat',source:'synthetic',assignee:{user:reviewer.id}}},ctx(author.id));
     await end(t.id,reviewer.id,author.id,status);
     const before=await events(t.id),properties=(await stored(t.id)).properties;
     await expect(command('assignReviewSeat',{taskRef:t.id,slot:'local',head:H},author.id)).rejects.toMatchObject(error('TASK_ENDED'));
@@ -559,37 +559,37 @@ describe('Worker actor floor and register disclosure', () => {
     worker=await db.worker.create({data:{...WORKER_SIGNATURE_DEFAULTS,appId:app.id,agentId:roleAgent.id,name:'Author',slug:'author',heldByUserId:author.id}});
   });
   async function workerSeat() {
-    const t=await M.createAgentTask!({}, {input:{parentTaskId:build.id,title:'Worker seat',source:'synthetic',assignee:{worker:worker.id}}},ctx(author.id));
+    const t=await M.createAgentTask!({}, {input:{parentTaskRef:build.id,title:'Worker seat',source:'synthetic',assignee:{worker:worker.id}}},ctx(author.id));
     await command('assignReviewSeat',{taskRef:t.id,slot:'local',head:H},author.id);
     return t;
   }
   async function workerVerdict(t:any) {
     await bound(async()=>{
-      await M.startAgentTask!({}, {taskId:t.id},ctx(author.id));
+      await M.startAgentTask!({}, {taskRef:t.id},ctx(author.id));
       await command('recordReviewVerdict',{taskRef:t.id,head:H,verdict:'APPROVE'},author.id);
-      await M.finishAgentTask!({}, {taskId:t.id,result:{outcome:'approved'}},ctx(author.id));
+      await M.finishAgentTask!({}, {taskRef:t.id,result:{outcome:'approved'}},ctx(author.id));
     });
     const event=await db.agentTeamEvent.findFirstOrThrow({where:{taskId:t.id,type:'review.verdict'}});
     expect(event.actorWorkerId).toBe(worker.id);
   }
   it('excludes the current Worker assignee when a different person froze the head',async()=>{
     await schedule(['local']);await freeze();const t=await workerSeat();await workerVerdict(t);
-    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{worker:worker.id}},ctx());
+    await M.reassignAgentTask!({}, {taskRef:build.id,assignee:{worker:worker.id}},ctx());
     expect((await readiness()).slots[0].counts).toBe(false);
   });
   it('excludes the frozen Worker actor after the build is reassigned to a different person',async()=>{
     await schedule(['local']);
-    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{worker:worker.id}},ctx());
+    await M.reassignAgentTask!({}, {taskRef:build.id,assignee:{worker:worker.id}},ctx());
     let t:any;
     await bound(async()=>{await freeze();t=await workerSeat();});
     await workerVerdict(t);
-    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{user:other.id}},ctx());
+    await M.reassignAgentTask!({}, {taskRef:build.id,assignee:{user:other.id}},ctx());
     expect((await readiness()).slots[0].counts).toBe(false);
     await freeze(H,other.id);
     expect((await readiness()).slots[0].counts).toBe(false);
   });
   it('SECURITY final pins: an Agent caller without a single Team Agent is UNMAPPED',async()=>{
-    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{worker:worker.id}},ctx());
+    await M.reassignAgentTask!({}, {taskRef:build.id,assignee:{worker:worker.id}},ctx());
     expect((await bound(()=>freeze())).action.state).toBe('MAPPED');
     await db.appAgent.delete({where:{appId_agentId:{appId:app.id,agentId:teamAgent.id}}});
     expect((await bound(()=>freeze())).action).toEqual({code:'pr.frozen',state:'UNMAPPED'});
@@ -597,7 +597,7 @@ describe('Worker actor floor and register disclosure', () => {
     expect((await bound(()=>freeze())).action.state).toBe('MAPPED');
   });
   it.each(['team','agent'])('an inherited unreadable %s chain memory withholds even a nearer readable mapping (#3470, ruling 0163)',async side=>{
-    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{worker:worker.id}},ctx());
+    await M.reassignAgentTask!({}, {taskRef:build.id,assignee:{worker:worker.id}},ctx());
     expect((await bound(()=>freeze())).action.state).toBe('MAPPED');
     const baseMemory=await db.memory.create({data:{name:'Unreadable base',urn:`${app.urn}:hidden-base`,class:'system',ownerUserId:other.id}});
     const baseAgent=await db.agent.create({data:{name:'Hidden base',urn:`${app.urn}:hidden-agent`,systemMemoryId:baseMemory.id,ownerUserId:other.id}});
@@ -607,7 +607,7 @@ describe('Worker actor floor and register disclosure', () => {
     expect((await events()).filter(e=>e.type==='pr.frozen')).toHaveLength(2);
   });
   it('an unreadable chain memory withholds the answer, with or without a readable nearer entry (#3470, ruling 0163)',async()=>{
-    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{worker:worker.id}},ctx());
+    await M.reassignAgentTask!({}, {taskRef:build.id,assignee:{worker:worker.id}},ctx());
     await db.node.deleteMany({where:{memoryId:teamAgent.systemMemoryId,loc:'register:pr.frozen'}});
     const farMemory=await db.memory.create({data:{name:'Readable far entry',urn:`${app.urn}:far-entry`,class:'system',ownerUserId:author.id}});
     const far=await db.agent.create({data:{name:'Far entry',urn:`${app.urn}:far-entry-agent`,systemMemoryId:farMemory.id,ownerUserId:author.id}});
@@ -621,7 +621,7 @@ describe('Worker actor floor and register disclosure', () => {
     expect((await bound(()=>freeze())).action).toEqual({code:'pr.frozen',state:'WITHHELD'});
   });
   it.each(['unreadable','missing'])('a readable entry with a %s nearest task: unreadable chain is WITHHELD, missing task is UNRESOLVED without a task URN (#3470)',async mode=>{
-    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{worker:worker.id}},ctx());
+    await M.reassignAgentTask!({}, {taskRef:build.id,assignee:{worker:worker.id}},ctx());
     await db.node.deleteMany({where:{memoryId:roleMemory.id,loc:'tasks:review'}});
     if(mode==='unreadable'){
       const farMemory=await db.memory.create({data:{name:'Readable far task',urn:`${app.urn}:far-task`,class:'system',ownerUserId:author.id}});
@@ -638,7 +638,7 @@ describe('Worker actor floor and register disclosure', () => {
     expect((await bound(()=>freeze())).action).toEqual(mode==='unreadable'?{code:'pr.frozen',state:'WITHHELD'}:{code:'pr.frozen',state:'MAPPED',taskLoc:'tasks:review',taskUrn:`hrn:node:${roleMemory.urn}:tasks:review`});
   });
   it.each(['team','agent'])('root-memory readability probe: unreadable %s root does not disclose a task URN',async kind=>{
-    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{worker:worker.id}},ctx());
+    await M.reassignAgentTask!({}, {taskRef:build.id,assignee:{worker:worker.id}},ctx());
     const rootAgent=kind==='team'?teamAgent:roleAgent;
     const rootId=kind==='team'?teamAgent.systemMemoryId:roleMemory.id;
     await db.agent.update({where:{id:rootAgent.id},data:{ownerUserId:outsider.id}});
@@ -654,7 +654,7 @@ describe('Worker actor floor and register disclosure', () => {
     expect((await bound(()=>freeze())).action).toEqual({code:'pr.frozen',state:'MAPPED',taskLoc:'tasks:review',taskUrn:`hrn:node:${roleMemory.urn}:tasks:review`});
   });
   it('does not resolve the task of an Agent retired after the command committed',async()=>{
-    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{worker:worker.id}},ctx());
+    await M.reassignAgentTask!({}, {taskRef:build.id,assignee:{worker:worker.id}},ctx());
     const original=RegisterLookup.prototype.entry;
     let retired=false;
     const spy=vi.spyOn(RegisterLookup.prototype,'entry').mockImplementation(async function(this:RegisterLookup,code){
@@ -682,7 +682,7 @@ describe('normalization and first-schedule controls', () => {
     expect((await readiness(H)).head).toBe(H);
   });
   it.each(['node','receipt'])('a control character in %s is refused before an event or mirror change',async field=>{
-    await schedule(['local']);await freeze();const t=await seat('local');await M.startAgentTask!({}, {taskId:t.id},ctx(reviewer.id));
+    await schedule(['local']);await freeze();const t=await seat('local');await M.startAgentTask!({}, {taskRef:t.id},ctx(reviewer.id));
     const before=await events(t.id), properties=(await stored(t.id)).properties;
     await expect(command('recordReviewVerdict',{taskRef:t.id,head:H,verdict:'APPROVE',[field]:'one'+String.fromCharCode(10)+'two'},reviewer.id))
       .rejects.toMatchObject(error('BAD_USER_INPUT'));
@@ -724,7 +724,7 @@ describe('BLIND delta new refreeze floor probe',()=>{
   await schedule(['local']);await freeze();const t=await seat('local',H,author.id);
   await verdict(t,'APPROVE',H,author.id);await finish(t,author.id);
   expect((await readiness()).slots[0].counts).toBe(false);
-  await M.reassignAgentTask!({}, {taskId:build.id,assignee:{user:other.id}},ctx());
+  await M.reassignAgentTask!({}, {taskRef:build.id,assignee:{user:other.id}},ctx());
   expect((await readiness()).slots[0].counts).toBe(false);
   await freeze(H,other.id);
   const answer=await readiness();
@@ -737,7 +737,7 @@ describe('BLIND delta new refreeze floor probe',()=>{
 describe('late verdicts on superseded seats',()=>{
   it.each(['CHANGES_REQUESTED','FAIL','REFUSED'])('a late %s at H blocks the slot until a new head',async value=>{
     await schedule(['local']);await freeze();
-    const old=await seat('local');await M.startAgentTask!({}, {taskId:old.id},ctx(reviewer.id));
+    const old=await seat('local');await M.startAgentTask!({}, {taskRef:old.id},ctx(reviewer.id));
     const now=await seat('local',H,other.id,old.id);await verdict(now,'APPROVE',H,other.id);await finish(now,other.id);
     expect((await readiness()).ready).toBe(true);
     await command('recordReviewVerdict',{taskRef:old.id,head:H,verdict:value},reviewer.id);
@@ -752,7 +752,7 @@ describe('late verdicts on superseded seats',()=>{
 describe('same-head floor scope controls',()=>{
   it('the original superseded reviewer may re-rate its own negative without leaving an older negative effective',async()=>{
     await schedule(['local']);await freeze();const old=await seat('local');
-    await M.startAgentTask!({}, {taskId:old.id},ctx(reviewer.id));
+    await M.startAgentTask!({}, {taskRef:old.id},ctx(reviewer.id));
     const now=await seat('local',H,other.id,old.id);await verdict(now,'APPROVE',H,other.id);await finish(now,other.id);
     await command('recordReviewVerdict',{taskRef:old.id,head:H,verdict:'FAIL'},reviewer.id);
     expect((await readiness()).ready).toBe(false);
@@ -762,9 +762,9 @@ describe('same-head floor scope controls',()=>{
   it('a freezer at an earlier head may review a new head frozen by a different implementer',async()=>{
     await schedule(['local']);await freeze();
     const review=await seat('local',H,author.id);
-    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{user:other.id}},ctx());
+    await M.reassignAgentTask!({}, {taskRef:build.id,assignee:{user:other.id}},ctx());
     await freeze(H2,other.id);
-    const next=await M.createAgentTask!({}, {input:{parentTaskId:build.id,title:'New head',source:'synthetic',assignee:{user:author.id}}},ctx(other.id));
+    const next=await M.createAgentTask!({}, {input:{parentTaskRef:build.id,title:'New head',source:'synthetic',assignee:{user:author.id}}},ctx(other.id));
     await command('assignReviewSeat',{taskRef:next.id,slot:'local',head:H2,supersedes:review.id},other.id);
     await verdict(next,'APPROVE',H2,author.id);await finish(next,author.id);
     expect((await readiness(H2)).ready).toBe(true);
@@ -775,7 +775,7 @@ describe('same-head floor scope controls',()=>{
 describe('late verdicts after a clean slot is dropped',()=>{
   it.each(['CHANGES_REQUESTED','FAIL','REFUSED'])('a late %s from an unscheduled child blocks the head',async value=>{
     await schedule(['local','blind']);await freeze();const old=await seat('local');
-    await M.startAgentTask!({}, {taskId:old.id},ctx(reviewer.id));
+    await M.startAgentTask!({}, {taskRef:old.id},ctx(reviewer.id));
     const kept=await seat('blind',H,other.id);await verdict(kept,'APPROVE',H,other.id);await finish(kept,other.id);
     await schedule(['blind']);expect((await readiness()).ready).toBe(true);
     await command('recordReviewVerdict',{taskRef:old.id,head:H,verdict:value},reviewer.id);
@@ -814,8 +814,8 @@ describe('SECURITY final pins: freezer actor scope',()=>{
     const a=await seat('local',H,author.id),b=await seat('blind',H,other.id);
     await verdict(a,'APPROVE',H,author.id);await finish(a,author.id);
     await verdict(b,'APPROVE',H,other.id);await finish(b,other.id);
-    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{user:other.id}},ctx());await freeze(H,other.id);
-    await M.reassignAgentTask!({}, {taskId:build.id,assignee:{user:reviewer.id}},ctx());
+    await M.reassignAgentTask!({}, {taskRef:build.id,assignee:{user:other.id}},ctx());await freeze(H,other.id);
+    await M.reassignAgentTask!({}, {taskRef:build.id,assignee:{user:reviewer.id}},ctx());
     const answer=await readiness();expect(answer.slots).toHaveLength(2);
     expect(answer.slots.map((slot:any)=>slot.counts)).toEqual([false,false]);expect(answer.ready).toBe(false);
   });

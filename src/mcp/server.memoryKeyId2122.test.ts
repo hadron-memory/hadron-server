@@ -2,12 +2,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
-import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import type { Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from './server.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { generateId } from '../lib/id.js';
 import { sessionKeyCache } from '../lib/sessionKeyCache.js';
 import { recordUrnRename } from '../lib/urnAlias.js';
+import { encryptWithSecret } from '../test/encryptMemoryWithSecret.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -34,7 +35,7 @@ beforeEach(async () => {
   memoryId = generateId();
   await db.memory.create({ data: { id: memoryId, organizationId: orgId, name: 'Vault', urn: URN, class: 'private', userId: ownerId } });
   await db.node.create({ data: { memoryId, loc: 'secret', name: 'Secret', content: 'key2122 plaintext' } });
-  await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, passphrase: PASS }, { db, roles: ['ADMIN'], userId: ownerId } as Context);
+  await encryptWithSecret({}, { memoryRef: memoryId, passphrase: PASS }, { db, roles: ['ADMIN'], userId: ownerId } as Context);
 });
 afterEach(() => sessionKeyCache.clear());
 
@@ -65,13 +66,13 @@ describe('#2122 lock/unlock documented memory IDs', () => {
     const foreign = mcp(strangerId, 'key2122-stranger');
     const call = (server: ReturnType<typeof mcp>, input: string) => server.callToolText(tool, { memoryUrn: input, ...(tool === 'hadron_unlock_memory' ? { passphrase: PASS } : {}) });
     for (const input of [memoryId, FULL_URN, generateId(), 'hrn:mem:key2122.example:absent']) {
-      expect(await call(foreign, input)).toBe(`Memory "${input}" not found.`);
+      expect(await call(foreign, input)).toBe('Memory not found.');
       expect(sessionKeyCache.getByMemoryId(memoryId)).toBe(ownerKey);
       expect(sessionKeyCache.refCount(memoryId)).toBe(1);
     }
     await db.memory.update({ where: { id: memoryId }, data: { deletedAt: new Date() } });
     for (const input of [memoryId, FULL_URN]) {
-      expect(await call(owner, input)).toBe(`Memory "${input}" not found.`);
+      expect(await call(owner, input)).toBe('Memory not found.');
       expect(sessionKeyCache.getByMemoryId(memoryId)).toBe(ownerKey);
       expect(sessionKeyCache.refCount(memoryId)).toBe(1);
     }

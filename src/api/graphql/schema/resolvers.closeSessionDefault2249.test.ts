@@ -68,8 +68,8 @@ describe('#2249 every create path defaults the flag to false', () => {
 
   it('a worker creating a child task (worker caller, child of its own started task)', async () => {
     const parent = await create(ctx(member.id), { assignee: { worker: anne.id } });
-    await asWorker(anne, () => M.startAgentTask({}, { taskId: parent.id }, ctx(member.id)));
-    const child = await asWorker(anne, () => create(ctx(member.id), { parentTaskId: parent.id }));
+    await asWorker(anne, () => M.startAgentTask({}, { taskRef: parent.id }, ctx(member.id)));
+    const child = await asWorker(anne, () => create(ctx(member.id), { parentTaskRef: parent.id }));
     expect(child.parentTaskId).toBe(parent.id);
     expect(child.closeSessionWhenDone).toBe(false);
     expect(await stored(child.id)).toBe(false);
@@ -107,23 +107,23 @@ describe('#2249 every create path defaults the flag to false', () => {
 
 describe('#2249 the flag still drives the session-end request', () => {
   it.each([
-    ['finish', (id: string) => asWorker(anne, () => M.finishAgentTask({}, { taskId: id, result: { outcome: 'succeeded' } }, ctx(member.id)))],
-    ['cancel', (id: string) => M.cancelAgentTask({}, { taskId: id }, ctx(member.id))],
+    ['finish', (id: string) => asWorker(anne, () => M.finishAgentTask({}, { taskRef: id, result: { outcome: 'succeeded' } }, ctx(member.id)))],
+    ['cancel', (id: string) => M.cancelAgentTask({}, { taskRef: id }, ctx(member.id))],
   ] as const)('explicit true asks the assignee session to end on %s', async (_name, end) => {
     await openSession(anne);
     const t = await create(ctx(member.id), { assignee: { worker: anne.id }, closeSessionWhenDone: true });
-    await asWorker(anne, () => M.startAgentTask({}, { taskId: t.id }, ctx(member.id)));
+    await asWorker(anne, () => M.startAgentTask({}, { taskRef: t.id }, ctx(member.id)));
     await end(t.id);
     expect(await endRequests(t.id)).toBe(1);
   });
 
   it.each([
-    ['finish', (id: string) => asWorker(anne, () => M.finishAgentTask({}, { taskId: id, result: { outcome: 'succeeded' } }, ctx(member.id)))],
-    ['cancel', (id: string) => M.cancelAgentTask({}, { taskId: id }, ctx(member.id))],
+    ['finish', (id: string) => asWorker(anne, () => M.finishAgentTask({}, { taskRef: id, result: { outcome: 'succeeded' } }, ctx(member.id)))],
+    ['cancel', (id: string) => M.cancelAgentTask({}, { taskRef: id }, ctx(member.id))],
   ] as const)('an omitted flag asks for nothing on %s', async (_name, end) => {
     await openSession(anne);
     const t = await create(ctx(member.id), { assignee: { worker: anne.id } });
-    await asWorker(anne, () => M.startAgentTask({}, { taskId: t.id }, ctx(member.id)));
+    await asWorker(anne, () => M.startAgentTask({}, { taskRef: t.id }, ctx(member.id)));
     await end(t.id);
     expect(await endRequests(t.id)).toBe(0);
   });
@@ -132,14 +132,14 @@ describe('#2249 the flag still drives the session-end request', () => {
 describe('#2249 assign and reassign keep the stored value when the flag is omitted', () => {
   it.each([true, false])('assign, stored %s', async (value) => {
     const t = await create(ctx(member.id), { closeSessionWhenDone: value });
-    const out = await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: anne.id } }, ctx(member.id));
+    const out = await M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: anne.id } }, ctx(member.id));
     expect(out.closeSessionWhenDone).toBe(value);
     expect(await stored(t.id)).toBe(value);
   });
 
   it.each([true, false])('reassign, stored %s', async (value) => {
     const t = await create(ctx(member.id), { assignee: { worker: anne.id }, closeSessionWhenDone: value });
-    const out = await M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: liam.id } }, ctx(member.id));
+    const out = await M.reassignAgentTask({}, { taskRef: t.id, assignee: { worker: liam.id } }, ctx(member.id));
     expect(out.closeSessionWhenDone).toBe(value);
     const ev = await db.agentTeamEvent.findFirstOrThrow({ where: { taskId: t.id, type: 'task.reassigned' } });
     expect(ev.payload).toMatchObject({ closeSessionWhenDone: value });
@@ -147,7 +147,7 @@ describe('#2249 assign and reassign keep the stored value when the flag is omitt
 
   it('an explicit value on assign still overrides the stored one', async () => {
     const t = await create(ctx(member.id), { closeSessionWhenDone: false });
-    const out = await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: anne.id }, closeSessionWhenDone: true }, ctx(member.id));
+    const out = await M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: anne.id }, closeSessionWhenDone: true }, ctx(member.id));
     expect(out.closeSessionWhenDone).toBe(true);
   });
 });
@@ -170,7 +170,7 @@ describe('#2249 existing rows are not rewritten', () => {
     const id = generateId();
     await db.$executeRaw`INSERT INTO agent_tasks (id, app_id, title, owner_user_id, assignee_worker_id, assigned_at, status, started_at, close_session_when_done, created_at, updated_at)
       VALUES (${id}, ${app.id}, 'old', ${member.id}, ${anne.id}, now(), 'started', now(), true, now(), now())`;
-    await asWorker(anne, () => M.finishAgentTask({}, { taskId: id, result: { outcome: 'succeeded' } }, ctx(member.id)));
+    await asWorker(anne, () => M.finishAgentTask({}, { taskRef: id, result: { outcome: 'succeeded' } }, ctx(member.id)));
     expect(await stored(id)).toBe(true);
     expect(await endRequests(id)).toBe(1);
   });

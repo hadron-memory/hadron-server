@@ -90,9 +90,9 @@ describe('a scope named in the call', () => {
 
   it('filter.memoryIds narrows WITHIN the scope; outside it is empty, still disclosed', async () => {
     const s = await M.createScope({}, { input: { name: 'lens', organizationRef: orgA.urn, memoryRefs: [memA1.urn, memA2.urn] } }, ctx(contributor.id));
-    const within = await Q.findNodes({}, { scope: s.id, filter: { memoryIds: [memA2.urn] } }, ctx(reader.id));
+    const within = await Q.findNodes({}, { scope: s.id, filter: { memoryRefs: [memA2.urn] } }, ctx(reader.id));
     expect(locsOf(within)).toEqual([`${memA2.id}:alpha`]);
-    const outside = await Q.findNodes({}, { scope: s.id, filter: { memoryIds: [memB.urn] } }, ctx(reader.id));
+    const outside = await Q.findNodes({}, { scope: s.id, filter: { memoryRefs: [memB.urn] } }, ctx(reader.id));
     expect(outside.hits).toEqual([]);
     expect(outside.scope.label).toBe('lens');
   });
@@ -128,8 +128,8 @@ describe('a scope named in the call', () => {
     expect(locsOf(r)).toEqual([`${memA1.id}:alpha`]);
   });
 
-  it('`global` is the organization view: orgId, else the single membership, else ORG_REQUIRED', async () => {
-    const named = await Q.findNodes({}, { scope: 'global', orgId: orgA.urn }, ctx(twoOrgs.id));
+  it('`global` is the organization view: orgRef, else the single membership, else ORG_REQUIRED', async () => {
+    const named = await Q.findNodes({}, { scope: 'global', orgRef: orgA.urn }, ctx(twoOrgs.id));
     expect(named.scope).toMatchObject({ kind: 'global', label: orgA.urn });
     expect(locsOf(named)).toEqual([`${memA1.id}:alpha`, `${memA2.id}:alpha`].sort());
     const single = await Q.findNodes({}, { scope: 'global' }, ctx(reader.id));
@@ -137,8 +137,8 @@ describe('a scope named in the call', () => {
     // The envelope says what was searched — the org's readable memories, materialised.
     expect(new Set(single.scope.memoryUrns)).toEqual(new Set([memA1.urn, memA2.urn]));
     await expect(Q.findNodes({}, { scope: 'global' }, ctx(twoOrgs.id))).rejects.toMatchObject({ extensions: { code: 'ORG_REQUIRED' } });
-    // An orgId that names nothing is a FINAL refusal — never the single membership instead (Codex on #1161).
-    await expect(Q.findNodes({}, { scope: 'global', orgId: `no-such-${generateId()}` }, ctx(reader.id))).rejects.toMatchObject({ extensions: { code: 'ORG_REQUIRED' } });
+    // An orgRef that names nothing is a FINAL refusal — never the single membership instead (Codex on #1161).
+    await expect(Q.findNodes({}, { scope: 'global', orgRef: `no-such-${generateId()}` }, ctx(reader.id))).rejects.toMatchObject({ extensions: { code: 'ORG_REQUIRED' } });
   });
 
   it("an App key's `global` is its own App's organization, on both surfaces (Codex on #1161)", async () => {
@@ -168,10 +168,26 @@ describe('a scope named in the call', () => {
 describe('#1173 — a refusal states the condition, never another surface\'s remedy', () => {
   // The CLI, MCP and the portal read the SAME string, so a remedy phrased in
   // one surface's vocabulary is unactionable on the other two: `appRef` and
-  // `orgId` are GraphQL argument names, `hadron_set_active_org` is an MCP tool.
+  // `orgRef` are GraphQL argument names, `hadron_set_active_org` is an MCP tool.
   // A CLI user can type none of them; a portal user can click none of them.
   // `conventions:the-error-code-is-the-contract-the-prose-is-not`.
-  const FOREIGN_VOCABULARY = /appRef|orgId|scopeRef|hadron_|\(MCP\)|\(GraphQL\)/;
+  // #5188: the argument was renamed orgId → orgRef (#5166), so the guard grew
+  // `orgRef`; `orgId` stays so a message drifting back to the old name is
+  // still caught. The control test below pins every term.
+  const FOREIGN_VOCABULARY = /appRef|orgRef|orgId|scopeRef|hadron_|\(MCP\)|\(GraphQL\)/;
+
+  it('#5188 control: the vocabulary guard knows every current argument name, so a green not.toMatch is proof of absence', async () => {
+    // A refusal message that DID say `orgRef` (or any other term) must be
+    // caught: each term matches on its own. Without this, dropping a renamed
+    // argument from the pattern would leave every `not.toMatch` green while
+    // proving nothing — the mutant the #5188 seat runs removes `orgRef` from
+    // FOREIGN_VOCABULARY and this goes red.
+    for (const term of ['appRef', 'orgRef', 'orgId', 'scopeRef', 'hadron_set_active_org', '(MCP)', '(GraphQL)']) {
+      expect(`a remedy that says ${term} here`).toMatch(FOREIGN_VOCABULARY);
+    }
+    // And the negative half: a message with none of the vocabulary stays green.
+    expect('name an organization to scope this search').not.toMatch(FOREIGN_VOCABULARY);
+  });
 
   const refusalOf = async (call: Promise<unknown>) => {
     try {
@@ -217,7 +233,7 @@ describe('#1173 — a refusal states the condition, never another surface\'s rem
     const outside = await db.organization.create({
       data: { id: generateId(), name: 'ss-outside', urn: `ss-outside-${generateId()}` },
     });
-    const foreign = await refusalOf(Q.findNodes({}, { scope: 'global', orgId: outside.urn }, ctx(twoOrgs.id)));
+    const foreign = await refusalOf(Q.findNodes({}, { scope: 'global', orgRef: outside.urn }, ctx(twoOrgs.id)));
     expect(foreign.extensions?.code).toBe('ORG_REQUIRED');
     expect(foreign.extensions).not.toHaveProperty('missing');
     expect((foreign.extensions?.memberOrgIds as string[]).length).toBeGreaterThan(0);
@@ -225,7 +241,7 @@ describe('#1173 — a refusal states the condition, never another surface\'s rem
     // A ref that names nothing takes the same branch, so it must not gain the
     // hint either. (Its `memberOrgIds` comes back empty — a separate, older
     // inconsistency in the same refusal, reported rather than changed here.)
-    const unknown = await refusalOf(Q.findNodes({}, { scope: 'global', orgId: `no-such-${generateId()}` }, ctx(twoOrgs.id)));
+    const unknown = await refusalOf(Q.findNodes({}, { scope: 'global', orgRef: `no-such-${generateId()}` }, ctx(twoOrgs.id)));
     expect(unknown.extensions?.code).toBe('ORG_REQUIRED');
     expect(unknown.extensions).not.toHaveProperty('missing');
   });

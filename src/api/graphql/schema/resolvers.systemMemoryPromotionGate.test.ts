@@ -42,10 +42,11 @@ async function refusal(p: Promise<unknown>): Promise<GraphQLError> {
 }
 
 /** The bytes a client sees: message plus every extension. */
-// #4140: a not-found now names the caller's OWN reference (cor:api:140:03), so the ref is masked before
-// answers are compared: missing, deleted and unreadable must still be byte-identical apart from it.
-const wire = (e: GraphQLError) => JSON.stringify({
-  message: e.message.replace(/[0-9a-f]{32}/g, '<ref>'),
+// #4140: a not-found now names the caller's OWN reference (cor:api:140:03), so ONLY that ref is masked before
+// answers are compared: missing, deleted and unreadable must still be byte-identical apart from it. #4218: any
+// OTHER 32-hex token (a hidden memory's id, an owner org's id) stays in the bytes, so a leak fails the compare.
+const wire = (e: GraphQLError, callerRef: string) => JSON.stringify({
+  message: e.message.split(callerRef).join('<ref>'),
   extensions: e.extensions ?? ((e as unknown as { code?: string }).code ? { code: (e as unknown as { code: string }).code } : {}),
 });
 
@@ -59,10 +60,8 @@ let ownHolding: { id: string }; // ownerAdmin's per-user holding of Agent A
 
 async function seedConversations(systemMemoryId: string) {
   const nodes = [
-    { loc: 'conversations', name: 'conversations' },
     { loc: 'conversations:research', name: 'research', data: { stageOrder: ['scope'], isSetup: false } },
     { loc: 'conversations:research:scope', name: 'scope', data: { promptRef: 'prompts:research:scope' } },
-    { loc: 'prompts', name: 'prompts' },
     { loc: 'prompts:research', name: 'research' },
     { loc: 'prompts:research:scope', name: 'scope', content: 'Scope the research.' },
   ];
@@ -167,7 +166,7 @@ describe('fixture', () => {
 describe('createAgent(systemMemoryId)', () => {
   it('an org ADMIN who cannot read a member\'s holding cannot promote it', async () => {
     const err = await refusal(M.createAgent({}, { orgRef: org.id, name: 'B', systemMemoryRef: holding.id }, userCtx(admin.id)));
-    expect(JSON.parse(wire(err))).toEqual({ message: 'MEMORY_NOT_FOUND: <ref>', extensions: { code: 'MEMORY_NOT_FOUND' } });
+    expect(JSON.parse(wire(err, holding.id))).toEqual({ message: 'MEMORY_NOT_FOUND: nothing found for the given ref.', extensions: { code: 'MEMORY_NOT_FOUND' } });
     await expectUnpromoted(holding.id);
   });
 
@@ -185,10 +184,10 @@ describe('createAgent(systemMemoryId)', () => {
     });
     const answers = [];
     for (const target of [holding.id, generateId(), deleted.id]) {
-      answers.push(wire(await refusal(M.createAgent({}, { orgRef: org.id, name: 'B', systemMemoryRef: target }, userCtx(admin.id)))));
+      answers.push(wire(await refusal(M.createAgent({}, { orgRef: org.id, name: 'B', systemMemoryRef: target }, userCtx(admin.id))), target));
     }
     expect(new Set(answers).size).toBe(1);
-    expect(JSON.parse(answers[0]!)).toEqual({ message: 'MEMORY_NOT_FOUND: <ref>', extensions: { code: 'MEMORY_NOT_FOUND' } });
+    expect(JSON.parse(answers[0]!)).toEqual({ message: 'MEMORY_NOT_FOUND: nothing found for the given ref.', extensions: { code: 'MEMORY_NOT_FOUND' } });
   });
 
   it('CONTROL: a readable plain org memory is still promoted', async () => {
@@ -205,7 +204,7 @@ describe('updateAgent(systemMemoryId) first attach', () => {
   it('pre-lock site: an org ADMIN who cannot read a member\'s holding cannot attach it', async () => {
     const c = await brainlessAgent('C');
     const err = await refusal(M.updateAgent({}, { ref: c.id, systemMemoryRef: holding.id }, userCtx(admin.id)));
-    expect(JSON.parse(wire(err))).toEqual({ message: 'MEMORY_NOT_FOUND: <ref>', extensions: { code: 'MEMORY_NOT_FOUND' } });
+    expect(JSON.parse(wire(err, holding.id))).toEqual({ message: 'MEMORY_NOT_FOUND: nothing found for the given ref.', extensions: { code: 'MEMORY_NOT_FOUND' } });
     await expectUnpromoted(holding.id);
   });
 
@@ -237,10 +236,10 @@ describe('updateAgent(systemMemoryId) first attach', () => {
     });
     const answers = [];
     for (const target of [holding.id, generateId(), deleted.id]) {
-      answers.push(wire(await refusal(M.updateAgent({}, { ref: c.id, systemMemoryRef: target }, userCtx(admin.id)))));
+      answers.push(wire(await refusal(M.updateAgent({}, { ref: c.id, systemMemoryRef: target }, userCtx(admin.id))), target));
     }
     expect(new Set(answers).size).toBe(1);
-    expect(JSON.parse(answers[0]!)).toEqual({ message: 'MEMORY_NOT_FOUND: <ref>', extensions: { code: 'MEMORY_NOT_FOUND' } });
+    expect(JSON.parse(answers[0]!)).toEqual({ message: 'MEMORY_NOT_FOUND: nothing found for the given ref.', extensions: { code: 'MEMORY_NOT_FOUND' } });
   });
 
   it('CONTROL: a readable plain org memory is still attached', async () => {
@@ -401,7 +400,7 @@ describe('the target must be writable, not a group memory, and the platform ADMI
       data: { id: generateId(), name: 'gone', urn: `gone-${generateId()}`, organizationId: org.id, class: 'knowledge', deletedAt: new Date() },
     });
     const err = await refusal(M.createAgent({}, { orgRef: org.id, name: 'B', systemMemoryRef: deleted.id }, { db, userId: pa.id, roles: ['ADMIN'] } as Context));
-    expect(JSON.parse(wire(err)).extensions.code).toBe('MEMORY_NOT_FOUND');
+    expect(JSON.parse(wire(err, deleted.id)).extensions.code).toBe('MEMORY_NOT_FOUND');
   });
 });
 
@@ -432,7 +431,7 @@ describe('a promotion target whose owner moves before the anchors are held (priv
   let orgB: { id: string };
   let orgC: { id: string };
   let foreignOwner: { id: string }; // OWNER of B and C; the caller is in neither
-  const NOT_FOUND = { message: 'MEMORY_NOT_FOUND: <ref>', extensions: { code: 'MEMORY_NOT_FOUND' } };
+  const NOT_FOUND = { message: 'MEMORY_NOT_FOUND: nothing found for the given ref.', extensions: { code: 'MEMORY_NOT_FOUND' } };
 
   beforeEach(async () => {
     const s = generateId().toLowerCase();
@@ -454,7 +453,7 @@ describe('a promotion target whose owner moves before the anchors are held (priv
     const secret = await knowledgeIn(orgB.id, 'secret');
     const hook = transactionHookDb(async (n) => { if (n === 1) await transferTo(secret.id, orgC.id); });
     const err = await refusal(M.createAgent({}, { orgRef: org.id, name: 'Drift', systemMemoryRef: secret.id }, { ...userCtx(admin.id), db: hook.db } as Context));
-    expect(JSON.parse(wire(err))).toEqual(NOT_FOUND);
+    expect(JSON.parse(wire(err, secret.id))).toEqual(NOT_FOUND);
     expect((await db.memory.findUniqueOrThrow({ where: { id: secret.id } })).organizationId).toBe(orgC.id); // the transfer really won
     await expectUnpromoted(secret.id);
   });
@@ -464,7 +463,7 @@ describe('a promotion target whose owner moves before the anchors are held (priv
     await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: foreignOwner.id, role: 'OWNER' } });
     const hook = transactionHookDb(async (n) => { if (n === 1) await transferTo(target.id, orgC.id); });
     const err = await refusal(M.createAgent({}, { orgRef: org.id, name: 'Drift', systemMemoryRef: target.id }, { ...userCtx(admin.id), db: hook.db } as Context));
-    expect(JSON.parse(wire(err))).toEqual(NOT_FOUND);
+    expect(JSON.parse(wire(err, target.id))).toEqual(NOT_FOUND);
     expect(hook.transactions()).toBe(2); // decided again, under the new owner's anchors
     await expectUnpromoted(target.id);
   });
@@ -486,7 +485,7 @@ describe('a promotion target whose owner moves before the anchors are held (priv
     const target = await knowledgeIn(orgB.id, 'churn');
     const hook = transactionHookDb(async (n) => { await transferTo(target.id, n % 2 === 1 ? orgC.id : orgB.id); });
     const err = await refusal(M.createAgent({}, { orgRef: org.id, name: 'Drift', systemMemoryRef: target.id }, { ...userCtx(admin.id), db: hook.db } as Context));
-    expect(JSON.parse(wire(err))).toEqual(NOT_FOUND);
+    expect(JSON.parse(wire(err, target.id))).toEqual(NOT_FOUND);
     expect(hook.transactions()).toBe(3);
     await expectUnpromoted(target.id);
   });
@@ -497,7 +496,7 @@ describe('a promotion target whose owner moves before the anchors are held (priv
     await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: foreignOwner.id, role: 'OWNER' } });
     const hook = transactionHookDb(async (n) => { if (n === 1) await transferTo(target.id, orgC.id); });
     const err = await refusal(M.updateAgent({}, { ref: c.id, systemMemoryRef: target.id }, { ...userCtx(admin.id), db: hook.db } as Context));
-    expect(JSON.parse(wire(err))).toEqual(NOT_FOUND);
+    expect(JSON.parse(wire(err, target.id))).toEqual(NOT_FOUND);
     expect(hook.transactions()).toBe(2);
     await expectUnpromoted(target.id);
     expect((await db.agent.findUniqueOrThrow({ where: { id: c.id } })).systemMemoryId).toBeNull();

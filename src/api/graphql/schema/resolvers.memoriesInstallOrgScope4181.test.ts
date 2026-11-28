@@ -1,7 +1,7 @@
 /**
- * #4181 — Query.memories(orgId: A, memoryClasses: [system]) must not list an
+ * #4181 — Query.memories(orgRef: A, memoryClasses: [system]) must not list an
  * App install memory that belongs to another org (cor:api:100, cor:api:100:01,
- * cor:api:120:03, cor:acl:010:01). The install clause once ignored `orgId`.
+ * cor:api:120:03, cor:acl:010:01). The install clause once ignored the org argument (`orgRef` since #5166).
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
@@ -44,10 +44,10 @@ beforeEach(async () => {
 
 const user = (name: string) => db.user.create({ data: { id: generateId(), name } });
 const idsFor = async (ctx: Context, org?: string, classes: string[] | null = ['system']) =>
-  ((await Q.memories({}, { ...(classes ? { filter: { memoryClasses: classes } } : {}), ...(org ? { orgId: org } : {}), limit: 100 }, ctx)).items as Array<{ id: string }>).map((m) => m.id);
+  ((await Q.memories({}, { ...(classes ? { filter: { memoryClasses: classes } } : {}), ...(org ? { orgRef: org } : {}), limit: 100 }, ctx)).items as Array<{ id: string }>).map((m) => m.id);
 
-describe('#4181 memories(orgId) install-memory clause is org-scoped', () => {
-  it('(a) an admin of both orgs: orgId=A lists A\'s install memory, not B\'s; orgId=B the reverse', async () => {
+describe('#4181 memories(orgRef) install-memory clause is org-scoped', () => {
+  it('(a) an admin of both orgs: orgRef=A lists A\'s install memory, not B\'s; orgRef=B the reverse', async () => {
     const u = await user('both-admin');
     for (const o of [orgA, orgB]) await db.orgMember.create({ data: { organizationId: o, userId: u.id, role: 'ADMIN' } });
     const inA = await idsFor(ctxOf(u.id), orgA);
@@ -58,7 +58,7 @@ describe('#4181 memories(orgId) install-memory clause is org-scoped', () => {
     expect(inB).not.toContain(a.mem.id);
   });
 
-  it('(b) a member of A who owns an App in B: orgId=A omits B\'s install memory', async () => {
+  it('(b) a member of A who owns an App in B: orgRef=A omits B\'s install memory', async () => {
     const u = await user('b-owner');
     await db.orgMember.create({ data: { organizationId: orgA, userId: u.id, role: 'CONTRIBUTOR' } });
     await db.appMember.create({ data: { appId: b.app.id, userId: u.id, role: 'owner' } });
@@ -67,7 +67,7 @@ describe('#4181 memories(orgId) install-memory clause is org-scoped', () => {
     expect(await idsFor(ctxOf(u.id))).toContain(b.mem.id);
   });
 
-  it('(c) a platform admin with orgId=A sees only A\'s install memory', async () => {
+  it('(c) a platform admin with orgRef=A sees only A\'s install memory', async () => {
     const u = await user('platform-admin');
     await db.orgMember.create({ data: { organizationId: orgA, userId: u.id, role: 'CONTRIBUTOR' } });
     const ids = await idsFor(ctxOf(u.id, ['ADMIN']), orgA);
@@ -77,7 +77,7 @@ describe('#4181 memories(orgId) install-memory clause is org-scoped', () => {
     expect(await idsFor(ctxOf(u.id, ['ADMIN']))).toContain(b.mem.id);
   });
 
-  it('#2044 no regression: A\'s install memory still lists to its audience under orgId=A, and to a non-manager participant not at all', async () => {
+  it('#2044 no regression: A\'s install memory still lists to its audience under orgRef=A, and to a non-manager participant not at all', async () => {
     const admin = await user('a-admin');
     await db.orgMember.create({ data: { organizationId: orgA, userId: admin.id, role: 'ADMIN' } });
     expect(await idsFor(ctxOf(admin.id), orgA)).toContain(a.mem.id);
@@ -93,7 +93,7 @@ describe('#4181 memories(orgId) install-memory clause is org-scoped', () => {
     expect(await idsFor(ctxOf(u.id), orgA, null)).toContain(own.id);
     expect(await idsFor(ctxOf(u.id), orgB, null)).toContain(own.id);
   });
-  it('F1 (blind): the owner of a USER-OWNED App still lists its install memory under orgId=A, through the user-owned clause', async () => {
+  it('F1 (blind): the owner of a USER-OWNED App still lists its install memory under orgRef=A, through the user-owned clause', async () => {
     const u = await user('user-app-owner');
     await db.orgMember.create({ data: { organizationId: orgA, userId: u.id, role: 'CONTRIBUTOR' } });
     const app = await db.app.create({ data: { id: generateId(), name: 'user-app', urn: `u-${u.id}:user-app`, ownerUserId: u.id } as any });

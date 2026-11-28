@@ -18,6 +18,7 @@ import { generateId } from '../../../lib/id.js';
 import { isCiphertext, parseDataKey } from '../../../lib/crypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { requestKeyStorage } from '../../../lib/requestKeys.js';
+import { encryptWithSecret } from '../../../test/encryptMemoryWithSecret.js';
 
 const enqueueSpy = vi.hoisted(() => vi.fn());
 
@@ -46,7 +47,7 @@ function ownerCtx(): Context {
 /** encryptMemory refuses an indexed memory without an inversion ack; turn the index off first. */
 async function encryptWithIndexOff(): Promise<void> {
   await db.memory.update({ where: { id: memoryId }, data: { vectorIndexEnabled: false } });
-  await resolvers.Mutation.encryptMemory({}, { memoryRef: memoryId, dataKey }, ownerCtx());
+  await encryptWithSecret({}, { memoryRef: memoryId, dataKey }, ownerCtx());
 }
 
 /** The `plaintext` argument of every enqueue call so far. */
@@ -89,7 +90,7 @@ afterEach(() => sessionKeyCache.clear());
 
 describe('restoreNodeRevision → embedder input (#1272)', () => {
   it('plaintext memory: the embedder receives the restored content and abstract', async () => {
-    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: priorId }, ownerCtx());
+    await resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: priorId }, ownerCtx());
     expect(enqueueSpy).toHaveBeenCalledTimes(1);
     expect(enqueueSpy.mock.calls[0][1]).toMatchObject({ nodeId, memoryId });
     expect(embedInputs()).toEqual([
@@ -107,7 +108,7 @@ describe('restoreNodeRevision → embedder input (#1272)', () => {
     });
     enqueueSpy.mockReset();
     await requestKeyStorage.run(new Map([[memoryId, parseDataKey(dataKey)]]), async () => {
-      await resolvers.Mutation.restoreNodeRevision({}, { revisionId: priorId }, ownerCtx());
+      await resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: priorId }, ownerCtx());
     });
     const stored = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
     expect(isCiphertext(stored.content)).toBe(true);
@@ -127,7 +128,7 @@ describe('restoreNodeRevision → embedder input (#1272)', () => {
       failed.catch(() => undefined);
       return failed;
     });
-    const response = await resolvers.Mutation.restoreNodeRevision({}, { revisionId: priorId }, ownerCtx());
+    const response = await resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: priorId }, ownerCtx());
     expect(response).toMatchObject({ content: 'restored plaintext body' });
     expect((await db.node.findUniqueOrThrow({ where: { id: nodeId } })).content).toBe('restored plaintext body');
   });
@@ -138,7 +139,7 @@ describe('restoreNodeRevision → embedder input (#1272)', () => {
     enqueueSpy.mockReset();
     const before = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
     const revisions = await db.nodeRevision.count({ where: { nodeId } });
-    await expect(resolvers.Mutation.restoreNodeRevision({}, { revisionId: priorId }, ownerCtx()))
+    await expect(resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: priorId }, ownerCtx()))
       .rejects.toMatchObject({ extensions: { code: 'SESSION_EXPIRED' } });
     const after = await db.node.findUniqueOrThrow({ where: { id: nodeId } });
     expect(after.content).toBe(before.content);

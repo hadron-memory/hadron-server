@@ -1,13 +1,15 @@
 /**
  * #3833 — the skeleton parent nodes of an Agent's system memory.
  *
- * A new Agent's system memory gets four empty parents, so the places an Agent's
- * boot rules, processes and tasks live exist from the start:
+ * A new Agent's system memory gets six empty parents, so the places an Agent's
+ * boot rules, processes, tasks, conversations and prompt templates live exist from the start:
  *
- *   boot        "Boot Instructions"    (parent of boot:source, boot:compiled, boot:rules)
- *   boot:rules  "Boot Prompt Rules"    (the rules a boot prompt includes)
- *   processes   "Processes"
- *   tasks       "Tasks"
+ *   boot           "Boot Instructions"    (parent of boot:source, boot:compiled, boot:rules)
+ *   boot:rules     "Boot Prompt Rules"    (the rules a boot prompt includes)
+ *   processes      "Processes"
+ *   tasks          "Tasks"
+ *   conversations  "Conversations"        (#5390: parent of the chatbot conversations)
+ *   prompts        "Prompts"              (#5390: parent of the prompt templates, `prompts:<conversation>`)
  *
  * The rules, each from the spec review on the issue (hrn:node:hadronmemory.com:specs:cor:dmo:050:14,
  * cor:agt:040:06, :16, cor:dmo:050:18):
@@ -26,6 +28,7 @@
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { generateId } from './id.js';
 import { findEffectiveNodeIdByLoc } from './effectiveSystemMemory.js';
+import { seedChatbotContainers } from './chatbotAncestors.js';
 
 type Db = Prisma.TransactionClient | PrismaClient;
 
@@ -38,6 +41,9 @@ export const AGENT_SKELETON: readonly SkeletonNode[] = [
   { loc: 'boot:rules', name: 'Boot Prompt Rules', description: 'Parent of the rule nodes a boot prompt includes with an include tag.' },
   { loc: 'processes', name: 'Processes', description: 'Parent of the Agent\'s processes.' },
   { loc: 'tasks', name: 'Tasks', description: 'Parent of the Agent\'s tasks.' },
+  // #5390 — the same names and descriptions a conversation or prompt write gives these parents (chatbotAncestors.ts).
+  { loc: 'conversations', name: 'Conversations', description: 'Parent of the Agent\'s conversations.' },
+  { loc: 'prompts', name: 'Prompts', description: 'Parent of the Agent\'s prompt templates, one parent per conversation.' },
 ];
 
 /**
@@ -89,11 +95,15 @@ async function retrofitOne(tx: Prisma.TransactionClient, agentId: string, memory
         WHERE m.id = ${memoryId} AND m.deleted_at IS NULL AND m.class = 'system' AND m.is_install_memory = false
           AND EXISTS (SELECT 1 FROM agents a WHERE a.id = ${agentId} AND a.deleted_at IS NULL AND a.system_memory_id = m.id)`;
   if (!rows.length) return [];
-  return seedAgentSkeleton(tx, memoryId, actor);
+  const created = await seedAgentSkeleton(tx, memoryId, actor);
+  // #5390 — then the container parents its conversation, stage and prompt nodes lack (`prompts:<name>`; the two roots
+  // are skeleton nodes and were just seeded).
+  return [...created, ...await seedChatbotContainers(tx, memoryId, actor)];
 }
 
 /**
- * The retrofit (#3833): give every live Agent's system memory the skeleton parents its effective memory lacks.
+ * The retrofit (#3833, #5390): give every live Agent's system memory the skeleton parents its effective memory lacks, and
+ * the container parents of its conversation, stage and prompt nodes (`chatbotAncestors.ts`).
  *
  * Selects ONLY `class = 'system'` memories with `is_install_memory = false` that are some live Agent's own
  * `system_memory_id`: an install memory is never touched (cor:agt:040:16), and neither is any other class. That

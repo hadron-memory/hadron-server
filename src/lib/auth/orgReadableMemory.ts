@@ -37,6 +37,8 @@ import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { getManagedSystemMemoryIds } from './managedSystemMemory.js';
 import { LIVE_ORG_MEMBERSHIP } from './liveOrgMembership.js';
 import { subscribedMemoryWhere } from './memorySubscriptionAccess.js';
+import { memoryIdFilter, type OnlyMemoryIds } from './memoryIdScope.js';
+import { groupMemberMemoryWhere } from './groupMemberMemory.js';
 
 /**
  * #3426 (C1) — the identity-free ORG arms of the readable set, shared so a caller that has no user (the org-default
@@ -84,8 +86,8 @@ export async function getOrgReadableMemoryIds(
   // When set, scope the memory lookup to this single id (a single-memory
   // authorization check) so it stays an indexed point-read instead of
   // enumerating the whole org-readable set. The predicate is unchanged, just
-  // narrowed — the result is `[onlyMemoryId]` or `[]`.
-  onlyMemoryId?: string,
+  // narrowed — the result is `[onlyMemoryId]` or `[]`. #3326: a list narrows to those ids the same way.
+  onlyMemoryId?: OnlyMemoryIds,
   // Admin impersonation: narrow the membership set to the session's ONE
   // shared org (see getMemberOrgIds — same pattern). The PUBLIC clause is
   // membership-independent and deliberately unchanged: public stays public.
@@ -109,7 +111,7 @@ export async function getOrgReadableMemoryIds(
 
   const memories = await db.memory.findMany({
     where: {
-      ...(onlyMemoryId ? { id: onlyMemoryId } : {}),
+      ...(onlyMemoryId ? { id: memoryIdFilter(onlyMemoryId) } : {}),
       deletedAt: null,
       OR: [
         // Org-visible memories: knowledge (PUBLIC/ORGANIZATION) stays
@@ -136,14 +138,10 @@ export async function getOrgReadableMemoryIds(
         // target's MemoryMember rows in OTHER orgs must not ride the
         // impersonation session's readable set. Ordinary calls stay
         // unbounded: that is the cross-org reach described above.
-        {
-          class: 'group' as any,
-          appId: null,
-          userMemoryOfAgentId: null,
-          ownerUserId: null,
-          ...(restrictToOrgId ? { organizationId: restrictToOrgId } : {}),
-          memberships: { some: { userId } },
-        },
+        //
+        // #5027 (Holger R1): the arm no longer requires `appId: null`, so a group made in an App is read by its
+        // MemoryMembers too; the predicate is shared with the writable set and the memory list.
+        groupMemberMemoryWhere(userId, { restrictToOrgId }),
         // PUBLIC memories — defensively excluding personal/private, per-user
         // holdings, and app-scoped (#653) so a mis-set visibility can't expose them.
         // #758: `ownerUserId: null` — spec 047's invariant is that a USER-owned

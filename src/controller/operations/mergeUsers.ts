@@ -1,11 +1,13 @@
 import { randomBytes } from 'crypto';
 import { GraphQLError } from 'graphql';
+import { assertOwnerLimitSnapshotFresh, deleteOwnerLimits, logOwnerLimitChanges, type OwnerLimitChange } from '../../lib/ownerLimits/changes.js';
 import { AuthoritySnapshotStale, lockAuthorityAnchors } from '../../lib/auth/authorityAnchors.js';
 import { consumeUserMergeConsent, mergeConsentAlreadyApplied } from '../../lib/userMergeConsent.js';
 import { Prisma, type PrismaClient, type User } from '../../generated/prisma/index.js';
 import { mergeOwnerNamespacedUrns } from '../../lib/mergeOwnerNamespacedUrns.js';
 import { releasePrincipal } from '../../lib/principal/mintPrincipal.js';
 import { waitForSerializationRetry } from '../../lib/serializableRetry.js';
+import { logUserRolesChanged } from '../../lib/auth/userRolesChanged.js';
 
 // Non-conflicting ownership, attribution, credential, and history links. An optional third element names a
 // lineage column: rows that carry one stay put (see the #1897 note in mergeUsers).
@@ -13,6 +15,9 @@ export const DIRECT_USER_REFERENCES: ReadonlyArray<readonly [string, string] | r
   ['memories', 'user_id'],
   ['sessions', 'user_id'],
   ['usage_events', 'user_id'],
+  // #5020 (section 13 item 14, cor:dmo:170:08's merge edge): the units billed to the merged-away person are billed to the survivor.
+  // Re-pointing who a unit is billed to changes no cost (cor:dmo:170:06: a cost is never recomputed).
+  ['usage_events', 'billable_user_id'],
   ['org_member_invitations', 'recipient_user_id'],
   ['user_invitation_activations', 'user_id'],
   ['exchange_connections', 'user_id'],
@@ -22,6 +27,8 @@ export const DIRECT_USER_REFERENCES: ReadonlyArray<readonly [string, string] | r
   ['auth_codes', 'user_id', 'sign_in_id'],
   ['auth_handoff_codes', 'user_id', 'sign_in_id'],
   ['app_runs', 'user_id'],
+  // #5077: the runs of the Apps a person owns copy that owner; they move with their Apps (mergeOwnerNamespacedUrns).
+  ['app_runs', 'owner_user_id'],
   ['agent_schedules', 'user_id'],
   ['agent_webhooks', 'user_id'],
   ['assets', 'uploaded_by'],
@@ -58,6 +65,11 @@ export const DIRECT_USER_REFERENCES: ReadonlyArray<readonly [string, string] | r
   ['grants', 'issuer_user_id'],
   ['grants', 'requested_by_user_id'],
   ['grants', 'verified_by'],
+  // #5014 (billing A6; plan section 13 item 14, Proposed in cor:dmo:170:08): a person's credit ledger entries follow the survivor,
+  // keeping amount, kind, source, expiry and time. A ledger entry is never edited, so this is the one move the append-only trigger
+  // allows on owner_user_id, and only along the user_merges row this merge records before these rewrites
+  // (prisma/credit-ledger-invariants.sql). Not in AUDIT_USER_COLUMNS: it is the owner, not an audit actor.
+  ['credit_ledger_entries', 'owner_user_id'],
 ];
 
 /**
@@ -95,6 +107,7 @@ export const AUDIT_USER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   connection_grants: ['created_by', 'updated_by', 'deleted_by'],
   principal_grants: ['created_by', 'updated_by', 'deleted_by'],
   slack_connections: ['created_by', 'deleted_by'],
+  telegram_connections: ['created_by', 'deleted_by'],
   mcp_servers: ['created_by', 'updated_by'],
   home_assistant_instances: ['created_by', 'updated_by'],
   apps: ['created_by', 'updated_by', 'deleted_by'],
@@ -126,6 +139,8 @@ export const AUDIT_USER_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   resend_senders: ['created_by', 'updated_by'],
   scopes: ['created_by', 'updated_by', 'deleted_by'],
   secrets: ['created_by', 'updated_by'],
+  // #5009: the stamps follow the survivor; the rows themselves do not (mergeUsers deletes the source's).
+  owner_limits: ['created_by', 'updated_by'],
   urn_aliases: ['created_by'],
   users: ['created_by', 'updated_by', 'deleted_by'],
   // #1416 (R204): `retired_by` is the retirer's exact User.id; it follows the survivor like every actor stamp.
@@ -296,7 +311,16 @@ export async function mergeUsers(
   let aborted = false;
   for (let attempt = 1; ; attempt++) {
     try {
-      return await runMergeTxn(db, { sourceUserId, targetUserId, actorUserId, mergeGlobalRoles, consentProof });
+      const limitChanges: OwnerLimitChange[] = [];
+      const rolesBefore: { roles?: readonly string[] } = {};
+      const merged = await runMergeTxn(db, { sourceUserId, targetUserId, actorUserId, mergeGlobalRoles, consentProof }, limitChanges, rolesBefore);
+      // #5012 (gate ruling 10.5): a role-unioning merge changes the target's platform roles, so it writes the same
+      // `user.roles.changed` line as updateUserRoles, after commit (the helper skips an unchanged set).
+      if (rolesBefore.roles) {
+        logUserRolesChanged({ actor: actorUserId ?? 'unknown', target: targetUserId, before: rolesBefore.roles, after: merged.roles });
+      }
+      logOwnerLimitChanges(actorUserId ?? null, limitChanges);
+      return merged;
     } catch (e) {
       const serialization = isSerializationAbort(e);
       aborted ||= serialization;
@@ -400,6 +424,9 @@ async function assertSourceActorRowsFresh(
 async function runMergeTxn(
   db: PrismaClient,
   { sourceUserId, targetUserId, actorUserId, mergeGlobalRoles = false, consentProof }: MergeUsersArgs,
+  limitChanges: OwnerLimitChange[],
+  /** #5012: filled with the target's platform roles before a role-unioning merge, for the audit line. */
+  rolesBefore: { roles?: readonly string[] },
 ): Promise<User> {
   return db.$transaction(async (tx) => {
     // Serialize two merges involving either account. Ref resolution happens
@@ -428,6 +455,7 @@ async function runMergeTxn(
         { extensions: { code: 'MERGE_SOURCE_HAS_PASSKEYS', passkeyCount: livePasskeys } });
     }
     await assertSourceActorRowsFresh(tx, db, sourceUserId);
+    await assertOwnerLimitSnapshotFresh(tx, db, [{ userId: sourceUserId }]);
     const consent = await consumeUserMergeConsent(tx, consentProof, sourceUserId, targetUserId, actorUserId);
     await refuseUsersInOpenAlarmChains(tx, sourceUserId, targetUserId);
 
@@ -459,6 +487,8 @@ async function runMergeTxn(
     // Tombstone the #692 pool principal (name reserved forever; the user→principal link stays).
     if (source.principalId) await releasePrincipal(tx, source.principalId);
 
+    // #5012: the target's platform roles before a role-unioning merge, for the audit line written after commit.
+    if (mergeGlobalRoles) rolesBefore.roles = target.roles;
     await tx.user.update({
       where: { id: targetUserId },
       data: {
@@ -562,9 +592,18 @@ async function runMergeTxn(
         AND s.organization_id = t.organization_id`;
     await tx.$executeRaw`UPDATE org_members SET user_id = ${targetUserId} WHERE user_id = ${sourceUserId}`;
 
+    // #5074: the merged-away person's own daily counters are not carried over (the survivor's stay). Their Apps, and so
+    // their `app` rows, move by App id. The table has no foreign key, so nothing cascades.
+    await tx.quotaCounter.deleteMany({ where: { scopeKind: 'user', scopeId: sourceUserId } });
+
     await tx.$executeRaw`DELETE FROM app_members s USING app_members t
       WHERE s.user_id = ${sourceUserId} AND t.user_id = ${targetUserId} AND s.app_id = t.app_id`;
     await tx.$executeRaw`UPDATE app_members SET user_id = ${targetUserId} WHERE user_id = ${sourceUserId}`;
+    // #5185: the links the merged-away person made. A link both accounts hold is the survivor's; the rest move to the survivor.
+    await tx.$executeRaw`DELETE FROM app_memory_links s USING app_memory_links t
+      WHERE s.attached_by = ${sourceUserId} AND t.attached_by = ${targetUserId}
+        AND s.app_id = t.app_id AND s.memory_id = t.memory_id`;
+    await tx.$executeRaw`UPDATE app_memory_links SET attached_by = ${targetUserId} WHERE attached_by = ${sourceUserId}`;
 
     // Preserve the union's strongest live subscription. When both are active,
     // keep the earlier activation and broader expiry (NULL = perpetual).
@@ -706,7 +745,13 @@ async function runMergeTxn(
     // second merge of the same account can't record a second target.
     // #1332: written BEFORE the reassignments below, because the content-validation report
     // trigger admits a reporter_user_id change only along a merge recorded here.
-    await tx.userMerge.create({ data: { sourceUserId, targetUserId, mergedBy: actor, ...consent } });
+    // #5212 (cor:api:010:02): the record is written by the owner-owned function hadron_record_user_merge, the one writer, which checks
+    // that this transaction consumed the consent for exactly this pair and retires the source (deleted_at, deleted_by) itself.
+    await tx.$queryRaw`SELECT public.hadron_record_user_merge(${sourceUserId}, ${targetUserId}, ${actor}, ${consent.consentHash},
+      ${JSON.stringify(consent.consentReceipt)}::jsonb)`;
+
+    // #5009: the survivor's owner limits stay and the source's are deleted (never re-owned: one row per owner and key).
+    limitChanges.push(...(await deleteOwnerLimits(tx, { userId: sourceUserId }, 'account-merge')));
 
     // Non-conflicting ownership, attribution, credential, and history links.
     // An optional third element names a lineage column: rows that carry one stay
@@ -727,10 +772,7 @@ async function runMergeTxn(
       await runWithIds(`UPDATE "${table}" SET ${assignments} WHERE ${predicate}`);
     }
 
-    await tx.user.update({
-      where: { id: sourceUserId },
-      data: { deletedAt: new Date(), deletedBy: actor, updatedBy: actor },
-    });
+    // The source was retired by hadron_record_user_merge above (#5212), before the transfers.
 
     return tx.user.findUniqueOrThrow({ where: { id: targetUserId } });
   }, {

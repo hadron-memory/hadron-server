@@ -44,7 +44,6 @@ beforeEach(async () => {
   await serveEveryAgent(db);
   ids = {};
   for (const [loc, data] of [
-    ['conversations', {}],
     ['conversations:main', { stageOrder: ['check'], isSetup: false }],
     [STAGE, {}],
     ['conversations:alpha', { stageOrder: ['a1'], isSetup: false }],

@@ -30,6 +30,7 @@ import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { registerHost } from '../agentTasks/hosts.js';
 import { sweepExpiredStopSignals } from './sweep.js';
 import { declareAllStopLanes } from '../../test/stopLanes.js';
+import { joinHostForKey } from '../../test/agentTeamHost.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -73,6 +74,7 @@ beforeEach(async () => {
   kit = await w('Kit');
   const raw = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
   orca1 = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4), label: 'orca1' }, select: { id: true } });
+  await joinHostForKey(db, orca1.id, 'orca1');
   await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, ctx(max.id));
   await M.registerHost({}, { input: { appRef: app.id, label: 'Orca 1', pollIntervalSeconds: 600, workers: [{ worker: ada.id, family: 'claude' }, { worker: dan.id, family: 'claude' }] } }, keyCtx(orca1));
   // #2173/#2169 (R95): setting a signal is refused while a lane has no fresh stop-consumer declaration; these pins test the races, so every lane is declared.
@@ -278,7 +280,7 @@ describe('3 — a registration that adds a worker while a host halt is set (regi
 describe('4 — assigning a task to Dan by hand while a pause on Dan is set (inTaskWriteTx shared fence + TASK_STOPPED)', () => {
   let taskId: string;
   beforeEach(async () => { taskId = (await db.agentTask.create({ data: { appId: app.id, title: 'Hand', ownerUserId: max.id }, select: { id: true } })).id; });
-  const assign = (c: Context) => M.assignAgentTask({}, { taskId, assignee: { worker: 'Dan' } }, c);
+  const assign = (c: Context) => M.assignAgentTask({}, { taskRef: taskId, assignee: { worker: 'Dan' } }, c);
   const assignee = async () => (await db.agentTask.findUniqueOrThrow({ where: { id: taskId } })).assigneeWorkerId;
 
   it('the assignment holds the fence first: the set waits; the task is Dan\'s and the pause is live', async () => {

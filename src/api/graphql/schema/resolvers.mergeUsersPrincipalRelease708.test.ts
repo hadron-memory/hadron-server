@@ -86,9 +86,14 @@ describe('mergeUsers — source principal release (#708)', () => {
   it('rolls the release back with the merge when a later write fails', async () => {
     const before = await principalOf(source.id);
     const targetBefore = await principalOf(target.id);
-    // The final user_merges insert runs after the release; fault it to force the whole transaction to abort.
+    // The user_merges record (the hadron_record_user_merge call, #5212) runs after the release; fault it to force the whole transaction to abort.
     const faulty = db.$extends({
-      query: { userMerge: { create: () => { throw new Error('injected fault after release'); } } },
+      query: {
+        $queryRaw: ({ args, query }: { args: unknown; query: (a: unknown) => Promise<unknown> }) => {
+          if (JSON.stringify(args).includes('hadron_record_user_merge')) throw new Error('injected fault after release');
+          return query(args);
+        },
+      },
     }) as unknown as typeof db;
 
     await expect(mergeUsers(faulty, { sourceUserId: source.id, targetUserId: target.id }))

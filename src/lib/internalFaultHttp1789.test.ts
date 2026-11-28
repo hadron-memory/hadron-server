@@ -16,6 +16,18 @@ const secret = 'connect ECONNREFUSED 10.0.0.7:5432 password=hunter2';
 let server: Server;
 let base = '';
 
+/** #4592 F3: the tampered-reason fixtures, ONE named table shared by the route that plants each reason and the assertions on the wire. */
+const TAMPERED_CASES: Array<{ name: string; planted: unknown; expectedWireReason: 'STORE_UNREACHABLE' | 'POOL_WAIT'; message: string; extensionsGone?: 'null' | 'removed' }> = [
+  { name: 'unreachable', planted: 'STORE_UNREACHABLE', expectedWireReason: 'STORE_UNREACHABLE', message: AUTH_STORE_UNREACHABLE_MESSAGE },
+  { name: 'pool-wait', planted: 'POOL_WAIT', expectedWireReason: 'POOL_WAIT', message: AUTH_STORE_BUSY_MESSAGE },
+  { name: 'absent', planted: undefined, expectedWireReason: 'POOL_WAIT', message: AUTH_STORE_BUSY_MESSAGE },
+  { name: 'driver-text', planted: 'driver-secret', expectedWireReason: 'POOL_WAIT', message: AUTH_STORE_BUSY_MESSAGE },
+  { name: 'object', planted: { detail: 'driver-secret' }, expectedWireReason: 'POOL_WAIT', message: AUTH_STORE_BUSY_MESSAGE },
+  // #5253: the extensions object itself gone, not just its reason: the boundary still answers the fixed 503 with POOL_WAIT.
+  { name: 'extensions-null', planted: undefined, expectedWireReason: 'POOL_WAIT', message: AUTH_STORE_BUSY_MESSAGE, extensionsGone: 'null' },
+  { name: 'extensions-removed', planted: undefined, expectedWireReason: 'POOL_WAIT', message: AUTH_STORE_BUSY_MESSAGE, extensionsGone: 'removed' },
+];
+
 beforeAll(async () => {
   const app = express();
   app.use(assignRequestId);
@@ -48,9 +60,10 @@ beforeAll(async () => {
   // #4519 (BLIND P3-4, the boundary pin): a typed error whose `.message` was TAMPERED to carry
   // driver text — constructor drift, a subclass with its own prose, a late mutation — must still
   // answer the reason's fixed prose. The boundary renders from the reason, never from the message.
-  app.get('/auth-store-busy-tampered/:variant', (req, _res, next) => {
-    const reasons: unknown[] = ['STORE_UNREACHABLE', 'POOL_WAIT', undefined, 'driver-secret', { detail: 'driver-secret' }];
-    const reason = reasons[Number(req.params.variant)];
+  app.get('/auth-store-busy-tampered/:variant', (req, res, next) => {
+    // #4592 F3: an unknown variant name is a loud 404, never silently the absent-value case.
+    const fixture = TAMPERED_CASES.find((c) => c.name === req.params.variant);
+    if (!fixture) { res.status(404).send('unknown tampered fixture variant'); return; }
     const tampered = new AuthStoreBusyError(
       new Prisma.PrismaClientInitializationError(
         "Can't reach database server at `10.9.8.7:5432`",
@@ -60,7 +73,9 @@ beforeAll(async () => {
       'STORE_UNREACHABLE',
     );
     tampered.message = "Can't reach database server at `10.9.8.7:5432`";
-    tampered.extensions.reason = reason;
+    if (fixture.extensionsGone === 'null') (tampered as unknown as { extensions: unknown }).extensions = null;
+    else if (fixture.extensionsGone === 'removed') delete (tampered as unknown as { extensions?: unknown }).extensions;
+    else tampered.extensions.reason = fixture.planted;
     next(tampered);
   });
   // #4504 (Bradley P3, the double-log check): headers already gone out when the fault
@@ -80,6 +95,8 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => { server = app.listen(0, resolve); });
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
+// #4592 F5: the ONE spy cleanup for this file. Every test's console.error spy is restored here after the test, which is why the
+// per-test `log.mockRestore()` calls are gone: without it the spy's calls would accumulate and later assertions could pass on stale calls.
 afterEach(() => vi.restoreAllMocks());
 afterAll(() => new Promise<void>((resolve) => { server.close(() => resolve()); }));
 
@@ -93,7 +110,6 @@ describe('plain HTTP internal faults (#1789)', () => {
     expect(body).toEqual({ error: 'Internal server error.', code: 'INTERNAL_SERVER_ERROR', requestId: res.headers.get('x-request-id') });
     expect(text).not.toMatch(/hunter2|ECONNREFUSED|at \w+.*\.ts/);
     expect(log).toHaveBeenCalledWith('[http] internal_fault', expect.objectContaining({ requestId: body.requestId }));
-    log.mockRestore();
   });
 
   it('two identical faults on separate requests get distinct request ids', async () => {
@@ -140,7 +156,6 @@ describe('plain HTTP internal faults (#1789)', () => {
     expect(logged.error).toBeInstanceOf(AuthStoreBusyError);
     expect(logged.error.cause).toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
     expect((logged.error.cause as Prisma.PrismaClientKnownRequestError).code).toBe('P2024');
-    log.mockRestore();
   });
 
   it('#4504: the unreachable arm keeps the same 503 carve-out with its sibling prose — and its P1001 reaches the log the same way', async () => {
@@ -161,22 +176,22 @@ describe('plain HTTP internal faults (#1789)', () => {
     expect(logged.error.cause).toBeInstanceOf(Prisma.PrismaClientInitializationError);
     expect((logged.error.cause as Prisma.PrismaClientInitializationError).errorCode).toBe('P1001');
     expect(text).not.toMatch(/P1001|Can't reach|127\.0\.0\.1|INTERNAL_SERVER_ERROR/);
-    log.mockRestore();
   });
 
-  it.each([
-    [0, 'STORE_UNREACHABLE', AUTH_STORE_UNREACHABLE_MESSAGE],
-    [1, 'POOL_WAIT', AUTH_STORE_BUSY_MESSAGE],
-    [2, 'POOL_WAIT', AUTH_STORE_BUSY_MESSAGE],
-    [3, 'POOL_WAIT', AUTH_STORE_BUSY_MESSAGE],
-    [4, 'POOL_WAIT', AUTH_STORE_BUSY_MESSAGE],
-  ])('#4555: tampered variant %s keeps every wire field fixed', async (variant, reason, message) => {
+  it('#4592 F3: an unknown tampered variant name is a 404 and is never logged as an internal fault', async () => {
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const res = await fetch(base + '/auth-store-busy-tampered/' + variant);
+    const res = await fetch(base + '/auth-store-busy-tampered/not-a-fixture');
+    expect(res.status).toBe(404);
+    expect(log.mock.calls.filter((c) => c[0] === '[http] internal_fault')).toHaveLength(0);
+  });
+
+  it.each(TAMPERED_CASES)('#4555: tampered variant $name keeps every wire field fixed', async ({ name, expectedWireReason, message }) => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await fetch(base + '/auth-store-busy-tampered/' + name);
     const text = await res.text();
     expect(res.status).toBe(503);
     expect(JSON.parse(text)).toEqual({
-      error: message, code: 'AUTH_STORE_BUSY', retryable: true, reason,
+      error: message, code: 'AUTH_STORE_BUSY', retryable: true, reason: expectedWireReason,
       requestId: res.headers.get('x-request-id'),
     });
     expect(text).not.toMatch(/driver-secret|Can't reach|P1001|10\.9\.8\.7|INTERNAL_SERVER_ERROR/);
@@ -202,6 +217,5 @@ describe('plain HTTP internal faults (#1789)', () => {
     expect(faultCalls).toHaveLength(1);
     // logInternalFault's declared envelope carries the site and original typed error.
     expect(faultCalls[0][1]).toEqual(expect.objectContaining({ site: 'auth-store-busy', error: expect.any(AuthStoreBusyError) }));
-    log.mockRestore();
   });
 });

@@ -394,7 +394,7 @@ describe('#3934 — escalationEndedAt and alarmsInEffect on a task alarm', () =>
     await tick('11:00');
     const alarm = (await alarms('stall.no-progress')).find((a) => a.taskId === t.id)!;
     await db.session.update({ where: { id: session.id }, data: { updatedAt: at('11:10') } });
-    await M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: rook.id } }, ctx(admin.id)); // production payload, the clock's real now
+    await M.reassignAgentTask({}, { taskRef: t.id, assignee: { worker: rook.id } }, ctx(admin.id)); // production payload, the clock's real now
     const ev = await db.agentTeamEvent.findFirstOrThrow({ where: { taskId: t.id, type: 'task.reassigned' } });
     expect(ev.payload).toMatchObject({ from: { workerId: anne.id }, to: { workerId: rook.id } });
     await record('12:30');
@@ -457,7 +457,7 @@ describe('#3934 — escalationEndedAt and alarmsInEffect on a task alarm', () =>
     await pause();
     await db.session.update({ where: { id: session.id }, data: { updatedAt: new Date() } });
     await pause();
-    await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: anne.id } }, ctx(admin.id));
+    await M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: anne.id } }, ctx(admin.id));
     const types = (await db.agentTeamEvent.findMany({ where: { taskId: t.id }, select: { type: true } })).map((e) => e.type);
     expect(types).toEqual(expect.arrayContaining([...ASSIGNEE_CLEARED_EVENT_TYPES, 'task.assigned']));
     const handBack = await db.agentTeamEvent.findFirstOrThrow({ where: { taskId: t.id, type: 'task.handed-back' } });
@@ -469,7 +469,7 @@ describe('#3934 — escalationEndedAt and alarmsInEffect on a task alarm', () =>
   it('a not-started alarm ends at the real start even after a hand-back cleared the row\'s startedAt (real start then real hand-back)', async () => {
     const { t, alarm } = await notStartedAlarm();
     const pause = () => new Promise((r) => setTimeout(r, 25));
-    await runAsActor({ workerId: anne.id, agentId }, () => M.startAgentTask({}, { taskId: t.id }, ctx(admin.id))); // the real clock's now
+    await runAsActor({ workerId: anne.id, agentId }, () => M.startAgentTask({}, { taskRef: t.id }, ctx(admin.id))); // the real clock's now
     await pause();
     await runAsActor({ workerId: anne.id, agentId }, () => M.handBackAgentTask({}, { taskRef: t.id, reason: { code: 'CANNOT_DO' } }, ctx(admin.id)));
     expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).startedAt).toBeNull(); // the row forgot the start
@@ -481,7 +481,7 @@ describe('#3934 — escalationEndedAt and alarmsInEffect on a task alarm', () =>
   it('the same through the acknowledgement\'s freeze: real start, real hand-back, then the real acknowledgement records the start', async () => {
     const { t, alarm } = await notStartedAlarm();
     const pause = () => new Promise((r) => setTimeout(r, 25));
-    await runAsActor({ workerId: anne.id, agentId }, () => M.startAgentTask({}, { taskId: t.id }, ctx(admin.id)));
+    await runAsActor({ workerId: anne.id, agentId }, () => M.startAgentTask({}, { taskRef: t.id }, ctx(admin.id)));
     await pause();
     await runAsActor({ workerId: anne.id, agentId }, () => M.handBackAgentTask({}, { taskRef: t.id, reason: { code: 'CANNOT_DO' } }, ctx(admin.id)));
     await M.acknowledgeAlarm({}, { eventId: alarm.id }, ctx(admin.id));
@@ -542,11 +542,13 @@ describe('#3934 — the kinds with no task: judged by their own episode', () => 
     expect(await events('alarmsInEffect: true')).toEqual([]);
   });
 
-  it('a coordinator-cadence alarm: the same', async () => {
-    const e = await taskless('alarm.coordinator-cadence');
-    const ep = await db.coordinatorCadenceEpisode.create({ data: { appId: app.id, workerId: rook.id, eventId: e.id, openedAt: at('10:00') } });
+  // #4375: the alarm is raised as alarm.lead-cadence now; rows raised before the rename keep alarm.coordinator-cadence (history,
+  // never rewritten), and both are judged by the same episode table.
+  it.each(['alarm.lead-cadence', 'alarm.coordinator-cadence'])('a lead-cadence alarm of type %s: the same', async (type) => {
+    const e = await taskless(type);
+    const ep = await db.leadCadenceEpisode.create({ data: { appId: app.id, workerId: rook.id, eventId: e.id, openedAt: at('10:00') } });
     expect(await events('alarmsInEffect: true')).toMatchObject([{ id: e.id, escalationEndedAt: null }]);
-    await db.coordinatorCadenceEpisode.update({ where: { id: ep.id }, data: { endedAt: at('10:45') } });
+    await db.leadCadenceEpisode.update({ where: { id: ep.id }, data: { endedAt: at('10:45') } });
     expect(await events()).toMatchObject([{ id: e.id, escalationEndedAt: iso('10:45') }]);
     expect(await events('alarmsInEffect: true')).toEqual([]);
   });

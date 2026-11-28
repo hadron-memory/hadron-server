@@ -58,7 +58,7 @@ async function fixture() {
   await mk('retained', secret.id);
   await mk('retained2', secret.id);
   for (const k of ['approved', 'superseded', 'retained', 'retained2']) await M.approveNode(null, { nodeRef: ids[k] }, as());
-  await M.updateNode(null, { input: { id: ids.superseded, content: 'moved on' } }, as());
+  await M.updateNode(null, { input: { ref: ids.superseded, content: 'moved on' } }, as());
   for (const k of ['approved', 'retained', 'retained2']) await mint(k);
   // Encrypt after the records exist: the columns are RETAINED, and must not show.
   await db.memory.update({ where: { id: secret.id }, data: { isEncrypted: true, vectorIndexEnabled: false } });

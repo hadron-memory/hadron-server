@@ -7,12 +7,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 
-const hooks = vi.hoisted(() => ({ afterCheck: null as null | (() => Promise<void>) }));
+const hooks = vi.hoisted(() => ({ afterCheck: null as null | ((tx: unknown) => Promise<void>) }));
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
 vi.mock('../../../integrations/localFs/saveNodeToFs.js', () => ({ saveNodeToFs: vi.fn().mockResolvedValue({}) }));
-vi.mock('../../../integrations/r2/client.js', () => ({
+vi.mock('../../../integrations/objectstore/index.js', () => ({
   putObject: vi.fn().mockResolvedValue(undefined),
   deleteObject: vi.fn().mockResolvedValue(undefined),
 }));
@@ -26,14 +26,14 @@ vi.mock('../../../lib/authoringAttestation.js', async (importOriginal) => {
       const stamp = await actual.assertAuthoring(...args);
       const hook = hooks.afterCheck;
       hooks.afterCheck = null;
-      if (hook) await hook();
+      if (hook) await hook(args[0]);
       return stamp;
     },
   };
 });
 
 import { db } from '../../../integrations/db/client.js';
-import { deleteObject } from '../../../integrations/r2/client.js';
+import { deleteObject } from '../../../integrations/objectstore/index.js';
 import { createNode as controllerCreateNode } from '../../../controller/operations/createNode.js';
 import { runContext } from '../../../jobs/appRunDeps.js';
 import { parseDataKey, isCiphertext } from '../../../lib/crypto.js';
@@ -47,6 +47,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { waitForLockWaitersOfType } from '../../../test/lockWait.js';
 import { resolvers, type Context } from './resolvers.js';
 import { testRunAgentId } from '../../../test/runAgent.js';
+import { encryptWithSecret } from '../../../test/encryptMemoryWithSecret.js';
 
 const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<Record<string, unknown>>>;
 const ORG = 'seams-3437';
@@ -61,9 +62,9 @@ const ctx = (): Context => ({ db, roles: ['ADMIN'], userId }) as Context;
 const portal = (): Context => ({ ...ctx(), portalHumanUserId: userId }) as Context;
 const claim = (revision = 1) => ({ task: taskId, revision });
 const create = (loc: string, extra: Record<string, unknown> = {}, c: Context = ctx()) =>
-  M.createNode({}, { input: { memoryId, loc, name: loc, content: 'body', role: 'guide', ...extra } }, c);
+  M.createNode({}, { input: { memoryRef: memoryId, loc, name: loc, content: 'body', role: 'guide', ...extra } }, c);
 const update = (loc: string, extra: Record<string, unknown> = {}, c: Context = ctx()) =>
-  M.updateNode({}, { input: { memoryId, loc, ...extra } }, c);
+  M.updateNode({}, { input: { memoryRef: memoryId, loc, ...extra } }, c);
 const stored = (loc: string, memory = memoryId) => db.node.findUniqueOrThrow({ where: { loc_memoryId: { loc, memoryId: memory } } });
 const tombstone = (id: unknown) => db.node.update({ where: { id: id as string }, data: { deletedAt: new Date() } });
 const expectRefused = async (promise: Promise<unknown>, code: string, role = 'guide') => {
@@ -117,26 +118,56 @@ describe('#3437 item 1: a task edit races a write, with no rulebook lock held', 
     expect(await db.nodeRevision.count({ where: { nodeId: first.id as string } })).toBe(0);
   });
 
-  it.each([
-    ['a create', () => create('race', { authoredWith: claim(1) })],
-    ['an update', async () => {
-      await create('race', { authoredWith: claim(1) });
-      hooks.afterCheck = editTask;
-      return update('race', { content: 'edit', authoredWith: claim(1) });
-    }],
-  ])('committed after %s is admitted: the task edit does not wait, and the stamp keeps the admitted revision', async (name, write) => {
-    if (name === 'a create') hooks.afterCheck = editTask;
-    await write();
+  it('committed after an ordinary update is admitted: the task edit does not wait, and the stamp keeps the admitted revision', async () => {
+    await create('race', { authoredWith: claim(1) });
+    hooks.afterCheck = editTask;
+    await update('race', { content: 'edit', authoredWith: claim(1) });
     expect(hooks.afterCheck, 'the admitted write must reach the seam').toBeNull();
     expect((await stored('author-task')).revSeq).toBe(2);
     expect(await stored('race')).toMatchObject({ authorshipKind: 'TASK', authoredByTask: taskId, authoredByRevision: 1 });
-    // The write ordered first, so the next one answers to the new revision.
     await expectRefused(update('race', { content: 'later', authoredWith: claim(1) }), 'AUTHORING_ATTESTATION_STALE');
   });
 
+  it('after a create is admitted, the task kind door waits on the memory handshake; the stamp keeps the admitted revision (#1213)', async () => {
+    let editing: Promise<unknown> | undefined;
+    let drained: Promise<PromiseSettledResult<unknown>[]> | undefined;
+    hooks.afterCheck = async transaction => {
+      const tx = transaction as typeof db;
+      const [{ holder }] = await tx.$queryRaw<Array<{ holder: number }>>`SELECT pg_backend_pid() AS holder`;
+      const [{ key }] = await db.$queryRaw<Array<{ key: number }>>`SELECT hashtext(${'channel-host:' + memoryId}) AS key`;
+      let waiter = -1;
+      const transact = db.$transaction.bind(db);
+      const observed = new Proxy(db, { get(target, property, receiver) {
+        if (property !== '$transaction') return Reflect.get(target, property, receiver);
+        return (work: (tx: unknown) => Promise<unknown>, options: object) => transact(async editTx => {
+          waiter = (await editTx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0].pid;
+          return work(editTx);
+        }, options);
+      } });
+      editing = M.updateTaskNode({}, { input: { memoryRef: memoryId, loc: 'author-task', content: 'instructions v2' } }, { ...ctx(), db: observed });
+      drained = Promise.allSettled([editing]);
+      await vi.waitFor(async () => {
+        const [{ waiting }] = await db.$queryRaw<Array<{ waiting: boolean }>>`
+          SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted
+            AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND pid=${waiter}
+            AND classid=${key < 0 ? 4294967295 : 0}::bigint::oid AND objid=${key >>> 0}::bigint::oid AND objsubid=1
+            AND ${holder}=ANY(pg_blocking_pids(${waiter}::int))) AS waiting`;
+        expect(waiting).toBe(true);
+      }, { timeout: 8000, interval: 10 });
+      // Return from the admission seam to let the create commit and release C; never await its contender here.
+    };
+    try { await create('race', { authoredWith: claim(1) }); }
+    finally { if (drained) await drained; }
+    await editing;
+    expect(hooks.afterCheck).toBeNull();
+    expect((await stored('author-task')).revSeq).toBe(2);
+    expect(await stored('race')).toMatchObject({ authorshipKind: 'TASK', authoredByTask: taskId, authoredByRevision: 1 });
+    await expectRefused(update('race', { content: 'later', authoredWith: claim(1) }), 'AUTHORING_ATTESTATION_STALE');
+  }, 20000);
+
   /** Runs on its own connection inside the write's open transaction, so a lock on the task would hang here. */
   async function editTask() {
-    await M.updateTaskNode({}, { input: { memoryId, loc: 'author-task', content: 'instructions v2' } }, ctx());
+    await M.updateTaskNode({}, { input: { memoryRef: memoryId, loc: 'author-task', content: 'instructions v2' } }, ctx());
   }
 });
 
@@ -184,7 +215,7 @@ describe('#3437 item 4: the seams a `carry` context would silently open', () => 
     let specId: string;
     let specTask: string;
     const request = (rest: Record<string, unknown> = {}) => ({
-      memoryRef: draftId, nodeIds: [specId], oldText: 'cat', newText: 'dog', fields: ['content'], dryRun: true, ...rest,
+      memoryRef: draftId, nodeRefs: [specId], oldText: 'cat', newText: 'dog', fields: ['content'], dryRun: true, ...rest,
     });
     const replace = (input: Record<string, unknown>) => resolvers.Mutation.searchReplaceInSpecNodes(null, { input } as never, ctx());
 
@@ -300,7 +331,7 @@ describe('#3437 item 7: an encrypted no-op, on real ciphertext', () => {
       await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role, authorTaskId: privateTask, authorTaskRequired: true } });
       await db.node.create({ data: { id: generateId(), memoryId: privateId, loc, name: loc, content: 'cat', role, ...stamp } });
     }
-    await resolvers.Mutation.encryptMemory(null, { memoryRef: privateId, dataKey }, ctx());
+    await encryptWithSecret(null, { memoryRef: privateId, dataKey }, ctx());
     sessionKeyCache.set('seams-3437', privateId, key);
   });
 
@@ -317,7 +348,7 @@ describe('#3437 item 7: an encrypted no-op, on real ciphertext', () => {
 
   it('node replace: the same text needs no claim and keeps the stamp; a real change refuses', async () => {
     const node = await row('guide-page');
-    const input = { nodeIds: [node.id], fields: ['content'], oldText: 'cat' };
+    const input = { nodeRefs: [node.id], fields: ['content'], oldText: 'cat' };
     await M.searchReplaceInNodes({}, { input: { ...input, newText: 'cat' } }, ctx());
     await expectStampedAndCurrent('guide-page');
     const before = await row('guide-page');
@@ -327,7 +358,7 @@ describe('#3437 item 7: an encrypted no-op, on real ciphertext', () => {
 
   it('spec replace: the same text needs no claim and keeps the stamp; a real change refuses', async () => {
     const node = await row('pas:010:01');
-    const input = { memoryRef: privateId, nodeIds: [node.id], fields: ['content'], oldText: 'cat', dryRun: true };
+    const input = { memoryRef: privateId, nodeRefs: [node.id], fields: ['content'], oldText: 'cat', dryRun: true };
     const replace = (rest: Record<string, unknown>) => resolvers.Mutation.searchReplaceInSpecNodes(null, { input: { ...input, ...rest } } as never, ctx());
     const same = await replace({ newText: 'cat' }) as { plan: string };
     await replace({ newText: 'cat', dryRun: false, expectedPlan: same.plan });

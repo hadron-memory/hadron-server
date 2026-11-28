@@ -72,7 +72,7 @@ describe('#386 nodeExport resolver', () => {
   });
 
   it('renders canonical MD with loc/memory/contentHash + edge (edgeLoc, runnable), and round-trips', async () => {
-    const r = (await nodeExport(null, { id: fx.srcId, format: 'MD', full: true }, adminCtx())) as ExportResult;
+    const r = (await nodeExport(null, { ref: fx.srcId, format: 'MD', full: true }, adminCtx())) as ExportResult;
     expect(r.format).toBe('MD');
     expect(r.mimeType).toBe('text/markdown');
     expect(r.filename).toBe('intro.md'); // loc leaf
@@ -104,7 +104,7 @@ describe('#386 nodeExport resolver', () => {
   });
 
   it('renders canonical JSON with the full Document shape', async () => {
-    const r = (await nodeExport(null, { id: fx.srcId, format: 'JSON', full: true }, adminCtx())) as ExportResult;
+    const r = (await nodeExport(null, { ref: fx.srcId, format: 'JSON', full: true }, adminCtx())) as ExportResult;
     expect(r.mimeType).toBe('application/json');
     expect(r.filename).toBe('intro.json');
     const doc = JSON.parse(r.data);
@@ -118,7 +118,7 @@ describe('#386 nodeExport resolver', () => {
   });
 
   it('honors section selection (full: false) — CONTENT only returns just the body', async () => {
-    const r = (await nodeExport(null, { id: fx.srcId, format: 'MD', full: false, sections: ['CONTENT'] }, adminCtx())) as ExportResult;
+    const r = (await nodeExport(null, { ref: fx.srcId, format: 'MD', full: false, sections: ['CONTENT'] }, adminCtx())) as ExportResult;
     expect(r.data).toBe('# Intro\n\nBody.\n');
   });
 
@@ -135,13 +135,13 @@ describe('#386 nodeExport resolver', () => {
     await db.node.update({ where: { id: fx.srcId }, data: kind });
 
     const json = JSON.parse(
-      ((await nodeExport(null, { id: fx.srcId, format: 'JSON', full: true }, adminCtx())) as ExportResult).data,
+      ((await nodeExport(null, { ref: fx.srcId, format: 'JSON', full: true }, adminCtx())) as ExportResult).data,
     );
     expect({ role: json.role, isRunnable: json.isRunnable, objectType: json.objectType }).toEqual({
       ...kind, objectType: kind.objectType ?? '',
     });
 
-    const md = ((await nodeExport(null, { id: fx.srcId, format: 'MD', full: true }, adminCtx())) as ExportResult).data;
+    const md = ((await nodeExport(null, { ref: fx.srcId, format: 'MD', full: true }, adminCtx())) as ExportResult).data;
     const { dir, cleanup } = makeTmpDir();
     try {
       const mdPath = join(dir, 'intro.md');
@@ -159,19 +159,19 @@ describe('#386 nodeExport resolver', () => {
 
   it('#1340 — an objectType stored as "" (not NULL) is omitted from MD and "" in JSON (@jonas, #1778)', async () => {
     await db.node.update({ where: { id: fx.srcId }, data: { objectType: '' } });
-    const md = ((await nodeExport(null, { id: fx.srcId, format: 'MD', full: true }, adminCtx())) as ExportResult).data;
+    const md = ((await nodeExport(null, { ref: fx.srcId, format: 'MD', full: true }, adminCtx())) as ExportResult).data;
     expect(md).not.toContain('objectType');
     const json = JSON.parse(
-      ((await nodeExport(null, { id: fx.srcId, format: 'JSON', full: true }, adminCtx())) as ExportResult).data,
+      ((await nodeExport(null, { ref: fx.srcId, format: 'JSON', full: true }, adminCtx())) as ExportResult).data,
     );
     expect(json.objectType).toBe('');
   });
 
   it('#1340 — an ordinary node carries no opinion: nothing in MD, null/"" in JSON', async () => {
-    const md = ((await nodeExport(null, { id: fx.srcId, format: 'MD', full: true }, adminCtx())) as ExportResult).data;
+    const md = ((await nodeExport(null, { ref: fx.srcId, format: 'MD', full: true }, adminCtx())) as ExportResult).data;
     for (const key of ['\nrole:', '\nrunnable:', '\nobjectType:']) expect(md, key).not.toContain(key);
     const json = JSON.parse(
-      ((await nodeExport(null, { id: fx.srcId, format: 'JSON', full: true }, adminCtx())) as ExportResult).data,
+      ((await nodeExport(null, { ref: fx.srcId, format: 'JSON', full: true }, adminCtx())) as ExportResult).data,
     );
     expect({ role: json.role, isRunnable: json.isRunnable, objectType: json.objectType }).toEqual({
       role: null, isRunnable: null, objectType: '',
@@ -180,6 +180,6 @@ describe('#386 nodeExport resolver', () => {
 
   it('denies a caller who cannot read the node\'s memory (NOT_FOUND)', async () => {
     const strangerCtx: Context = { db, roles: ['READER'], userId: fx.strangerId };
-    await expect(nodeExport(null, { id: fx.srcId, format: 'MD', full: true }, strangerCtx)).rejects.toThrow(/not found/i);
+    await expect(nodeExport(null, { ref: fx.srcId, format: 'MD', full: true }, strangerCtx)).rejects.toMatchObject({ code: 'NODE_NOT_FOUND' }); // #4139: was NOT_FOUND
   });
 });

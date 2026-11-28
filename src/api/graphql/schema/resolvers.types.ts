@@ -1,3 +1,4 @@
+import { judgeAppLinks } from '../../../lib/appMemoryLinks.js';
 import { readableSupersedingSessionId } from '../../../lib/sessionSuperseded.js';
 import { isNewInstallPayload } from './installationPayload.js';
 import { listAppInstallations, appInstallationWhere } from '../../../lib/appInstallations.js';
@@ -9,6 +10,7 @@ import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
 import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
 import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { lintWarningPage, lintWarningPageForNodeId } from '../../../lib/bootPromptLint.js';
+import { lintSpec } from '../../../lib/specLint.js';
 import { sharedOrganizations } from './sharedOrganizations.js';
 import { projectGovernedKind } from '../../../lib/edgeGovernedKind.js';
 import { revisionApprovalOf } from '../../../lib/nodeApproval.js';
@@ -16,7 +18,11 @@ import { requireAppKeyManager } from './appKeyManagement.js';
 import { callerIsWorkerSession } from './resolvers.instruction.js';
 import { servedPromptOwnerFields, servedPromptTypeResolvers } from './resolvers.servedPrompt.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { creatableAppUserMemoryClasses } from './appUserMemoryEligibility.js';
 import { loadViewerManages } from './resolvers.appViewerManages.js';
+import { loadSelfJoinFacts } from './resolvers.appSelfJoinFacts.js';
+import { resolveSelfJoinRole, SelfJoinNotAllowedError } from '../../../controller/operations/joinApp.js';
+import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
 import { currentActor, currentActorAmbiguity } from '../../../lib/requestActor.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { sessionEndReason } from '../../../lib/sessionEndReason.js';
@@ -43,7 +49,6 @@ import { portalUrlForUrn } from '../../../lib/portalUrl.js';
 import { emitEntityUrnV2 } from '../../../lib/urnEmit.js';
 import { composeAiConfigUrn, type AiConfigUrnOwner } from '../../../lib/entityRef/aiConfigRef.js';
 import { loadAiConfigOwners, aiConfigOwnerKey, type AiConfigOwnerInfo, type AiConfigOwnerRef } from '../../../lib/aiConfigOwner.js';
-import { tickBatch } from './tickBatch.js';
 import { currentHadronServerId } from '../../../lib/hadronServer.js';
 import { servedEndpointInEffect, type InheritedFrom } from '../../../lib/effectiveSystemMemory.js';
 import { nodeContentValidationState } from '../../../lib/nodeContentValidation.js';
@@ -64,6 +69,7 @@ import { composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
 import { resolveNodeRef } from '../../../lib/entityRef/nodeRef.js';
 import { canReadMemory } from '../../../mcp/access-control.js';
+import { resendSenderDomainVerified } from '../../../lib/resendSenders.js';
 import { publicAssetUrl, isPublicHotlinkEnabled } from '../../assetPublic.js';
 import { canManageAssetPublicLink, PUBLIC_LINK_MEMORY_SELECT } from '../../../lib/asset/publicLink.js';
 import {
@@ -92,7 +98,9 @@ import {
   defaultAiConfigOf,
   isOrgMemberOrAdmin,
   requireAppRead,
+  canReadApp,
   appChildrenWithheld,
+  isUserOwnedAppOwnerMember,
   APP_OWNER_MEMBER_ROLE,
   userOwnedAppOwnerMemberWhere,
   safeCanonicalUrn,
@@ -105,6 +113,8 @@ import {
   assetUrn,
   resolveAppTeamSpaceMemoryIds,
   getAccessibleMemoryIds,
+  holdsContentReadIndependently,
+  canWriteMemoryRecord,
   sessionScopeFilter,
   CONTENT_RAW_DEFAULT,
   PAGE_ARGS_DEFAULT,
@@ -112,6 +122,7 @@ import {
   pageEnvelope,
 } from './resolvers.helpers.js';
 import { loadValidationTaskSet } from './resolvers.validationTaskSet.js';
+import { tickBatch } from './tickBatch.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { publicReadableMemoryWhere } from '../../../lib/orgDiscoverability.js';
 import { memoryRowToRef, agentRowToRef, publicOrgMemoryScope, publicOrgAgentScope } from './publicRefs.js';
@@ -423,6 +434,20 @@ async function loadReadableNestedApp(ctx: Context, appId: string) {
 async function appProjectionWithheld(ctx: Context, appId: string): Promise<boolean> {
   const app = await loadApp(ctx, appId);
   return !!app && appChildrenWithheld(ctx, app);
+}
+
+/**
+ * #3765 (ruling 0260, cor:dmo:050:12): is this App's ROSTER (members, memberCount, appAgents, agents, and the same install fact as
+ * agentId / agent / installedAgentUrn) withheld from the caller? Everything {@link appProjectionWithheld} withholds, except from a
+ * current owner-role member of the user-owned App: "the same rights as the App's owner, except a user-owned App's AI
+ * configuration". The member is decided by {@link isUserOwnedAppOwnerMember} in its own statement (a live, non-impersonated user with
+ * a CURRENT owner-role row on a live user-owned App), never from a cached or token-carried role. The AI configuration fields keep
+ * {@link appProjectionWithheld}, so this arm cannot loosen them.
+ */
+async function appRosterWithheld(ctx: Context, appId: string): Promise<boolean> {
+  const app = await loadApp(ctx, appId);
+  if (!app || !appChildrenWithheld(ctx, app)) return false;
+  return !(await isUserOwnedAppOwnerMember(ctx, app));
 }
 
 async function filterReadableAppRows<T extends {
@@ -1117,6 +1142,23 @@ function truncatedChunksBatched(ctx: Context, nodeId: string): Promise<number | 
 }
 
 /**
+ * #5018 (hrn:node:hadronmemory.com:specs:cor:dmo:060:18) — a node's recorded size, for `Node.storedBytes` (when the parent's projection
+ * omits it) and `Node.revisionBytes` (which the client leaves out of every default select): every node raised in the same tick shares ONE
+ * query, which also returns the memories its revisions were taken in. The read is by the parent's own id, after the node read gate.
+ */
+const nodeBytesOf = tickBatch<string, { stored: number | null; revision: bigint | null; memoryIds: string[] } | null>(async (ctx, ids) => {
+  const rows = await ctx.db.$queryRaw<Array<{
+    id: string; stored: number | null; revision: bigint | null; current: string; memory_ids: string[];
+  }>>`
+    SELECT n.id, n.stored_bytes AS stored, n.revision_bytes AS revision, n.memory_id AS current,
+           COALESCE(array_agg(DISTINCT r.memory_id) FILTER (WHERE r.memory_id IS NOT NULL), ARRAY[]::text[]) AS memory_ids
+    FROM public.nodes n LEFT JOIN public.node_revisions r ON r.node_id = n.id
+    WHERE n.id = ANY(${ids}::text[]) GROUP BY n.id`;
+  // The node's current memory always counts (a legacy revision with no memory is read as it, as nodeRevisions does).
+  return new Map(rows.map((r) => [r.id, { stored: r.stored, revision: r.revision, memoryIds: [...new Set([r.current, ...r.memory_ids])] }]));
+}, null);
+
+/**
  * #3932: `AiServiceConfig.urn` owner lookups raised in the same tick share one query per owner kind
  * ({@link loadAiConfigOwners}); keyed by the request Context, so nothing is kept past the tick. The batch is keyed by
  * the string {@link aiConfigOwnerKey}; the ref behind each key is kept beside it, so the key is never parsed back (#3958).
@@ -1144,6 +1186,28 @@ function aiConfigWarnOnce(ctx: Context): (msg: string) => void {
     aiConfigWarned.add(ctx);
     console.warn(`${msg} (further aiconf URN misses in this request are not logged)`);
   };
+}
+
+/**
+ * #2309: the portal link of a Memory, Agent or App, built from the SAME rendered urn the `urn` field returns (never the stored column,
+ * which is the bare, possibly legacy single-colon or v1 double-colon form). The urn field serves the RAW stored value when emission
+ * throws (`safeCanonicalUrn`), and a raw value can itself start with `hrn:` (a stored `hrn:app:acme.com:::`), so the prefix does not
+ * tell emission from fallback. This calls the strict emitter the field's wrapper calls and answers null when it throws: only a
+ * successfully emitted canonical urn is a link. An unset or malformed portal origin is null too.
+ *
+ * Why the two cannot drift: for memory, agent and app `safeCanonicalUrn` delegates to `safeEntityUrnV2`, which is
+ * `try { emitEntityUrnV2 } catch { raw stored value }`. This function calls the same `emitEntityUrnV2`, so the emitted string is
+ * identical; the ONLY difference is the catch arm (the field serves the raw value, the link serves null).
+ *
+ * `portalUrlForUrn`'s `[/?#\\s]` guard is therefore unreachable from here: `emitEntityUrnV2` already throws on a space, `?`, `#`, `/` and `\`
+ * in a stored value, so such a value takes the catch arm above before the guard sees it. The guard stays as defence in depth for
+ * callers that pass an unvalidated urn (`bestEffortFlatNodeUrn`); `portalUrl.test.ts` pins it directly.
+ */
+function portalUrlOfEntity(kind: 'memory' | 'agent' | 'app', stored: string | null | undefined): string | null {
+  if (!stored) return null;
+  let rendered: string;
+  try { rendered = emitEntityUrnV2(kind, stored); } catch { return null; }
+  return portalUrlForUrn(rendered);
 }
 
 export const typeResolvers = {
@@ -1215,6 +1279,18 @@ export const typeResolvers = {
   ResendSender: {
     hasApiKey: (s: { apiKeyEncrypted?: string | null }) => s.apiKeyEncrypted != null,
     from: (s: { fromAddress: string }) => s.fromAddress,
+    // #4865 — authorize BEFORE the lookup. This field spends the org's Resend key at the
+    // capability tool, so it re-derives the sender's own read gate (resendSender's
+    // isOrgMemberOrAdmin) instead of trusting whatever query handed the object out: the list
+    // also answers App keys of the org, which are not members. No access, no decrypt, no call.
+    domainVerified: async (
+      s: { organizationId: string; fromAddress: string; apiKeyEncrypted: string },
+      _: unknown,
+      ctx: Context,
+    ): Promise<boolean | null> => {
+      if (!(await isOrgMemberOrAdmin(ctx, s.organizationId))) return null;
+      return resendSenderDomainVerified(s);
+    },
   },
   CompiledBootPrompt: {
     lintWarnings: (r: { node: { id: string }; revNo: number }, args: { first?: number | null; after?: string | null }, ctx: Context) =>
@@ -1226,6 +1302,23 @@ export const typeResolvers = {
       lintWarningPageForNodeId(ctx, r.nodeId, args),
   },
   Node: {
+    /** #5018 — the bytes this node takes as stored (content, description, data, properties); null = not measured yet. Any reader of the node. */
+    storedBytes: async (n: { id: string; storedBytes?: number | null }, _: unknown, ctx: Context) =>
+      n.storedBytes !== undefined ? n.storedBytes : ((await nodeBytesOf(ctx, n.id))?.stored ?? null),
+    /**
+     * #5018 — the same figure over this node's earlier revisions, as a base-10 string; null = not measured yet. A revision keeps the memory
+     * it was taken in (a node moved from a private memory into a shared one carries snapshots from both), so the figure is shown only to a
+     * reader who may read EVERY memory a counted revision was taken in (the `nodeRevisions` gate, #602) and for a node whose history is not
+     * concealed (#1663); otherwise null, which discloses nothing about a memory the reader cannot read.
+     */
+    revisionBytes: async (n: { id: string }, _: unknown, ctx: Context) => {
+      const row = await nodeBytesOf(ctx, n.id);
+      if (!row || row.revision === null) return null;
+      for (const memoryId of row.memoryIds) if (!(await isMemoryReadableCached(ctx, memoryId))) return null;
+      const { isConcealedCommentHistory } = await import('./resolvers.comments.js');
+      if (await isConcealedCommentHistory(ctx, n.id)) return null;
+      return row.revision.toString();
+    },
     indexTruncated: async (n: { id: string; embeddingTruncatedChunks?: number | null }, _: unknown, ctx: Context) => {
       const count = n.embeddingTruncatedChunks !== undefined ? n.embeddingTruncatedChunks
         : await truncatedChunksBatched(ctx, n.id);
@@ -1239,6 +1332,9 @@ export const typeResolvers = {
       args: { first?: number | null; after?: string | null },
       ctx: Context,
     ) => lintWarningPage(ctx, n, args),
+    /** #5109 — spec content lint: pure on the stored text, under the node's own read gate (the parent resolved it). */
+    specLint: (n: { loc: string; name?: string | null; role?: string | null; tags?: string[] | null; content?: string | null }) =>
+      n.content === undefined ? null : lintSpec({ loc: n.loc, name: n.name, role: n.role, tags: n.tags, content: n.content }),
     /**
      * #2041 — the one place a node's include tags resolve for a reader
      * (cor:dmo:150:03), so every path that reaches `Node.content` is covered
@@ -1726,6 +1822,17 @@ export const typeResolvers = {
       (await corpusMintStateOf(ctx.db, m.id)).mintedAt,
     corpusState: async (m: { id: string }, _: unknown, ctx: Context) =>
       (await corpusMintStateOf(ctx.db, m.id)).state,
+    // #606: whether a write would be allowed for THIS caller: the memory write gate's answer, and false under read-only
+    // impersonation (resolvers.helpers canWriteMemoryRecord).
+    // A failure that is not the gate's refusal answers null (unknown), logged, so one memory cannot null a list.
+    canWrite: async (m: { id: string }, _: unknown, ctx: Context) => {
+      try {
+        return await canWriteMemoryRecord(ctx, m.id);
+      } catch (err) {
+        console.warn(`[Memory.canWrite] write gate failed for memory ${m.id}; answering null:`, err);
+        return null;
+      }
+    },
     // A Memory reader may be external to its owning org. The nested object
     // exposes org policy and relations, so apply organization(ref:)'s gate.
     organization: (g: { organizationId: string | null }, _: unknown, ctx: Context) =>
@@ -1917,6 +2024,7 @@ export const typeResolvers = {
       if (!urn) throw new Error('Memory URN is required but not found (partial query?)');
       return safeCanonicalUrn('memory', urn);
     },
+    portalUrl: (g: { urn?: string | null }) => portalUrlOfEntity('memory', g.urn),
   },
   App: {
     /**
@@ -1929,8 +2037,36 @@ export const typeResolvers = {
     /** #2171 (R211): the union reader every admission decides with. */
     availableMemberRoles: async (a: { id: string }, _: unknown, ctx: Context) =>
       (await loadOfferedMemberRoles(ctx.db, a.id)).roles,
+    /**
+     * #4490 — would joinApp accept the caller? The decision is joinApp's own `resolveSelfJoinRole`, never a copy. The same
+     * read gate as `Query.app` (`canReadApp`) runs here too, because a nested App hands whoever reaches it the whole field
+     * surface (findings:broadening-read-gate-leaks-nested-objects): null, silently, for anyone who fails it, for a refused
+     * principal (App key, impersonation, run) and for a request with no user. A member reads MEMBER with no role.
+     */
+    selfJoin: async (a: { id: string }, _: unknown, ctx: Context) => {
+      if (!ctx.userId || isRefusedPrincipal(ctx)) return null;
+      // Re-read the App by id (batched per request, resolvers.appSelfJoinFacts.ts): a route that reaches App with a narrower select
+      // leaves the lifecycle columns undefined, and reading `undefined` as "installed" would answer OPEN where joinApp refuses
+      // (BLIND P2-2). The ownership columns the read gate needs come from the same fresh row, never from what the parent carries.
+      const facts = await loadSelfJoinFacts(ctx, a.id);
+      if (!facts || facts.app.deletedAt) return null;
+      const app = facts.app;
+      if (!(await canReadApp(ctx, app))) return null;
+      // The shared gate decision (resolveSelfJoinRole) is joinApp's own; the rows around it are pinned one by one against the real
+      // joinApp. TWO deliberate differences, each pinned: (1) joinApp checks the lifecycle first, then the idempotent re-join, but a
+      // member is answered MEMBER before the lifecycle check (condition 4: a member learns nothing new, and MEMBER is only what they
+      // know), so a member of an uninstalled App reads MEMBER where joinApp refuses it as uninstalled; (2) capacity is outside the
+      // answer (condition 2: a state and a role, never maxMembers or a member count, and answering FULL would reveal that the count
+      // reached the maximum), so a full App reads OPEN where joinApp refuses it with MaxMembersExceededError.
+      if (facts.isMember) return { state: 'MEMBER', role: null };
+      if (app.uninstalledAt) return { state: 'CLOSED', role: null };
+      try { return { state: 'OPEN', role: await resolveSelfJoinRole(ctx.db, app.id) }; }
+      catch (e) { if (e instanceof SelfJoinNotAllowedError) return { state: 'CLOSED', role: null }; throw e; } // any other failure is a real failure, never CLOSED
+    },
     /** #2109 — whether the caller manages this App; the shared managesApp predicate as a read-time fact. */
     viewerManages: (a: { id: string }, _: unknown, ctx: Context) => loadViewerManages(ctx, a.id),
+    /** #5218 — what createMemoryInApp would still admit for the viewer; the door's own check, from the viewer's own rows. */
+    viewerAppUserMemoryClasses: (a: { id: string }, _: unknown, ctx: Context) => creatableAppUserMemoryClasses(ctx, a.id),
     /**
      * Spec 049 Phase 4 — the App's default Channel, gated on its HOST MEMORY
      * like `App.sharedMemory`: `Query.app` admits an org member who is not an
@@ -1981,7 +2117,7 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ) => {
-      if (await appProjectionWithheld(ctx, a.id)) return null;
+      if (await appRosterWithheld(ctx, a.id)) return null;
       // #2640: the URN names the primary Agent, so it answers as that Agent's own read does.
       const agentUrn = (await readablePrimaryAgent(ctx, a))?.urn;
       if (!agentUrn) return null;
@@ -2016,7 +2152,7 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ): Promise<string | null> => {
-      if (await appProjectionWithheld(ctx, a.id)) return null;
+      if (await appRosterWithheld(ctx, a.id)) return null;
       return (await readablePrimaryAgent(ctx, a))?.id ?? null;
     },
     agent: async (
@@ -2024,7 +2160,7 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ) => {
-      if (await appProjectionWithheld(ctx, a.id)) return null;
+      if (await appRosterWithheld(ctx, a.id)) return null;
       const eager = readPrimaryAgentRecordFromEager(a) as (NestedAgentRow & Record<string, unknown>) | null | undefined;
       if (eager !== undefined) return readableNestedAgent(ctx, eager);
       const agent = await getPrimaryAgent(ctx.db, a.id, { include: AGENT_INCLUDE });
@@ -2035,7 +2171,7 @@ export const typeResolvers = {
       _: unknown,
       ctx: Context,
     ) => {
-      if (await appProjectionWithheld(ctx, a.id)) return null;
+      if (await appRosterWithheld(ctx, a.id)) return null;
       const installs = await listAppInstallations(ctx.db,a.id);
       const agents = await ctx.db.agent.findMany({where:{id:{in:installs.map(r=>r.agentId)}},include:AGENT_INCLUDE});
       const byId = new Map(agents.map(agent=>[agent.id,agent]));
@@ -2047,8 +2183,42 @@ export const typeResolvers = {
         .map(row=>row.agent)
         .filter((ag): ag is NonNullable<typeof ag> => ag !== null);
     },
+    /**
+     * #5185: this App's memory links. Only entries whose memory the viewer reads in their OWN right (not through any App) are
+     * listed; the rest are absent and not counted. `active` is the shared at-use judgement of `src/lib/appMemoryLinks.ts`.
+     */
+    attachedMemories: async (a: { id: string }, _: unknown, ctx: Context) => {
+      if (!(await loadReadableNestedApp(ctx, a.id))) return [];
+      // The attacher is a roster fact: withheld from a caller the member list is withheld from (#2089), as `members` does.
+      const rosterWithheld = await appRosterWithheld(ctx, a.id);
+      const links = await ctx.db.appMemoryLink.findMany({
+        where: { appId: a.id, memory: { deletedAt: null } },
+        orderBy: [{ createdAt: 'asc' }, { memoryId: 'asc' }, { attachedBy: 'asc' }],
+        select: { memoryId: true, attachedBy: true, createdAt: true, attacher: { select: { handle: true } } },
+      });
+      if (links.length === 0) return [];
+      // One own-right judgement per distinct memory for this viewer.
+      const memoryIds = [...new Set(links.map((l) => l.memoryId))];
+      const readableIds = new Set<string>();
+      await Promise.all(memoryIds.map(async (id) => { if (await holdsContentReadIndependently(ctx, id)) readableIds.add(id); }));
+      const visible = links.filter((l) => readableIds.has(l.memoryId));
+      if (visible.length === 0) return [];
+      const judged = await judgeAppLinks(ctx.db, a.id, { onlyMemoryIds: [...readableIds] });
+      const active = new Map(judged.map((j) => [`${j.memoryId}:${j.attachedBy}`, j.active]));
+      const memories = new Map((await ctx.db.memory.findMany({ where: { id: { in: [...readableIds] } } })).map((m) => [m.id, m]));
+      return visible.flatMap((l) => {
+        const memory = memories.get(l.memoryId);
+        return memory ? [{
+          memory,
+          attachedById: rosterWithheld ? null : l.attachedBy,
+          attachedByHandle: rosterWithheld ? null : (l.attacher.handle ?? null),
+          createdAt: l.createdAt,
+          active: active.get(`${l.memoryId}:${l.attachedBy}`) ?? false,
+        }] : [];
+      });
+    },
     members: async (a: { id: string }, _: unknown, ctx: Context) => {
-      if (await appProjectionWithheld(ctx, a.id)) return null;
+      if (await appRosterWithheld(ctx, a.id)) return null;
       if (!(await loadReadableNestedApp(ctx, a.id))) return [];
       return ctx.db.appMember.findMany({
         where: { appId: a.id },
@@ -2056,7 +2226,7 @@ export const typeResolvers = {
       });
     },
     memberCount: async (a: { id: string }, _: unknown, ctx: Context) => {
-      if (await appProjectionWithheld(ctx, a.id)) return null;
+      if (await appRosterWithheld(ctx, a.id)) return null;
       if (!(await loadReadableNestedApp(ctx, a.id))) return 0;
       return ctx.db.appMember.count({ where: { appId: a.id } });
     },
@@ -2135,7 +2305,7 @@ export const typeResolvers = {
     // parent App onto each row so `AppAgent.app` resolves without an
     // N+1 DB lookup per row.
     appAgents: async (a: { id: string; appAgents?: unknown } & Record<string, unknown>, _: unknown, ctx: Context) => {
-      if (await appProjectionWithheld(ctx, a.id)) return null;
+      if (await appRosterWithheld(ctx, a.id)) return null;
       const installs = await listAppInstallations(ctx.db,a.id);
       const eager = readAllAgentRecordsFromEager(a) ?? [];
       const agents = new Map(eager.map(agent=>[(agent as {id:string}).id,agent] as const));
@@ -2163,6 +2333,7 @@ export const typeResolvers = {
       if (!a.urn) throw new Error('App URN is required but not found (partial query?)');
       return safeCanonicalUrn('app', a.urn);
     },
+    portalUrl: (a: { urn?: string | null }) => portalUrlOfEntity('app', a.urn),
   },
   // 023-app-shape US1: the App↔Agent N:M join.
   AppAgent: {
@@ -2873,6 +3044,7 @@ export const typeResolvers = {
       if (!a.urn) throw new Error('Agent URN is required but not found (partial query?)');
       return safeCanonicalUrn('agent', a.urn);
     },
+    portalUrl: (a: { urn?: string | null }) => portalUrlOfEntity('agent', a.urn),
   },
   UsageEvent: {
     actionArgs: (event: { actionArgs: unknown }) => deserializeJson(event.actionArgs),

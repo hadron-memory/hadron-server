@@ -11,8 +11,6 @@ import { waitForLockWaiters } from '../../../test/lockWait.js';
 import { typeDefs } from './typeDefs.js';
 import { buildSchema, graphql } from 'graphql';
 
-import * as rootFs from '../../../integrations/localFs/saveNodeToFs.js';
-
 afterEach(() => vi.restoreAllMocks());
 const M = resolvers.Mutation as any;
 let org: any, foreign: any, app: any, agent: any;
@@ -51,7 +49,7 @@ describe('#2661 new free-standing app memory', () => {
     const creator = role === 'admin' ? admin.id : owner.id;
     const row = await create(ctx(creator), {shortDescription: 'Short notes', description: 'Full notes', tags: ['team']});
     expect(await db.memory.findUniqueOrThrow({where:{id:row.id}})).toMatchObject({createdBy:creator, shortDescription:'Short notes', description:'Full notes', tags:['team']});
-    expect(await db.node.findMany({where:{memoryId:row.id}})).toMatchObject([{loc:'App Notes',name:'App Notes',description:'Root node for this memory.'}]);
+    expect(await db.node.findMany({where:{memoryId:row.id}})).toEqual([]); // #3952: no root node on create
     const listed = await (resolvers.Query as any).memories({}, { filter: { memoryClasses: ['app'] } }, ctx(participant.id));
     expect(listed.items.map((m: any) => m.id)).toContain(row.id);
     expect(row).toMatchObject({ class: 'app', organizationId: org.id, appId: app.id, isInstallMemory: false,
@@ -90,12 +88,6 @@ describe('#2661 new free-standing app memory', () => {
   it('conceals the user-owned refusal from a stranger', async () => {
     const personal = await db.app.create({data:{name:'Own',urn:'u2661:own',ownerUserId:admin.id}});
     await refused(ctx(outsider.id), {appRef:personal.id});
-  });
-  it('rolls back the memory if creating its root fails', async () => {
-    vi.spyOn(rootFs, 'saveNodeToFs').mockResolvedValue({error:'injected root failure'});
-    await expect(create()).rejects.toThrow('injected root failure');
-    expect(await db.memory.count()).toBe(0);
-    expect(await db.node.count()).toBe(0);
   });
   it('refuses an App with no installed Agent', async () => {
     await db.appAgent.deleteMany({ where: { appId: app.id } });

@@ -37,14 +37,35 @@ import { runAsActor } from '../lib/requestActor.js';
 import { UrnNotQualifiedError } from '../lib/urn.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { isTrustedRefusal } from '../api/graphql/formatError.js';
+import { refusalText } from '../lib/refEcho.js';
 
 type TaskRow = Record<string, any> & { id: string; status: string };
 type EventRow = Record<string, any> & { id: string; type: string; createdAt: Date };
 type Party = { kind: 'WORKER' | 'USER'; id: string; name: string | null; urn: string | null } | null;
 
 type Resolver<A, R> = (parent: unknown, args: A, ctx: Context) => Promise<R>;
+/**
+ * #4148 (S7): the MCP task tools keep their parameter names (golden #2260), while the GraphQL arguments behind them are now
+ * refs. These map one to the other, so a tool's filter or target is never silently dropped (hadron_task_list,
+ * hadron_team_events, hadron_task_assign and hadron_task_reassign; Riana's §10 P3 found the last two). Exported so they are pinned directly:
+ * the tools themselves are switched off (#3082 R4, no test path back), and would rely on this mapping when switched on.
+ */
+export function mcpTaskListArgs<T extends Record<string, unknown> & { parentTaskId?: unknown }>(args: T): Omit<T, 'parentTaskId'> & { parentTaskRef?: unknown } {
+  const { parentTaskId, ...rest } = args;
+  return parentTaskId === undefined ? rest : { ...rest, parentTaskRef: parentTaskId };
+}
+/** #5080: `hadron_task_create` keeps `parentTaskId`; the GraphQL input names it `parentTaskRef`. */
+export function mcpTaskCreateInput<T extends Record<string, unknown> & { parentTaskId?: unknown }>(args: T): Omit<T, 'parentTaskId'> & { parentTaskRef?: unknown } {
+  const { parentTaskId, ...rest } = args;
+  return parentTaskId === undefined ? rest : { ...rest, parentTaskRef: parentTaskId };
+}
+export function mcpTaskRefArgs<T extends Record<string, unknown> & { taskId?: unknown }>(args: T): Omit<T, 'taskId'> & { taskRef?: unknown } {
+  const { taskId, ...rest } = args;
+  return taskId === undefined ? rest : { ...rest, taskRef: taskId };
+}
+
 const Q = resolvers.Query as unknown as {
-  agentTask: Resolver<{ id: string }, TaskRow | null>;
+  agentTask: Resolver<{ ref: string }, TaskRow | null>;
   agentTasks: Resolver<Record<string, unknown>, TaskRow[]>;
   agentTaskTree: Resolver<{ root: string }, TaskRow[] | null>;
   agentTeamEvents: Resolver<Record<string, unknown>, EventRow[]>;
@@ -55,12 +76,50 @@ const MA = resolvers.Mutation as unknown as {
   setWorkerAvailability: Resolver<{ input: Record<string, unknown> }, AvailabilityRow>;
   setModelFamilyAvailability: Resolver<{ input: Record<string, unknown> }, AvailabilityRow>;
   setAgentTaskStallSchedule: Resolver<{ appRef: string; input: Record<string, unknown> }, StallScheduleView>;
+  setSaturationAlarmWakeRoles: Resolver<{ appRef: string; roles: string[] }, WakeRolesView>;
+  setAppRoleList: Resolver<{ appRef: string; purpose: string; roles: string[] }, { appId: string; purpose: string; roles: string[] }>;
+  reportExternalTasks: Resolver<{ appRef: string; exist: boolean }, ExternalTasksReportView>;
 };
 const QA = resolvers.Query as unknown as {
   teamAvailability: Resolver<{ appRef: string }, { workers: AvailabilityRow[]; families: AvailabilityRow[] }>;
   teamRoster: Resolver<{ appRef: string }, { appId: string; asOf: Date; workers: RosterRow[] }>;
   agentTaskStallSchedule: Resolver<{ appRef: string }, StallScheduleView>;
+  saturationAlarmWakeRoles: Resolver<{ appRef: string }, WakeRolesView>;
+  appRoleLists: Resolver<{ appRef: string }, RoleListsView>;
+  externalTasksReport: Resolver<{ appRef: string }, ExternalTasksReportView>;
 };
+type ExternalTasksReportView = { appId: string; exist: boolean | null; reportedAt: Date | null };
+/** #4937: the MCP report tool keeps the GraphQL argument names; it drops `session`. Exported to pin it (the tool is switched off). */
+export function mcpExternalTasksReportArgs(args: { session?: unknown; appRef: string; exist: boolean }): { appRef: string; exist: boolean } {
+  return { appRef: args.appRef, exist: args.exist };
+}
+/** #4960: the report is a no-op when the stored answer already equals the requested one; the tool says so. Exported to pin it (the tool is switched off). */
+export function mcpExternalTasksReportLead(stored: boolean | null, requested: boolean): string {
+  return stored === requested ? 'Already reported.' : 'Reported.';
+}
+const renderExternalTasksReport = (r: ExternalTasksReportView): string =>
+  r.exist === null
+    ? 'This App has never reported external tasks, so its lead cadence alarm does not exist.'
+    : `The App's latest report says external tasks ${r.exist ? 'exist' : 'do not exist'}${r.reportedAt ? ` (since ${r.reportedAt.toISOString()})` : ''}.`;
+type WakeRolesView = { appId: string; roles: string[] };
+/**
+ * #4777: the MCP wake-roles tools keep the GraphQL argument names, so the mapping is the identity on `appRef` and
+ * `roles`; it drops `session` (the tool's own binding argument), which the resolver never takes. Exported to pin it
+ * directly: the tools are switched off (#3082 R1, R4: no test path back).
+ */
+export function mcpWakeRolesArgs(args: { session?: unknown; appRef: string; roles: string[] }): { appRef: string; roles: string[] } {
+  return { appRef: args.appRef, roles: args.roles };
+}
+type RoleListsView = { appId: string; defectLink: string[]; registerPick: string[]; reviewWithdraw: string[] };
+/** #4921: the MCP role-list set tool keeps the GraphQL argument names; it drops `session`. Exported to pin it (the tool is switched off). */
+export function mcpRoleListArgs(args: { session?: unknown; appRef: string; purpose: string; roles: string[] }): { appRef: string; purpose: string; roles: string[] } {
+  return { appRef: args.appRef, purpose: args.purpose, roles: args.roles };
+}
+const renderRoleLists = (r: RoleListsView): string =>
+  [['defect link', r.defectLink], ['register pick', r.registerPick], ['review withdraw', r.reviewWithdraw]]
+    .map(([n, l]) => `${n as string}: ${(l as string[]).length ? (l as string[]).join(', ') : '(none listed)'}`).join('\n');
+const renderWakeRoles = (r: WakeRolesView): string =>
+  r.roles.length ? `Saturation alarms wake these roles: ${r.roles.join(', ')}.` : 'Saturation alarms wake nobody (the list is empty).';
 type StallScheduleView = Record<StallScheduleKey, number> & { updatedAt: Date | null };
 type RosterRow = Omit<import('../lib/agentTasks/roster.js').RosterEntry, 'teamPlacement'> & {
   appId: string;
@@ -124,7 +183,7 @@ function refusal(e: unknown) {
     const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
     return textResult([`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n'), true);
   }
-  if (e instanceof UrnNotQualifiedError) return textResult(`[bad_user_input] ${e.message}`, true);
+  if (e instanceof UrnNotQualifiedError) return textResult(`[bad_user_input] ${refusalText(e)}`, true);
   throw e;
 }
 
@@ -172,11 +231,15 @@ export async function renderTask(t: TaskRow, ctx: Context, dependencies: { limit
     T.assignee(t as never, {}, ctx) as Promise<Party>,
     T.waitingOnChildren(t as never, {}, ctx),
   ]);
-  const [blockedBy, blocks] = await Promise.all([T.blockedBy(t as never, dependencies, ctx), T.blocks(t as never, dependencies, ctx)]);
+  const [blockedBy, blocks, urn] = await Promise.all([
+    T.blockedBy(t as never, dependencies, ctx), T.blocks(t as never, dependencies, ctx), T.urn(t as never, {}, ctx),
+  ]);
   const flags = [T.queued(t as never) ? 'queued' : null, waiting ? 'waiting on child tasks' : null].filter(Boolean);
   const lines = [
     // #2553: the handle first, then the id it is an alias for.
     `- ${t.handle} ${t.title} (id: ${t.id})`,
+    // #3878: the task's URN, the same address AgentTask.urn emits (GraphQL/MCP parity); omitted when it cannot compose.
+    ...(urn ? [`  urn: ${urn}`] : []),
     `  priority: ${t.priority ?? 1}`,
     `  blocked: ${t.blocked ?? false}`,
     `  blocked by (${blockedBy.total} total${blockedBy.hasMore ? ', more pages' : ''}): ${blockedBy.items.map((b) => b.id).join(', ') || 'none on this page'}`,
@@ -279,7 +342,7 @@ const party = z.object({
 }).describe('Exactly one of worker or user.');
 const taskId = z.string().describe(
   'The task id, or its handle: AT3.405 (a project, then the number within each parent; AT0.<n> is a task with no project). ' +
-    'A person who belongs to several Apps qualifies it: hrn:agenttask:<app-urn>:AT3.405. The handle is not a GitHub issue number.',
+    'A person who belongs to several Apps qualifies it with the task URN: hrn:agenttask:<app-urn>:at3.405 (either case). The handle is not a GitHub issue number.',
 );
 
 /**
@@ -389,8 +452,9 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       'A CHILD task names parentTaskId; only the parent\'s assignee may create one, and owns it. Omit assignee to leave ' +
       'it queued; pass status BACKLOG to park it instead.',
     SHAPE_HADRON_TASK_CREATE,
-    async ({ session, ...input }) =>
-      write('hadron_task_create', session, 'Created', (ctx) => M.createAgentTask({}, { input }, ctx)),
+    async ({ session, parentTaskId, ...rest }) =>
+      write('hadron_task_create', session, 'Created', (ctx) =>
+        M.createAgentTask({}, { input: mcpTaskCreateInput({ ...rest, parentTaskId }) }, ctx)),
   );
 
   off('hadron_task_blocker_add',
@@ -414,7 +478,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       'Source and lifecycle fields are fixed. Ended tasks refuse edits; edits are not progress and clear no wake.',
     SHAPE_HADRON_TASK_UPDATE,
     async ({ session, taskId, input }) =>
-      write('hadron_task_update', session, 'Updated', ctx => M.updateAgentTask({}, {taskId,input:input ?? {}}, ctx)),
+      write('hadron_task_update', session, 'Updated', ctx => M.updateAgentTask({}, {taskRef: taskId,input:input ?? {}}, ctx)),
   );
 
   off(
@@ -424,7 +488,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       'already has an assignee is moved with hadron_task_reassign.',
     SHAPE_HADRON_TASK_ASSIGN,
     async ({ session, ...args }) =>
-      write('hadron_task_assign', session, 'Assigned', (ctx) => M.assignAgentTask({}, args, ctx)),
+      write('hadron_task_assign', session, 'Assigned', (ctx) => M.assignAgentTask({}, mcpTaskRefArgs(args), ctx)),
   );
 
   off(
@@ -432,7 +496,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     'Move a task to another assignee: the task\'s owner, or whoever manages the App (cor:agt:050:09). A started task stays started; the former assignee can no longer move it.',
     SHAPE_HADRON_TASK_REASSIGN,
     async ({ session, ...args }) =>
-      write('hadron_task_reassign', session, 'Reassigned', (ctx) => M.reassignAgentTask({}, args, ctx)),
+      write('hadron_task_reassign', session, 'Reassigned', (ctx) => M.reassignAgentTask({}, mcpTaskRefArgs(args), ctx)),
   );
 
   off(
@@ -440,7 +504,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     'Start a pending task: its assignee only (cor:agt:050:08).',
     SHAPE_HADRON_TASK_START,
     async ({ session, taskId: id }) =>
-      write('hadron_task_start', session, 'Started', (ctx) => M.startAgentTask({}, { taskId: id }, ctx)),
+      write('hadron_task_start', session, 'Started', (ctx) => M.startAgentTask({}, { taskRef: id }, ctx)),
   );
 
   off(
@@ -448,7 +512,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     'Record progress on a started task: its assignee only (cor:agt:050:08). Carries no text.',
     SHAPE_HADRON_TASK_PROGRESS,
     async ({ session, taskId: id }) =>
-      write('hadron_task_progress', session, 'Progress recorded', (ctx) => M.recordAgentTaskProgress({}, { taskId: id }, ctx)),
+      write('hadron_task_progress', session, 'Progress recorded', (ctx) => M.recordAgentTaskProgress({}, { taskRef: id }, ctx)),
   );
 
   off(
@@ -457,7 +521,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     SHAPE_HADRON_TASK_FINISH,
     async ({ session, taskId: id, outcome, summary, evidence }) =>
       write('hadron_task_finish', session, 'Finished', (ctx) =>
-        M.finishAgentTask({}, { taskId: id, result: { outcome, summary, evidence } }, ctx)),
+        M.finishAgentTask({}, { taskRef: id, result: { outcome, summary, evidence } }, ctx)),
   );
 
   off(
@@ -465,7 +529,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     'Cancel a pending, started or backlog task: its owner, a worker the owner reports to, or whoever manages the App (cor:agt:050:09).',
     SHAPE_HADRON_TASK_CANCEL,
     async ({ session, taskId: id }) =>
-      write('hadron_task_cancel', session, 'Cancelled', (ctx) => M.cancelAgentTask({}, { taskId: id }, ctx)),
+      write('hadron_task_cancel', session, 'Cancelled', (ctx) => M.cancelAgentTask({}, { taskRef: id }, ctx)),
   );
 
   // ── #1754: the backlog moves (cor:agt:050:02) ─────────────────────────
@@ -476,7 +540,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       'no alarms. Whoever may assign a task may park it: its owner, a worker the owner reports to, or whoever manages the App (cor:agt:050:09).',
     SHAPE_HADRON_TASK_PARK,
     async ({ session, taskId: id }) =>
-      write('hadron_task_park', session, 'Parked', (ctx) => M.parkAgentTask({}, { taskId: id }, ctx)),
+      write('hadron_task_park', session, 'Parked', (ctx) => M.parkAgentTask({}, { taskRef: id }, ctx)),
   );
 
   off(
@@ -485,7 +549,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       'a task may make it ready: its owner, a worker the owner reports to, or whoever manages the App (cor:agt:050:09).',
     SHAPE_HADRON_TASK_MAKE_READY,
     async ({ session, taskId: id }) =>
-      write('hadron_task_make_ready', session, 'Ready', (ctx) => M.makeAgentTaskReady({}, { taskId: id }, ctx)),
+      write('hadron_task_make_ready', session, 'Ready', (ctx) => M.makeAgentTaskReady({}, { taskRef: id }, ctx)),
   );
 
   off(
@@ -496,11 +560,11 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
       read(session, async (ctx) => {
         if (tree) {
           const rows = await Q.agentTaskTree({}, { root: id }, ctx);
-          if (!rows) return textResult(`[task_not_found] Task not found.\ntaskId: ${id}`, true);
+          if (!rows) return textResult('[task_not_found] Task not found.', true); // #5168: the caller's id is not echoed
           return textResult((await Promise.all(rows.map((t) => renderTask(t, ctx, { limit: dependencyLimit, offset: dependencyOffset })))).join('\n'));
         }
-        const t = await Q.agentTask({}, { id }, ctx);
-        if (!t) return textResult(`[task_not_found] Task not found.\ntaskId: ${id}`, true);
+        const t = await Q.agentTask({}, { ref: id }, ctx);
+        if (!t) return textResult('[task_not_found] Task not found.', true); // #5168: the caller's id is not echoed
         return textResult(await renderTask(t, ctx, { limit: dependencyLimit, offset: dependencyOffset }));
       }),
   );
@@ -511,7 +575,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     SHAPE_HADRON_TASK_LIST,
     async ({ session, ...args }) =>
       read(session, async (ctx) => {
-        const rows = await Q.agentTasks({}, args, ctx);
+        const rows = await Q.agentTasks({}, mcpTaskListArgs(args), ctx);
         if (!rows.length) return textResult('No tasks match.');
         return textResult((await Promise.all(rows.map((t) => renderTask(t, ctx)))).join('\n'));
       }),
@@ -523,7 +587,7 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     SHAPE_HADRON_TEAM_EVENTS,
     async ({ session, ...args }) =>
       read(session, async (ctx) => {
-        const rows = await Q.agentTeamEvents({}, args, ctx);
+        const rows = await Q.agentTeamEvents({}, mcpTaskRefArgs(args), ctx);
         if (!rows.length) return textResult('No events match.');
         const lines = await Promise.all(rows.map((e) => renderEvent(e, ctx)));
         const pageSize = args.limit ?? 20;
@@ -615,6 +679,75 @@ export function registerAgentTaskTools(server: McpServer, deps: { db: PrismaClie
     },
   );
 
+  // #4777 (cor:agt:060:16): the saturation-alarm wake-roles list. Disabled like every team tool (#3082 R1), ruled for this
+  // door by the gate's amendment; each delegates to the GraphQL resolver, so the two doors cannot differ.
+  off(
+    'hadron_saturation_wake_roles',
+    'Read the roles a team App\'s saturation alarms wake (cor:agt:060:16): empty by default. Readers: whoever may read the ' +
+      'App\'s roster (cor:agt:050:21).',
+    SHAPE_HADRON_SATURATION_WAKE_ROLES,
+    async ({ session, appRef }) =>
+      read(session, async (ctx) => textResult(renderWakeRoles(await QA.saturationAlarmWakeRoles({}, { appRef }, ctx)))),
+  );
+
+  off(
+    'hadron_saturation_wake_roles_set',
+    'Set the roles a team App\'s saturation alarms wake, the whole list at once (cor:agt:060:16): whoever manages the App ' +
+      'only. Names are trimmed and lower-cased and duplicates collapse; at most 32 names of 1 to 64 characters with no ":" ' +
+      'or whitespace; an empty list clears it. A change wakes nobody for an alarm already raised.',
+    SHAPE_HADRON_SATURATION_WAKE_ROLES_SET,
+    async (args) =>
+      writeOther('hadron_saturation_wake_roles_set', args.session, async (ctx) =>
+        `Set.\n\n${renderWakeRoles(await MA.setSaturationAlarmWakeRoles({}, mcpWakeRolesArgs(args), ctx))}`),
+  );
+
+  // #4937 (cor:agt:050:31): whether work exists outside Hadron. Disabled like every team tool (#3082 R1); each delegates to the GraphQL resolver.
+  off(
+    'hadron_external_tasks_report',
+    'Read a team App\'s latest report of whether work exists outside Hadron (cor:agt:050:31): never reported until a manager ' +
+      'reports. Readers: whoever may read the App\'s roster (cor:agt:050:21).',
+    SHAPE_HADRON_EXTERNAL_TASKS_REPORT,
+    async ({ session, appRef }) =>
+      read(session, async (ctx) => textResult(renderExternalTasksReport(await QA.externalTasksReport({}, { appRef }, ctx)))),
+  );
+
+  off(
+    'hadron_external_tasks_report_set',
+    'Report whether work exists OUTSIDE Hadron for a team App (GitHub issues and the like): whoever manages the App only. ' +
+      'The lead cadence alarm does not exist for an App until its first report, and exists only while the latest report says ' +
+      'true. There is no staleness rule. A report of false only stops new alarms; it does not end an open one.',
+    SHAPE_HADRON_EXTERNAL_TASKS_REPORT_SET,
+    async (args) =>
+      writeOther('hadron_external_tasks_report_set', args.session, async (ctx) => {
+        const stored = (await QA.externalTasksReport({}, { appRef: args.appRef }, ctx)).exist;
+        const after = await MA.reportExternalTasks({}, mcpExternalTasksReportArgs(args), ctx);
+        return `${mcpExternalTasksReportLead(stored, args.exist)}\n\n${renderExternalTasksReport(after)}`;
+      }),
+  );
+
+  // #4921 slice A: the App's role lists. Disabled like every team tool (#3082 R1); each delegates to the GraphQL resolver.
+  off(
+    'hadron_role_lists',
+    'Read the role lists a team App has set, one per purpose (link a defect, the register pick\'s role route, withdraw a ' +
+      'negative review verdict): empty by default. Readers: whoever may read the App\'s roster (cor:agt:050:21).',
+    SHAPE_HADRON_ROLE_LISTS,
+    async ({ session, appRef }) =>
+      read(session, async (ctx) => textResult(renderRoleLists(await QA.appRoleLists({}, { appRef }, ctx)))),
+  );
+
+  off(
+    'hadron_role_list_set',
+    'Set ONE of a team App\'s role lists, the whole list at once: whoever manages the App only. Purpose is DEFECT_LINK, ' +
+      'REGISTER_PICK or REVIEW_WITHDRAW. Names are trimmed and lower-cased and duplicates collapse; at most 32 names of 1 to ' +
+      '64 characters with no ":" or whitespace; an empty list clears it. Slice A stores the list; no door reads it yet.',
+    SHAPE_HADRON_ROLE_LIST_SET,
+    async (args) =>
+      writeOther('hadron_role_list_set', args.session, async (ctx) => {
+        const r = await MA.setAppRoleList({}, mcpRoleListArgs(args), ctx);
+        return `Set ${r.purpose}: ${r.roles.length ? r.roles.join(', ') : '(none listed)'}.`;
+      }),
+  );
+
   off(
     'hadron_team_roster',
     HADRON_TEAM_ROSTER_DESCRIPTION,
@@ -668,7 +801,8 @@ const SHAPE_HADRON_TASK_CREATE = {
   blockedBy: z.array(z.string()).optional().describe('Same-App task refs that must end before start/matching; assigner authority required.'),
   appRef: z.string().optional().describe('The team App (id or URN). Required for a root task.'),
   parentTaskId: z.string().optional().describe('The parent task, for a child task.'),
-  project: z.boolean().optional().describe('Make a top-level PROJECT (AT1, AT2, ...) instead of a task under the reserved project AT0. Not with parentTaskId.'),
+  project: z.boolean().optional().describe('Make a top-level PROJECT (AT1, AT2, ...) instead of a task under the reserved project AT0, carrying the project marker. Not with parentTaskId.'),
+  isProject: z.boolean().optional().describe('#4997: mark this task as a project for the team metrics, wherever it sits. Set only at create, never changed. false with project true is refused.'),
   title: z.string().describe('What is asked, in the team\'s own words.'),
   description: z.string().optional(),
   source: z.string().optional().describe('Where the work came from: an issue URL, a node URN.'),
@@ -766,6 +900,25 @@ const stallValue = (what: string) => z.number().nullable().optional().describe(`
 
 const SHAPE_HADRON_STALL_SCHEDULE_GET = { appRef: z.string().describe('The team App (id or URN).'), session: SESSION_READ };
 
+const SHAPE_HADRON_SATURATION_WAKE_ROLES = { appRef: z.string().describe('The team App (id or URN).'), session: SESSION_READ };
+const SHAPE_HADRON_SATURATION_WAKE_ROLES_SET = {
+  appRef: z.string().describe('The team App (id or URN).'),
+  roles: z.array(z.string()).describe('The whole list of role names; an empty list clears it.'),
+  session: SESSION_WRITE,
+};
+const SHAPE_HADRON_EXTERNAL_TASKS_REPORT = { appRef: z.string().describe('The team App (id or URN).'), session: SESSION_READ };
+const SHAPE_HADRON_EXTERNAL_TASKS_REPORT_SET = {
+  appRef: z.string().describe('The team App (id or URN).'),
+  exist: z.boolean().describe('True when work exists outside Hadron, false when none does.'),
+  session: SESSION_WRITE,
+};
+const SHAPE_HADRON_ROLE_LISTS = { appRef: z.string().describe('The team App (id or URN).'), session: SESSION_READ };
+const SHAPE_HADRON_ROLE_LIST_SET = {
+  appRef: z.string().describe('The team App (id or URN).'),
+  purpose: z.enum(['DEFECT_LINK', 'REGISTER_PICK', 'REVIEW_WITHDRAW']).describe('Which list.'),
+  roles: z.array(z.string()).describe('The whole list of role names; an empty list clears it.'),
+  session: SESSION_WRITE,
+};
 const SHAPE_HADRON_STALL_SCHEDULE_SET = {
   appRef: z.string().describe('The team App (id or URN).'),
   notStartedMinutes: stallValue('Minutes an assigned task may sit unstarted before it alarms (1 to 10080)'),

@@ -19,6 +19,7 @@ import { matchQueuedTasks } from '../../../lib/agentTasks/matcher.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { resolvers, type Context } from './resolvers.js';
+import { joinHostForKey } from '../../../test/agentTeamHost.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -88,6 +89,7 @@ beforeEach(async () => {
   kit = await w(longAgent, 'Kit', 'coordinator');
   sam = await w(shortAgent, 'Sam', 'builder');
   orca1 = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: `h-${generateId()}`, keyPreview: 'abcd', label: 'orca1' }, select: { id: true } });
+  await joinHostForKey(db, orca1.id, 'orca1');
   await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, ctx(admin.id));
   await M.registerHost({}, { input: { appRef: app.id, label: 'Orca 1', pollIntervalSeconds: 600, workers: [
     { worker: kit.id, family: 'claude', worktrees: ['hadron-server/kit'] },
@@ -107,12 +109,12 @@ describe('#4301: a started task shows the settings of the run it is on now', () 
     return { family: r.appliedFamily, model: r.appliedModel, effort: r.appliedEffort };
   };
   const NONE = { family: null, model: null, effort: null };
-  const reassign = (id: string, assignee: Record<string, string>) => M.reassignAgentTask({}, { taskId: id, assignee }, ctx(admin.id));
+  const reassign = (id: string, assignee: Record<string, string>) => M.reassignAgentTask({}, { taskRef: id, assignee }, ctx(admin.id));
   /** Kit, bound as claude, holds a task it has started. */
   async function startedByKit() {
     const s = await bindAs(kit, CLAUDE);
     const t = await assignTo(kit);
-    await runAsActor({ workerId: kit.id, agentId: longAgent }, () => M.startAgentTask({}, { taskId: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
+    await runAsActor({ workerId: kit.id, agentId: longAgent }, () => M.startAgentTask({}, { taskRef: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
     expect(await applied(t.id)).toEqual(CLAUDE);
     return { t, s };
   }
@@ -226,7 +228,7 @@ describe('#4301: a started task shows the settings of the run it is on now', () 
       const s = await bindAs(kit, CLAUDE);
       for (let i = 0; i < 3; i++) {
         const t = await assignTo(kit);
-        await runAsActor({ workerId: kit.id, agentId: longAgent }, () => M.startAgentTask({}, { taskId: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
+        await runAsActor({ workerId: kit.id, agentId: longAgent }, () => M.startAgentTask({}, { taskRef: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
         expect((await row(t.id)).status).toBe('started');
         const open = await db.session.findMany({ where: { workerId: sam.id, endedAt: null } });
         for (const o of open) await M.endSession({}, { id: o.id }, ctx(bo.id));

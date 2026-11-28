@@ -15,6 +15,7 @@ import { RegisterLookup } from '../../../lib/actionRegister/lookup.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { taskWarningsPlugin } from '../taskWarningsPlugin.js';
+import { finishableParents, finishField } from '../../../test/finishWarningCarrier.js';
 import {
   boundedRead, emitTaskWarnings, renderTaskWarnings, resolveRegisters, shapeResponseWarnings,
   MAX_WARNINGS_PER_OPERATION, MAX_WARNINGS_PER_RESPONSE, type TaskWarning, type TaskWarningCode,
@@ -82,12 +83,12 @@ beforeEach(async () => {
 });
 
 describe('task.create.no-source', () => {
-  it('fires on a create with no source (blank counts), still creates, and not when a source is given', async () => {
+  it('no longer fires (#4793, Holger 2026-11-21): a source-less create, blank included, still creates and warns nothing', async () => {
     for (const source of [undefined, '', '   ']) {
       const c = ctx(member.id);
       const t = await create(c, { source });
       expect(t.id).toBeTruthy();
-      expect(codes(c)).toEqual(['task.create.no-source']);
+      expect(codes(c)).toEqual([]);
     }
     const c = ctx(member.id);
     await create(c, { source: 'https://example.test/x' });
@@ -107,7 +108,7 @@ describe('assignee warnings (create-with-assignee, assign, reassign)', () => {
     // reassign Anne's task to Liam (who now has one): busy for Liam because of the OTHER task, not this one
     const t = await create(ctx(member.id), { assignee: { worker: rook.id } });
     const r = ctx(member.id);
-    await M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: liam.id } }, r);
+    await M.reassignAgentTask({}, { taskRef: t.id, assignee: { worker: liam.id } }, r);
     expect(codes(r)).toEqual(['task.assign.assignee-busy']);
   });
 
@@ -128,14 +129,14 @@ describe('assignee warnings (create-with-assignee, assign, reassign)', () => {
     const queued = await create(ctx(member.id), {});
     // No live session ⇒ the roster shows NO_SESSION, not PAUSED ⇒ no warning (the pause stays private).
     const quiet = ctx(member.id);
-    await M.assignAgentTask({}, { taskId: queued.id, assignee: { worker: liam.id } }, quiet);
+    await M.assignAgentTask({}, { taskRef: queued.id, assignee: { worker: liam.id } }, quiet);
     expect(codes(quiet)).toEqual([]);
     // With a live session the roster shows PAUSED to a participant ⇒ the warning.
     await db.session.create({ data: { id: generateId(), userId: member.id, appId: app.id, workerId: rook.id, agentId: teamAgentId } });
     await db.session.create({ data: { id: generateId(), userId: member.id, appId: app.id, workerId: liam.id, agentId: teamAgentId } });
     const queued2 = await create(ctx(member.id), {});
     const c = ctx(member.id);
-    const t = await M.assignAgentTask({}, { taskId: queued2.id, assignee: { worker: liam.id } }, c);
+    const t = await M.assignAgentTask({}, { taskRef: queued2.id, assignee: { worker: liam.id } }, c);
     expect(t.assigneeWorkerId).toBe(liam.id);
     expect(codes(c)).toContain('task.assign.assignee-paused');
   });
@@ -145,7 +146,7 @@ describe('assignee warnings (create-with-assignee, assign, reassign)', () => {
     await create(ctx(member.id), { assignee: { worker: anne.id } });
     const c = ctx(member.id);
     await create(c, { source: undefined, assignee: { worker: anne.id } });
-    expect(codes(c)).toEqual(['task.create.no-source', 'task.assign.assignee-unavailable', 'task.assign.assignee-busy']);
+    expect(codes(c)).toEqual(['task.assign.assignee-unavailable', 'task.assign.assignee-busy']);
   });
 
   it('a worker taking work for itself, and a user assignee, are not advised', async () => {
@@ -173,20 +174,129 @@ describe('assignee warnings (create-with-assignee, assign, reassign)', () => {
   });
 });
 
+describe('#4855 an assignment that cannot start its worker because a session is open says so', () => {
+  const openSession = (w: { id: string }, updatedAt = new Date(Date.now() - 60 * 86_400_000)) =>
+    db.session.create({ data: { id: generateId(), userId: member.id, appId: app.id, workerId: w.id, agentId: teamAgentId, startedAt: updatedAt, updatedAt } });
+
+  it('a quiet open session: the assigner is told the start was skipped; the task is still assigned', async () => {
+    await openSession(liam);
+    const queued = await create(ctx(member.id), {});
+    const c = ctx(member.id);
+    const t = await M.assignAgentTask({}, { taskRef: queued.id, assignee: { worker: liam.id } }, c);
+    expect(t.assigneeWorkerId).toBe(liam.id);
+    expect(codes(c)).toContain('task.assign.session-open');
+  });
+
+  it('a live open session too (the platform starts nobody over an open session, live or quiet)', async () => {
+    await openSession(liam, new Date());
+    const queued = await create(ctx(member.id), {});
+    const c = ctx(member.id);
+    await M.assignAgentTask({}, { taskRef: queued.id, assignee: { worker: liam.id } }, c);
+    expect(codes(c)).toContain('task.assign.session-open');
+  });
+
+  it('create naming the worker, and reassign, say it too', async () => {
+    await openSession(liam);
+    const named = ctx(member.id);
+    await create(named, { assignee: { worker: liam.id } });
+    expect(codes(named)).toContain('task.assign.session-open');
+    const t = await create(ctx(member.id), { assignee: { worker: rook.id } });
+    const r = ctx(member.id);
+    await M.reassignAgentTask({}, { taskRef: t.id, assignee: { worker: liam.id } }, r);
+    expect(codes(r)).toContain('task.assign.session-open');
+  });
+
+  it('no open session, or an ended one: nothing to say', async () => {
+    const queued = await create(ctx(member.id), {});
+    const none = ctx(member.id);
+    await M.assignAgentTask({}, { taskRef: queued.id, assignee: { worker: liam.id } }, none);
+    expect(codes(none)).not.toContain('task.assign.session-open');
+    const s = await openSession(anne);
+    await db.session.update({ where: { id: s.id }, data: { endedAt: new Date() } });
+    const ended = ctx(member.id);
+    await create(ended, { assignee: { worker: anne.id } });
+    expect(codes(ended)).not.toContain('task.assign.session-open');
+  });
+
+  it('only the ASSIGNEE\'s own session counts: another worker\'s open session says nothing about it', async () => {
+    await openSession(rook);
+    await openSession(anne, new Date());
+    const queued = await create(ctx(member.id), {});
+    const c = ctx(member.id);
+    await M.assignAgentTask({}, { taskRef: queued.id, assignee: { worker: liam.id } }, c);
+    expect(codes(c)).not.toContain('task.assign.session-open');
+  });
+
+  it('a soft-deleted session is not open', async () => {
+    const s = await openSession(anne);
+    await db.session.update({ where: { id: s.id }, data: { deletedAt: new Date() } });
+    const c = ctx(member.id);
+    await create(c, { assignee: { worker: anne.id } });
+    expect(codes(c)).not.toContain('task.assign.session-open');
+  });
+
+  it('a worker taking work for itself is not advised, and a user assignee is not either', async () => {
+    await openSession(anne);
+    const self = ctx(member.id);
+    await asWorker(anne, teamAgentId, () => create(self, { assignee: { worker: anne.id } }));
+    expect(codes(self)).not.toContain('task.assign.session-open');
+    const user = ctx(member.id);
+    await create(user, { assignee: { user: member.id } });
+    expect(codes(user)).toEqual([]);
+  });
+
+  it('the text is fixed: the same for every worker, naming no worker, id or session', async () => {
+    const { TASK_WARNING_TEXT } = await import('./resolvers.taskWarnings.js');
+    const text = TASK_WARNING_TEXT['task.assign.session-open'];
+    expect(text).toBe('The assignee has an open session, so the platform does not start it over that session; the assignment reaches it through that session.');
+    for (const w of [anne, liam, rook]) expect(text).not.toContain(w.id);
+    expect(text).not.toMatch(/anne|liam|rook|[0-9a-f]{12}/i);
+    // and what is filed for two different workers is the same text
+    await openSession(liam);
+    await openSession(rook);
+    const a = ctx(member.id);
+    const b = ctx(member.id);
+    await create(a, { assignee: { worker: liam.id } });
+    await create(b, { assignee: { worker: rook.id } });
+    const filed = (c: Context) => (c.taskWarnings ?? []).filter((w) => w.warning.code === 'task.assign.session-open').map((w) => w.warning.text);
+    expect(filed(a)).toEqual([text]);
+    expect(filed(b)).toEqual([text]);
+  });
+
+  it('paused (a live session) and session-open come together, in the fixed order: the assigner hears both facts', async () => {
+    await db.workerWakeSettings.create({ data: { workerId: liam.id, pausedUntil: new Date(Date.now() + 3_600_000) } });
+    await openSession(rook, new Date());
+    await openSession(liam, new Date());
+    const queued = await create(ctx(member.id), {});
+    const c = ctx(member.id);
+    await M.assignAgentTask({}, { taskRef: queued.id, assignee: { worker: liam.id } }, c);
+    expect(codes(c)).toEqual(['task.assign.assignee-paused', 'task.assign.session-open']);
+  });
+
+  it('it is worker state: filed only to a caller the roster would show it to (the others stay silent about it)', async () => {
+    const c = ctx(outsider.id);
+    await emitTaskWarnings(c, undefined, app.id, { codes: ['task.create.no-source', 'task.assign.session-open'] });
+    expect(codes(c)).toEqual(['task.create.no-source']);
+    const ok = ctx(member.id);
+    await emitTaskWarnings(ok, undefined, app.id, { codes: ['task.assign.session-open', 'task.create.no-source'] });
+    expect(codes(ok)).toEqual(['task.create.no-source', 'task.assign.session-open']);
+  });
+});
+
 describe('task.finish.open-children', () => {
   it('fires on finish with an open child, the finish still succeeds; none once the child is done', async () => {
     const parent = await create(ctx(member.id), { assignee: { worker: anne.id } });
-    await asWorker(anne, teamAgentId, () => M.startAgentTask({}, { taskId: parent.id }, ctx(member.id)));
-    const child = await asWorker(anne, teamAgentId, () => M.createAgentTask({}, { input: { parentTaskId: parent.id, title: 'child', source: 's' } }, ctx(member.id)));
+    await asWorker(anne, teamAgentId, () => M.startAgentTask({}, { taskRef: parent.id }, ctx(member.id)));
+    const child = await asWorker(anne, teamAgentId, () => M.createAgentTask({}, { input: { parentTaskRef: parent.id, title: 'child', source: 's' } }, ctx(member.id)));
     const c = ctx(member.id);
-    const done = await asWorker(anne, teamAgentId, () => M.finishAgentTask({}, { taskId: parent.id, result: { outcome: 'succeeded' } }, c));
+    const done = await asWorker(anne, teamAgentId, () => M.finishAgentTask({}, { taskRef: parent.id, result: { outcome: 'succeeded' } }, c));
     expect(done.status).toBe('finished');
     expect(codes(c)).toEqual(['task.finish.open-children']);
     // control: a childless task finishes quietly
     const solo = await create(ctx(member.id), { assignee: { worker: liam.id } });
-    await asWorker(liam, teamAgentId, () => M.startAgentTask({}, { taskId: solo.id }, ctx(member.id)));
+    await asWorker(liam, teamAgentId, () => M.startAgentTask({}, { taskRef: solo.id }, ctx(member.id)));
     const c2 = ctx(member.id);
-    await asWorker(liam, teamAgentId, () => M.finishAgentTask({}, { taskId: solo.id, result: { outcome: 'succeeded' } }, c2));
+    await asWorker(liam, teamAgentId, () => M.finishAgentTask({}, { taskRef: solo.id, result: { outcome: 'succeeded' } }, c2));
     expect(codes(c2)).toEqual([]);
     expect(child.id).toBeTruthy();
   });
@@ -194,7 +304,7 @@ describe('task.finish.open-children', () => {
   it('a refused finish carries no warning', async () => {
     const t = await create(ctx(member.id), { assignee: { worker: anne.id } }); // not started
     const c = ctx(member.id);
-    await expect(asWorker(anne, teamAgentId, () => M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, c))).rejects.toThrow();
+    await expect(asWorker(anne, teamAgentId, () => M.finishAgentTask({}, { taskRef: t.id, result: { outcome: 'succeeded' } }, c))).rejects.toThrow();
     expect(codes(c)).toEqual([]);
   });
 });
@@ -414,11 +524,12 @@ describe('decided in the write transaction, bounded after it', () => {
     expect(await db.$queryRaw`SELECT 1 AS one`).toEqual([{ one: 1 }]);
   });
 
-  it('21 aliased creates in one worker request: all succeed, 20 warnings, one enrichment read plus one history write (no per-alias work)', async () => {
-    await registerEntry(teamMemoryId, 'task.create.no-source', 'tasks:a');
+  it('21 aliased finishes in one worker request: all succeed, 20 warnings, one enrichment read plus one history write (no per-alias work)', async () => {
+    await registerEntry(teamMemoryId, 'task.finish.open-children', 'tasks:a');
     await node(teamMemoryId, 'tasks:a', { isRunnable: true });
     const server = new ApolloServer<Context>({ typeDefs, resolvers, plugins: [taskWarningsPlugin] });
-    const body = Array.from({ length: 21 }, (_, i) => `a${i}: createAgentTask(input: { appRef: "${app.id}", title: "t${i}" }) { id }`).join(' ');
+    const parents = await finishableParents(M, ctx(member.id), app.id, 21, { worker: anne.id }, (fn) => asWorker(anne, teamAgentId, fn));
+    const body = parents.map((id, i) => finishField(`a${i}`, id)).join(' ');
     const spy = vi.spyOn(db, '$transaction');
     const before = spy.mock.calls.length;
     const res = await asWorker(anne, teamAgentId, () => server.executeOperation({ query: `mutation { ${body} }` }, { contextValue: ctx(member.id) }));
@@ -431,7 +542,7 @@ describe('decided in the write transaction, bounded after it', () => {
     expect(warnings).toHaveLength(MAX_WARNINGS_PER_RESPONSE);
     expect(warnings[0].register?.state).toBe('mapped');
     expect(bounded).toHaveLength(2); // one shared enrichment transaction plus one bounded history transaction
-  });
+  }, 30_000); // #4793: the 21 finishable parents (create, start, child) are set up inside the test, outside the measured step
 });
 
 describe('order and the aggregate lookup bound', () => {
@@ -474,31 +585,34 @@ describe('the carrier: extensions.warnings on a real GraphQL response', () => {
   };
   const m = (alias: string, title: string, source = '') =>
     `${alias}: createAgentTask(input: { appRef: "${app.id}", title: "${title}"${source ? `, source: "${source}"` : ''} }) { id }`;
+  const asAnne = <T,>(fn: () => Promise<T>) => asWorker(anne, teamAgentId, fn);
+  const open = (n: number) => finishableParents(M, ctx(member.id), app.id, n, { worker: anne.id }, asAnne);
+  const warned = (r: { extensions?: Record<string, unknown> }) => r.extensions?.warnings as any[] | undefined;
 
   it('two aliased mutations keep their warnings apart; a clean one carries none; data is unchanged', async () => {
-    const r = await run(`mutation { a1: ${m('a1', 'one').split(': ').slice(1).join(': ')} a2: ${m('a2', 'two', 'src').split(': ').slice(1).join(': ')} }`, ctx(member.id));
+    const [p1] = await open(1);
+    const r = await asAnne(() => run(`mutation { ${finishField('a1', p1)} ${m('a2', 'two', 'src')} }`, ctx(member.id)));
     expect(r.errors).toBeUndefined();
     expect((r.data as any).a1.id).toBeTruthy();
-    expect(r.extensions?.warnings).toEqual([
-      { path: 'a1', code: 'task.create.no-source', text: expect.any(String) },
-    ]);
+    expect(warned(r)).toEqual([expect.objectContaining({ path: 'a1', code: 'task.finish.open-children', text: expect.any(String) })]);
   });
 
   it('a failed mutation in the same request carries no warning while another keeps hers', async () => {
+    const [p1] = await open(1);
     const bad = `bad: createAgentTask(input: { appRef: "${generateId()}", title: "x" }) { id }`;
-    const good = m('good', 'g').split(': ').slice(1).join(': ');
-    const r = await run(`mutation { good: ${good} ${bad} }`, ctx(member.id));
+    const r = await asAnne(() => run(`mutation { ${finishField('good', p1)} ${bad} }`, ctx(member.id)));
     expect(r.errors?.length).toBe(1);
-    expect((r.extensions?.warnings as any[]).map((w) => w.path)).toEqual(['good']);
+    expect(warned(r)!.map((w) => w.path)).toEqual(['good']);
   });
 
   it('two concurrent requests never share a collector', async () => {
+    const [px] = await open(1);
     const [x, y] = await Promise.all([
-      run(`mutation { x: ${m('x', 'x').split(': ').slice(1).join(': ')} }`, ctx(member.id)),
-      run(`mutation { y: ${m('y', 'y', 's').split(': ').slice(1).join(': ')} }`, ctx(member.id)),
+      asAnne(() => run(`mutation { ${finishField('x', px)} }`, ctx(member.id))),
+      asAnne(() => run(`mutation { ${m('y', 'y', 's')} }`, ctx(member.id))),
     ]);
-    expect((x.extensions?.warnings as any[]).map((w) => w.path)).toEqual(['x']);
-    expect(y.extensions?.warnings).toBeUndefined();
+    expect(warned(x)!.map((w) => w.path)).toEqual(['x']);
+    expect(warned(y)).toBeUndefined();
   });
 
   it('an ordinary request with no warning has no extensions.warnings (ordinary-client regression)', async () => {

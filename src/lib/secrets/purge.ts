@@ -12,12 +12,13 @@
  *
  * Every predicate that selects a row is repeated on the OUTER DELETE (finding
  * `hrn:node:hadronmemory.com:hadron-server:findings:purge-key-subquery-must-recheck-expiry`): a row the candidate
- * subquery picked can change before the delete reaches it (a version made current again cannot happen, but a
- * restored App can), and the delete must then skip it rather than act on a stale choice or trip the guard.
+ * subquery picked can change before the delete reaches it (a restored App does; a superseded version is never made
+ * current again by any code here, so for versions the repeat is only a backstop), and the delete must then skip it
+ * rather than act on a stale choice or trip the guard.
  *
  * Times are the database clock throughout, so the purge and the guard agree. Nothing here reads or logs a value.
  */
-import type { PrismaClient } from '../../generated/prisma/index.js';
+import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { MAX_SECRET_VERSIONS } from './appSecrets.js';
 import { secretVersionRetentionDays } from './retention.js';
 
@@ -35,12 +36,19 @@ interface PurgedVersion {
   secret_id: string;
   version_no: number;
   app_id: string;
+  name: string;
 }
+
+/** A superseded version `v` past the retention window or beyond the kept-versions cap (the store's own trim, appSecrets.ts, is the same cap). */
+const purgeable = (days: number): Prisma.Sql => Prisma.sql`v.superseded_at IS NOT NULL
+  AND v.version_no < (SELECT max(m.version_no) FROM secret_versions m WHERE m.secret_id = v.secret_id)
+  AND (v.superseded_at <= (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(days => ${days}::int)
+       OR v.version_no <= (SELECT max(m.version_no) FROM secret_versions m WHERE m.secret_id = v.secret_id) - ${MAX_SECRET_VERSIONS}::int)`;
 
 /**
  * Delete superseded versions past the retention window or beyond the kept-versions cap, oldest first, and write one
- * `PURGE` event per deleted version (no actor: the platform did it). Returns how many were deleted and whether a full
- * last batch suggests more remain. Concurrent passes (two instances) skip each other's locked rows.
+ * `PURGE` event per deleted version (no actor: the platform did it). Returns how many were deleted and whether any
+ * purgeable version remains. Concurrent passes (two instances) skip each other's locked rows.
  */
 export async function purgeSupersededVersions(
   db: PrismaClient,
@@ -49,45 +57,41 @@ export async function purgeSupersededVersions(
   const batchSize = bounds.batchSize ?? DEFAULT_BATCH;
   const maxBatches = bounds.maxBatches ?? DEFAULT_MAX_BATCHES;
   const days = secretVersionRetentionDays();
-  const cap = MAX_SECRET_VERSIONS;
   let purged = 0;
   for (let batch = 0; batch < maxBatches; batch++) {
     const n = await db.$transaction(async (tx) => {
+      // The name comes back from the deleting statement itself, so an event is never written with a blank one.
+      // #5381: the batch is a MATERIALIZED CTE, so it is scanned once whatever the plan. Postgres 12+ may inline a CTE referenced
+      // once into the outer join, where a nested loop could rescan the LIMIT ... SKIP LOCKED per outer row (the #5348 defect).
+      // Forced-plan EXPLAIN on main showed this one was not inlined (the lock ran once inside the CTE); MATERIALIZED makes that
+      // explicit instead of relying on the planner.
       const gone = await tx.$queryRaw<PurgedVersion[]>`
-        WITH cand AS (
+        WITH batch AS MATERIALIZED (
           SELECT v.id FROM secret_versions v
-          WHERE v.superseded_at IS NOT NULL
-            AND v.version_no < (SELECT max(m.version_no) FROM secret_versions m WHERE m.secret_id = v.secret_id)
-            AND (v.superseded_at <= (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(days => ${days}::int)
-                 OR v.version_no <= (SELECT max(m.version_no) FROM secret_versions m WHERE m.secret_id = v.secret_id) - ${cap}::int)
+          WHERE ${purgeable(days)}
           ORDER BY v.secret_id, v.version_no
           LIMIT ${batchSize}::int
           FOR UPDATE OF v SKIP LOCKED
         )
-        DELETE FROM secret_versions v USING cand
-        WHERE v.id = cand.id
-          AND v.superseded_at IS NOT NULL
-          AND v.version_no < (SELECT max(m.version_no) FROM secret_versions m WHERE m.secret_id = v.secret_id)
-          AND (v.superseded_at <= (clock_timestamp() AT TIME ZONE 'UTC') - make_interval(days => ${days}::int)
-               OR v.version_no <= (SELECT max(m.version_no) FROM secret_versions m WHERE m.secret_id = v.secret_id) - ${cap}::int)
-        RETURNING v.secret_id, v.version_no, v.app_id`;
+        DELETE FROM secret_versions v USING batch, secrets s
+        WHERE v.id = batch.id AND s.id = v.secret_id AND ${purgeable(days)}
+        RETURNING v.secret_id, v.version_no, v.app_id, s.name`;
       if (gone.length === 0) return 0;
-      const names = new Map(
-        (await tx.secret.findMany({ where: { id: { in: [...new Set(gone.map((g) => g.secret_id))] } }, select: { id: true, name: true } }))
-          .map((s) => [s.id, s.name]),
-      );
       await tx.secretEvent.createMany({
         data: gone.map((g) => ({
-          ownerType: 'app', ownerId: g.app_id, secretId: g.secret_id, secretName: names.get(g.secret_id) ?? '',
+          ownerType: 'app', ownerId: g.app_id, secretId: g.secret_id, secretName: g.name,
           versionNo: g.version_no, kind: 'PURGE', outcome: 'OK',
         })),
       });
       return gone.length;
     });
     purged += n;
-    if (n < batchSize) return { purged, more: false };
+    if (n < batchSize) break;
   }
-  return { purged, more: true };
+  // Asked, not inferred from the batch size: a short batch may have skipped rows another transaction had locked, and a full
+  // last one may have drained the backlog exactly. A row locked by another pass counts as remaining until that pass commits.
+  const [{ more }] = await db.$queryRaw<Array<{ more: boolean }>>`SELECT EXISTS (SELECT 1 FROM secret_versions v WHERE ${purgeable(days)}) AS more`;
+  return { purged, more };
 }
 
 /**

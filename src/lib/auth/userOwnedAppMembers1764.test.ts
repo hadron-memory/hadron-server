@@ -232,8 +232,8 @@ describe('tasks and the team chat', () => {
     expect(await Q.agentTasks({}, { appRef: app.id }, ctx(member.id))).toEqual([]);
     const made = await M.createAgentTask({}, { input: { appRef: app.id, title: 'From a member' } }, ctx(member.id));
     expect(made.title).toBe('From a member');
-    expect((await Q.agentTask({}, { id: made.id }, ctx(member.id))).id).toBe(made.id);
-    expect((await Q.agentTask({}, { id: made.id }, ctx(owner.id))).id).toBe(made.id);
+    expect((await Q.agentTask({}, { ref: made.id }, ctx(member.id))).id).toBe(made.id);
+    expect((await Q.agentTask({}, { ref: made.id }, ctx(owner.id))).id).toBe(made.id);
     expect(await code(Q.agentTasks({}, { appRef: app.id }, ctx(outsider.id)))).toBe('APP_NOT_FOUND');
     expect(await code(Q.agentTasks({}, { appRef: app.id }, ctx(otherMember.id)))).toBe('APP_NOT_FOUND');
     expect(await code(M.createAgentTask({}, { input: { appRef: app.id, title: 'nope' } }, ctx(outsider.id)))).toBe('APP_NOT_FOUND');
@@ -250,8 +250,12 @@ describe('tasks and the team chat', () => {
   it('a member starts a plain session in the App (no worker name taken); a non-member cannot', async () => {
     const s = await M.startSession({}, { input: { id: generateId(), appRef: app.id } }, ctx(member.id));
     expect(s.id).toBeTruthy();
-    expect(await code(M.startSession({}, { input: { id: generateId(), appRef: app.id } }, ctx(outsider.id)))).toBe('FORBIDDEN');
-    expect(await code(M.startSession({}, { input: { id: generateId(), appRef: app.id } }, ctx(otherMember.id)))).toBe('FORBIDDEN');
+    // #4836: a caller with no standing on the App ref gets the one unknown-App
+    // answer — byte-identical to a missing App — not the old FORBIDDEN, which
+    // confirmed the App exists. The member above still succeeds; the concealment
+    // is for the non-members only.
+    expect(await code(M.startSession({}, { input: { id: generateId(), appRef: app.id } }, ctx(outsider.id)))).toBe('APP_NOT_FOUND');
+    expect(await code(M.startSession({}, { input: { id: generateId(), appRef: app.id } }, ctx(otherMember.id)))).toBe('APP_NOT_FOUND');
   });
 
   it('the team chat: a member reads and posts; a non-member is refused; impersonation never reaches it', async () => {
@@ -279,12 +283,16 @@ describe('taking a worker\'s name on a user-owned App (Rook P2, #8886; interim (
   });
 
   it('being a member does not make you a holder: a member cannot take the owner\'s unheld worker', async () => {
+    // The member HAS standing on the App, so the holder gate still names the
+    // refusal FORBIDDEN — #4836's concealment never reaches a participant.
     expect(await code(bind(member.id))).toBe('FORBIDDEN');
     expect((await db.worker.findUniqueOrThrow({ where: { id: workerId } })).heldByUserId).toBeNull();
     expect(await db.session.count({ where: { workerId } })).toBe(0);
-    // ...nor a non-member, nor a member of another user's App.
-    expect(await code(bind(outsider.id))).toBe('FORBIDDEN');
-    expect(await code(bind(otherMember.id))).toBe('FORBIDDEN');
+    // ...nor a non-member, nor a member of another user's App. #4836: callers
+    // with NO standing get the one unknown-App answer, byte-identical to a
+    // missing App — the old FORBIDDEN confirmed the App exists.
+    expect(await code(bind(outsider.id))).toBe('APP_NOT_FOUND');
+    expect(await code(bind(otherMember.id))).toBe('APP_NOT_FOUND');
   });
 
   it('the owner takes it, and then it is held against the member (the existing gate)', async () => {
@@ -393,7 +401,7 @@ describe('membership-backed write authority is held through commit (Riana P2, #1
     } });
     let refused = false;
     try {
-      await M.createNode({}, { input: { memoryId: teamSpace.id, loc: 'review-race', name: 'race', content: 'queued-write' } }, ctx(member.id, { db: wrapped as any }));
+      await M.createNode({}, { input: { memoryRef: teamSpace.id, loc: 'review-race', name: 'race', content: 'queued-write' } }, ctx(member.id, { db: wrapped as any }));
     } catch { refused = true; }
     expect(removed).toBe(true);
     expect({ refused, memberRows: await db.appMember.count({ where: { appId: app.id, userId: member.id } }), nodeRows: await db.node.count({ where: { memoryId: teamSpace.id, loc: 'review-race' } }) })
@@ -422,7 +430,7 @@ describe('membership-backed write authority is held through commit (Riana P2, #1
     expect(results).toEqual(['write committed', 'removed']);
     // An unrevoked member just writes (control).
     await db.appMember.create({ data: { appId: app.id, userId: member.id, role: 'reader' } });
-    const made = await M.createNode({}, { input: { memoryId: teamSpace.id, loc: 'control', name: 'control', content: 'ok' } }, ctx(member.id));
+    const made = await M.createNode({}, { input: { memoryRef: teamSpace.id, loc: 'control', name: 'control', content: 'ok' } }, ctx(member.id));
     expect(made.id).toBeTruthy();
   });
 });

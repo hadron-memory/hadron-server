@@ -25,14 +25,17 @@
  */
 
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
-import { appManagerUserIds } from '../auth/appManagement.js';
 import { generateId } from '../id.js';
 import { loadLastEventBySession, recentlyTouchedFilter, sessionActivityAt, toNaiveUtc } from '../sessionActivity.js';
 import { loadWorkerCheckStatuses, type WorkerCheckStatus } from '../workerCheckStatus.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { computeDueWakes } from '../tickers/dueWakes.js';
-import type { AlarmChain } from './events.js';
-import { isSerializationFailure } from './stall.js';
+import { LEAD_CADENCE_EVENT_TYPE, LEGACY_LEAD_CADENCE_EVENT_TYPE, type AlarmChain } from './events.js';
+import { darkAlarmChain } from './alarmChain.js';
+import { isSerializationFailure } from './serializationFailure.js';
+
+// #3539: `darkAlarmChain` moved to a leaf so postLimit does not reach this module; the old name stays exported from here.
+export { darkAlarmChain };
 
 export const DARK_WORKER_EVENT_TYPE = 'alarm.dark-worker';
 export type DarkReason = 'overdue' | 'wake-unacked';
@@ -90,7 +93,7 @@ async function darkWorkersOf(
  * is inside the idle one. Only the worker's own driving writes those inputs: a host key writes no session (cor:agt:070:04) and
  * the deliverer's `dueWakes` read and `acknowledgeWakes` touch none of them, so the delivery side cannot hide a dark worker.
  */
-async function activeInsideWindow(db: PrismaClient, workerIds: string[], windowSeconds: number, now: Date): Promise<Set<string>> {
+export async function activeInsideWindow(db: PrismaClient, workerIds: string[], windowSeconds: number, now: Date): Promise<Set<string>> {
   const out = new Set<string>();
   if (workerIds.length === 0) return out;
   const sessions = await db.session.findMany({
@@ -114,7 +117,7 @@ async function activeInsideWindow(db: PrismaClient, workerIds: string[], windowS
  * reserved or charged. A wake is "due and unacknowledged" for as long as it is still derived: an acknowledgement moves
  * the marks that make it due. Only the wake's own anchor counts, never the delivery floor or the batching window.
  */
-async function unackedWakeAges(db: PrismaClient, app: { id: string; organizationId: string | null; ownerUserId: string | null }, resumedAtOf: Map<string, Date | null>, windowSeconds: number, now: Date): Promise<Map<string, number>> {
+export async function unackedWakeAges(db: PrismaClient, app: { id: string; organizationId: string | null; ownerUserId: string | null }, resumedAtOf: Map<string, Date | null>, windowSeconds: number, now: Date, floorAt: Date | null = null): Promise<Map<string, number>> {
   const out = new Map<string, number>();
   let after: string | null = null;
   for (;;) {
@@ -130,36 +133,14 @@ async function unackedWakeAges(db: PrismaClient, app: { id: string; organization
     });
     for (const wake of page.wakes) {
       if (!resumedAtOf.has(wake.workerId)) continue;
-      const startedAt = Math.max(wake.timing.anchorAt.getTime(), resumedAtOf.get(wake.workerId)?.getTime() ?? -Infinity);
+      // #4531: `floorAt` is a floor on every wake's age, e.g. the end of an evaluator gap (cor:agt:050:32); null for none.
+      const startedAt = Math.max(wake.timing.anchorAt.getTime(), resumedAtOf.get(wake.workerId)?.getTime() ?? -Infinity, floorAt?.getTime() ?? -Infinity);
       const ageSeconds = Math.floor((now.getTime() - startedAt) / 1000);
       if (ageSeconds > windowSeconds) out.set(wake.workerId, Math.max(ageSeconds, out.get(wake.workerId) ?? 0));
     }
     if (!page.nextAfter) return out;
     after = page.nextAfter;
   }
-}
-
-/** The live same-App reporting line, nearest first; only an empty line falls back to App managers (cor:agt:050:18/:26, #3358). */
-export async function darkAlarmChain(db: Prisma.TransactionClient | PrismaClient, app: { id: string; organizationId: string | null; ownerUserId: string | null }, workerId: string): Promise<AlarmChain> {
-  const rows = await db.$queryRaw<{ id: string }[]>`
-    WITH RECURSIVE up AS (
-      SELECT w.reports_to_worker_id AS id, 1 AS depth FROM workers w WHERE w.id = ${workerId} AND w.reports_to_worker_id IS NOT NULL
-      UNION ALL
-      SELECT w.reports_to_worker_id, up.depth + 1 FROM workers w JOIN up ON w.id = up.id
-      WHERE w.reports_to_worker_id IS NOT NULL AND up.depth < 64
-    )
-    SELECT up.id FROM up JOIN workers h ON h.id = up.id AND h.app_id = ${app.id} AND h.retired_at IS NULL ORDER BY up.depth`;
-  const chain: AlarmChain = [];
-  const seen = new Set<string>([workerId]);
-  for (const r of rows) {
-    if (seen.has(r.id)) continue;
-    seen.add(r.id);
-    chain.push({ workerId: r.id });
-  }
-  if (chain.length === 0) {
-    for (const userId of await appManagerUserIds(db, app)) chain.push({ userId, via: 'manager' });
-  }
-  return chain;
 }
 
 const partyJson = (p: AlarmChain[number]): Prisma.InputJsonObject =>
@@ -285,8 +266,9 @@ export async function evaluateDarkWorkers(db: PrismaClient, now = new Date()): P
 /** The evidence a dark-worker alarm carries beyond its reason: shown only to a reader of the worker's internals. */
 const EVIDENCE_KEYS: Record<string, readonly string[]> = {
   'alarm.dark-worker': ['lastCheckedAt', 'oldestWakeAgeSeconds'],
-  // #2763: when the coordinator last assigned and how many lane workers were free describe the team's internals.
-  'alarm.coordinator-cadence': ['lastAssignedAt', 'freeWorkerCount'],
+  // #2763: when the lead last assigned and how many workers under it were free describe the team's internals.
+  [LEAD_CADENCE_EVENT_TYPE]: ['lastAssignedAt', 'freeWorkerCount'],
+  [LEGACY_LEAD_CADENCE_EVENT_TYPE]: ['lastAssignedAt', 'freeWorkerCount'],
 };
 
 /**

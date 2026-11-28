@@ -29,6 +29,7 @@
  * deployments without a scanner.
  */
 
+import { assetLimitCaller, checkAssetBytesHeadroom, lockMemoryOwner, requireAssetBytesHeadroom } from '../../asset/ownerBytes.js';
 import { GraphQLError } from 'graphql';
 import { writeNodeCore } from '../../../api/graphql/schema/resolvers.mutation.node.js';
 import { runAuthoring } from '../runAuthoring.js';
@@ -37,12 +38,14 @@ import { logAssetEvent } from '../../asset/audit.js';
 import { assertMemoryAcceptsUploads } from '../../asset/gate.js';
 import { getEffectiveLimits } from '../../asset/limits.js';
 import { buildStorageKey, extractExtension } from '../../asset/storageKey.js';
-import { putObject, deleteObject } from '../../../integrations/r2/client.js';
+import { putObject, deleteObject } from '../../../integrations/objectstore/index.js';
 import { generateId } from '../../id.js';
 import { splitNodeUrn } from '../../urn.js';
 import { emitAssetUrnV2 } from '../../urnEmit.js';
 import { resolveFlowMemory } from '../loadFlowNode.js';
+import { createRefusalToolError } from '../../ownerLimits/errors.js';
 import type { RunToolDef, RunToolContext } from './types.js';
+import { orgIdOf, requireOwnerRefOf } from '../../owner.js';
 import type { AuthContext } from '../../../middleware/auth.js';
 
 /**
@@ -97,7 +100,8 @@ export const hadronStoreFile: RunToolDef = {
     'node at the given URN pointing to it. The file becomes an Asset in the URN\'s ' +
     'memory; the tool returns the asset id/URN and metadata — never the bytes. ' +
     'Use for durable artifacts (reports, extracts, CSV/JSON data) that later steps ' +
-    'or other tools will consume by reference.',
+    'or other tools will consume by reference. When the memory\'s owner has reached its node limit, nothing is stored ' +
+    'and the result is stored: false with an error whose code is OWNER_LIMIT_REACHED.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -153,17 +157,19 @@ export const hadronStoreFile: RunToolDef = {
     // Flow guards + write auth BEFORE any side effect: an unauthorized or
     // misrouted call must not leave orphan bytes in the object store.
     const { memoryUrn, loc } = splitNodeUrn(urn);
-    const memory = await resolveFlowMemory(ctx.db, memoryUrn, ctx.run.organizationId, urn);
+    const memory = await resolveFlowMemory(ctx.db, memoryUrn, requireOwnerRefOf(ctx.run), urn);
     if (!(await canWriteToMemory(ctx.db, principalAuth(ctx), memory.id))) {
       throw new Error(`Memory not writable for "${urn}" under the run principal.`);
     }
     // Memory-level storage policy, distinct from write authorization — the
     // same gate every attached-Asset creation path runs (PR-635 review).
     await assertMemoryAcceptsUploads(ctx.db, memory.id);
-    const org = await ctx.db.organization.findUniqueOrThrow({
-      where: { id: ctx.run.organizationId },
-      select: { urn: true },
-    });
+    // The organization's row must still exist (a throw here fails the call); #5077: a person's run has no organization row
+    // to check and skips it.
+    const runOrgId = orgIdOf(requireOwnerRefOf(ctx.run));
+    if (runOrgId !== null) {
+      await ctx.db.organization.findUniqueOrThrow({ where: { id: runOrgId }, select: { urn: true } });
+    }
 
     const assetId = generateId();
     const storageKey = buildStorageKey({
@@ -181,24 +187,42 @@ export const hadronStoreFile: RunToolDef = {
       assetUrn = `${memory.urn}:assets:${assetId}`;
     }
 
+    // #5017: the owner's file-bytes cap, answered BEFORE any byte is written (no object, no row, no reference node). The final
+    // check runs under the owner-limit lock where the row is inserted, below. A run with no on-behalf-of user gets the unattended form.
+    const limitCaller = assetLimitCaller({ userId: ctx.principal.userId ?? null });
+    try {
+      await checkAssetBytesHeadroom(ctx.db, memory.id, body.byteLength, limitCaller);
+    } catch (err) {
+      // #5015: an owner-limit refusal is returned to the model like the final check's below (nothing was written yet).
+      const refused = createRefusalToolError(err);
+      if (refused) return { stored: false, nodeUrn: urn, ...refused };
+      throw err;
+    }
+
     await putObject({ key: storageKey, body, contentType: mimeType });
     try {
       const nodeName = args.name !== undefined ? String(args.name) : filename;
       const nodeDescription = args.description !== undefined ? String(args.description) : undefined;
-      await ctx.db.asset.create({
-        data: {
-          id: assetId,
-          memoryId: memory.id,
-          filename,
-          mimeType,
-          sizeBytes: body.byteLength,
-          storageKey,
-          // Server-authored content — see the scan-posture note in the
-          // file header.
-          scanStatus: 'CLEAN',
-          description: nodeDescription,
-          uploadedBy: ctx.principal.userId ?? null,
-        },
+      await ctx.db.$transaction(async (tx) => {
+        // #5017: the same cap again, under the lock, before the row: two stores at one file below the cap cannot both succeed.
+        const { found, owner } = await lockMemoryOwner(tx, memory.id);
+        if (!found) throw new Error(`Memory not writable for "${urn}" under the run principal.`);
+        await requireAssetBytesHeadroom(tx, owner, body.byteLength, limitCaller);
+        await tx.asset.create({
+          data: {
+            id: assetId,
+            memoryId: memory.id,
+            filename,
+            mimeType,
+            sizeBytes: body.byteLength,
+            storageKey,
+            // Server-authored content — see the scan-posture note in the
+            // file header.
+            scanStatus: 'CLEAN',
+            description: nodeDescription,
+            uploadedBy: ctx.principal.userId ?? null,
+          },
+        });
       });
       // The reference node (nodeType `reference`: external source, metadata
       // in `data`) — the graph-side handle for the stored file.
@@ -220,7 +244,7 @@ export const hadronStoreFile: RunToolDef = {
         } as never,
         ctx.principal,
         'create',
-        { authoring: runAuthoring(ctx.principal, ctx.run) },
+        { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: runAuthoring(ctx.principal, ctx.run) },
       );
     } catch (err) {
       // Compensate: no asset without its reference node, no bytes without
@@ -228,6 +252,10 @@ export const hadronStoreFile: RunToolDef = {
       // original error is what the author needs to see.
       await ctx.db.asset.delete({ where: { id: assetId } }).catch(() => {});
       await deleteObject(storageKey).catch(() => {});
+      // #5015: an owner limit (`nodes`, or #5017's `assetBytes` under the lock) is the model's to react to, not the end of
+      // the run (nothing is left behind).
+      const refused = createRefusalToolError(err);
+      if (refused) return { stored: false, nodeUrn: urn, ...refused };
       if (err instanceof GraphQLError && err.extensions?.code === 'NodeLocConflictError') {
         throw new Error(
           `Node already exists at "${urn}" — pick a fresh loc for the reference node.`,

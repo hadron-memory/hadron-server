@@ -121,7 +121,7 @@ beforeEach(async () => {
 /** A task owned by `member`, assigned to worker Anne, optionally started. */
 async function anneTask(opts: { start?: boolean; owner?: Context } = {}) {
   const t = await create(opts.owner ?? ctx(member.id), { assignee: { worker: anne.id } });
-  if (opts.start) await asWorker(anne, () => M.startAgentTask({}, { taskId: t.id }, ctx(member.id)));
+  if (opts.start) await asWorker(anne, () => M.startAgentTask({}, { taskRef: t.id }, ctx(member.id)));
   return t;
 }
 
@@ -175,7 +175,7 @@ describe('createAgentTask — root tasks: any App participant (cor:agt:050:06)',
   it('INTERIM (050:21 unruled, Rook P2-1): an App key cannot act as a worker, even through a session of its App', async () => {
     await expectCode(asWorker(anne, () => create(ctx(undefined, { appId: app.id }), {})), 'APP_NOT_FOUND');
     const t = await create(ctx(member.id), {});
-    expect(await asWorker(anne, () => Q.agentTask({}, { id: t.id }, ctx(undefined, { appId: app.id })))).toBeNull();
+    expect(await asWorker(anne, () => Q.agentTask({}, { ref: t.id }, ctx(undefined, { appId: app.id })))).toBeNull();
     expect(await db.agentTask.count({ where: { handle: { not: 'AT0' } } })).toBe(1);
   });
 
@@ -316,7 +316,7 @@ describe('createAgentTask — child tasks: the parent\'s assignee, who owns them
   it('S1: the assignee creates a review child task and owns it', async () => {
     const parent = await anneTask({ start: true });
     const child = await asWorker(anne, () =>
-      M.createAgentTask({}, { input: { parentTaskId: parent.id, title: 'Review', assignee: { worker: 'Rook' } } }, ctx(member.id)));
+      M.createAgentTask({}, { input: { parentTaskRef: parent.id, title: 'Review', assignee: { worker: 'Rook' } } }, ctx(member.id)));
     expect(child.parentTaskId).toBe(parent.id);
     expect(child.appId).toBe(app.id);
     expect(child.ownerWorkerId).toBe(anne.id);
@@ -326,11 +326,11 @@ describe('createAgentTask — child tasks: the parent\'s assignee, who owns them
   it('S2: someone who is not the assignee is refused — the owner included', async () => {
     const parent = await anneTask({ start: true });
     await expectCode(
-      asWorker(rook, () => M.createAgentTask({}, { input: { parentTaskId: parent.id, title: 'x' } }, ctx(member.id))),
+      asWorker(rook, () => M.createAgentTask({}, { input: { parentTaskRef: parent.id, title: 'x' } }, ctx(member.id))),
       'TASK_NOT_ASSIGNEE',
     );
     await expectCode(
-      M.createAgentTask({}, { input: { parentTaskId: parent.id, title: 'x' } }, ctx(member.id)),
+      M.createAgentTask({}, { input: { parentTaskRef: parent.id, title: 'x' } }, ctx(member.id)),
       'TASK_NOT_ASSIGNEE',
     );
   });
@@ -339,26 +339,26 @@ describe('createAgentTask — child tasks: the parent\'s assignee, who owns them
     const parent = await anneTask({ start: true });
     await expectCode(
       asWorker(anne, () => M.createAgentTask(
-        {}, { input: { parentTaskId: parent.id, title: 'x', owner: { worker: 'Rook' } } }, ctx(member.id))),
+        {}, { input: { parentTaskRef: parent.id, title: 'x', owner: { worker: 'Rook' } } }, ctx(member.id))),
       'TASK_CHILD_OWNER_MISMATCH',
     );
     // #1757: the refusal is the same for an invalid ref — no oracle over which
     // parties exist, and naming yourself stays fine (you are the owner).
     await expectCode(
       asWorker(anne, () => M.createAgentTask(
-        {}, { input: { parentTaskId: parent.id, title: 'x', owner: { user: outsider.id } } }, ctx(member.id))),
+        {}, { input: { parentTaskRef: parent.id, title: 'x', owner: { user: outsider.id } } }, ctx(member.id))),
       'TASK_CHILD_OWNER_MISMATCH',
     );
     const self = await asWorker(anne, () =>
-      M.createAgentTask({}, { input: { parentTaskId: parent.id, title: 'x', owner: { worker: anne.id } } }, ctx(member.id)));
+      M.createAgentTask({}, { input: { parentTaskRef: parent.id, title: 'x', owner: { worker: anne.id } } }, ctx(member.id)));
     expect(self.ownerWorkerId).toBe(anne.id);
   });
 
   it('no child under an ended parent (TASK_ENDED, #1705 interim)', async () => {
     const parent = await anneTask({ start: true });
-    await asWorker(anne, () => M.finishAgentTask({}, { taskId: parent.id, result: { outcome: 'succeeded' } }, ctx(member.id)));
+    await asWorker(anne, () => M.finishAgentTask({}, { taskRef: parent.id, result: { outcome: 'succeeded' } }, ctx(member.id)));
     await expectCode(
-      asWorker(anne, () => M.createAgentTask({}, { input: { parentTaskId: parent.id, title: 'x' } }, ctx(member.id))),
+      asWorker(anne, () => M.createAgentTask({}, { input: { parentTaskRef: parent.id, title: 'x' } }, ctx(member.id))),
       'TASK_ENDED',
     );
   });
@@ -367,15 +367,15 @@ describe('createAgentTask — child tasks: the parent\'s assignee, who owns them
     const parent = await anneTask({ start: true });
     await expectCode(
       asWorker(anne, () => M.createAgentTask(
-        {}, { input: { appRef: otherApp.id, parentTaskId: parent.id, title: 'x' } }, ctx(member.id))),
+        {}, { input: { appRef: otherApp.id, parentTaskRef: parent.id, title: 'x' } }, ctx(member.id))),
       'TASK_NOT_FOUND',
     );
     await expectCode(
-      M.createAgentTask({}, { input: { parentTaskId: parent.id, title: 'x' } }, ctx(outsider.id)),
+      M.createAgentTask({}, { input: { parentTaskRef: parent.id, title: 'x' } }, ctx(outsider.id)),
       'TASK_NOT_FOUND',
     );
     await expectCode(
-      M.createAgentTask({}, { input: { parentTaskId: generateId(), title: 'x' } }, ctx(member.id)),
+      M.createAgentTask({}, { input: { parentTaskRef: generateId(), title: 'x' } }, ctx(member.id)),
       'TASK_NOT_FOUND',
     );
   });
@@ -386,7 +386,7 @@ describe('createAgentTask — child tasks: the parent\'s assignee, who owns them
 describe('assign / reassign / cancel — the owner, or whoever manages the App (cor:agt:050:09)', () => {
   it('S1: the owner assigns a queued task', async () => {
     const t = await create(ctx(member.id), {});
-    const out = await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: 'Liam' } }, ctx(member.id));
+    const out = await M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: 'Liam' } }, ctx(member.id));
     expect(out.assigneeWorkerId).toBe(liam.id);
     expect(out.status).toBe('pending');
     expect((await events(t.id)).map((e) => e.type)).toEqual(['task.created', 'assignment.queued', 'task.assigned']);
@@ -394,29 +394,29 @@ describe('assign / reassign / cancel — the owner, or whoever manages the App (
 
   it('a participant who is not the owner may not assign; an App manager may', async () => {
     const t = await create(ctx(member.id), {});
-    await expectCode(M.assignAgentTask({}, { taskId: t.id, assignee: { worker: 'Liam' } }, ctx(reader.id)), 'TASK_NOT_OWNER');
+    await expectCode(M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: 'Liam' } }, ctx(reader.id)), 'TASK_NOT_OWNER');
     await expectCode(
-      asWorker(rook, () => M.assignAgentTask({}, { taskId: t.id, assignee: { worker: 'Liam' } }, ctx(admin.id))),
+      asWorker(rook, () => M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: 'Liam' } }, ctx(admin.id))),
       'TASK_NOT_OWNER',
     );
-    const out = await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: 'Liam' } }, ctx(admin.id));
+    const out = await M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: 'Liam' } }, ctx(admin.id));
     expect(out.assigneeWorkerId).toBe(liam.id);
     expect(out.assignedBy).toBe(admin.id);
   });
 
   it('assigning an already-assigned task is TASK_INVALID_TRANSITION (reassign instead)', async () => {
     const t = await anneTask();
-    await expectCode(M.assignAgentTask({}, { taskId: t.id, assignee: { worker: 'Liam' } }, ctx(member.id)), 'TASK_INVALID_TRANSITION');
+    await expectCode(M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: 'Liam' } }, ctx(member.id)), 'TASK_INVALID_TRANSITION');
   });
 
   it('a non-owner learns nothing about the assignee ref: refused before it is validated', async () => {
     const t = await create(ctx(member.id), {});
-    await expectCode(M.assignAgentTask({}, { taskId: t.id, assignee: { user: outsider.id } }, ctx(reader.id)), 'TASK_NOT_OWNER');
+    await expectCode(M.assignAgentTask({}, { taskRef: t.id, assignee: { user: outsider.id } }, ctx(reader.id)), 'TASK_NOT_OWNER');
   });
 
   it('S2: the owner reassigns a stalled started task; it stays started, and the former assignee is locked out', async () => {
     const t = await anneTask({ start: true });
-    const out = await M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: 'Liam' }, closeSessionWhenDone: false }, ctx(member.id));
+    const out = await M.reassignAgentTask({}, { taskRef: t.id, assignee: { worker: 'Liam' }, closeSessionWhenDone: false }, ctx(member.id));
     expect(out.status).toBe('started');
     expect(out.assigneeWorkerId).toBe(liam.id);
     expect(out.closeSessionWhenDone).toBe(false);
@@ -424,34 +424,34 @@ describe('assign / reassign / cancel — the owner, or whoever manages the App (
     const re = ev.find((e) => e.type === 'task.reassigned')!;
     expect(re.payload).toEqual({ from: { workerId: anne.id }, to: { workerId: liam.id }, closeSessionWhenDone: false });
     expect(re.subjectWorkerId).toBe(liam.id);
-    await expectCode(asWorker(anne, () => M.recordAgentTaskProgress({}, { taskId: t.id }, ctx(member.id))), 'TASK_NOT_ASSIGNEE');
+    await expectCode(asWorker(anne, () => M.recordAgentTaskProgress({}, { taskRef: t.id }, ctx(member.id))), 'TASK_NOT_ASSIGNEE');
     await expectCode(
-      asWorker(anne, () => M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, ctx(member.id))),
+      asWorker(anne, () => M.finishAgentTask({}, { taskRef: t.id, result: { outcome: 'succeeded' } }, ctx(member.id))),
       'TASK_NOT_ASSIGNEE',
     );
-    const done = await asWorker(liam, () => M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, ctx(member.id)));
+    const done = await asWorker(liam, () => M.finishAgentTask({}, { taskRef: t.id, result: { outcome: 'succeeded' } }, ctx(member.id)));
     expect(done.status).toBe('finished');
   });
 
   it('S3: the assignee who is not the owner may not reassign', async () => {
     const t = await anneTask({ start: true });
     await expectCode(
-      asWorker(anne, () => M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: 'Rook' } }, ctx(member.id))),
+      asWorker(anne, () => M.reassignAgentTask({}, { taskRef: t.id, assignee: { worker: 'Rook' } }, ctx(member.id))),
       'TASK_NOT_OWNER',
     );
   });
 
   it('reassigning a queued task, or to the same assignee, is TASK_INVALID_TRANSITION', async () => {
     const q = await create(ctx(member.id), {});
-    await expectCode(M.reassignAgentTask({}, { taskId: q.id, assignee: { worker: 'Liam' } }, ctx(member.id)), 'TASK_INVALID_TRANSITION');
+    await expectCode(M.reassignAgentTask({}, { taskRef: q.id, assignee: { worker: 'Liam' } }, ctx(member.id)), 'TASK_INVALID_TRANSITION');
     const t = await anneTask();
-    await expectCode(M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: 'Anne' } }, ctx(member.id)), 'TASK_INVALID_TRANSITION');
+    await expectCode(M.reassignAgentTask({}, { taskRef: t.id, assignee: { worker: 'Anne' } }, ctx(member.id)), 'TASK_INVALID_TRANSITION');
   });
 
   it('lifecycle S4: the owner cancels a pending task; a non-owner may not', async () => {
     const t = await anneTask();
-    await expectCode(asWorker(anne, () => M.cancelAgentTask({}, { taskId: t.id }, ctx(member.id))), 'TASK_NOT_OWNER');
-    const out = await M.cancelAgentTask({}, { taskId: t.id }, ctx(member.id));
+    await expectCode(asWorker(anne, () => M.cancelAgentTask({}, { taskRef: t.id }, ctx(member.id))), 'TASK_NOT_OWNER');
+    const out = await M.cancelAgentTask({}, { taskRef: t.id }, ctx(member.id));
     expect(out.status).toBe('cancelled');
     expect(out.cancelledAt).toBeInstanceOf(Date);
     const ev = (await events(t.id)).at(-1)!;
@@ -461,25 +461,25 @@ describe('assign / reassign / cancel — the owner, or whoever manages the App (
 
   it('lifecycle S6: cancelling a finished task is refused and it stays finished', async () => {
     const t = await anneTask({ start: true });
-    await asWorker(anne, () => M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, ctx(member.id)));
-    await expectCode(M.cancelAgentTask({}, { taskId: t.id }, ctx(member.id)), 'TASK_ENDED');
+    await asWorker(anne, () => M.finishAgentTask({}, { taskRef: t.id, result: { outcome: 'succeeded' } }, ctx(member.id)));
+    await expectCode(M.cancelAgentTask({}, { taskRef: t.id }, ctx(member.id)), 'TASK_ENDED');
     expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).status).toBe('finished');
-    await expectCode(M.reassignAgentTask({}, { taskId: t.id, assignee: { worker: 'Liam' } }, ctx(member.id)), 'TASK_ENDED');
+    await expectCode(M.reassignAgentTask({}, { taskRef: t.id, assignee: { worker: 'Liam' } }, ctx(member.id)), 'TASK_ENDED');
   });
 
   it('a worker owner acts on its own tasks through its session', async () => {
     const t = await asWorker(anne, () => create(ctx(member.id), {}));
-    await expectCode(M.assignAgentTask({}, { taskId: t.id, assignee: { worker: 'Liam' } }, ctx(member.id)), 'TASK_NOT_OWNER');
-    const out = await asWorker(anne, () => M.assignAgentTask({}, { taskId: t.id, assignee: { worker: 'Liam' } }, ctx(member.id)));
+    await expectCode(M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: 'Liam' } }, ctx(member.id)), 'TASK_NOT_OWNER');
+    const out = await asWorker(anne, () => M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: 'Liam' } }, ctx(member.id)));
     expect(out.assignedByWorkerId).toBe(anne.id);
   });
 
   it('a task id the caller cannot read is TASK_NOT_FOUND for every mutation', async () => {
     const t = await anneTask();
     for (const call of [
-      () => M.assignAgentTask({}, { taskId: t.id, assignee: { worker: 'Liam' } }, ctx(outsider.id)),
-      () => M.cancelAgentTask({}, { taskId: t.id }, ctx(outsider.id)),
-      () => asWorker(zed, () => M.startAgentTask({}, { taskId: t.id }, ctx(member.id))),
+      () => M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: 'Liam' } }, ctx(outsider.id)),
+      () => M.cancelAgentTask({}, { taskRef: t.id }, ctx(outsider.id)),
+      () => asWorker(zed, () => M.startAgentTask({}, { taskRef: t.id }, ctx(member.id))),
     ]) await expectCode(call(), 'TASK_NOT_FOUND');
   });
 });
@@ -507,67 +507,67 @@ describe('backlog — parked, unassigned (#1754, cor:agt:050:02)', () => {
 
   it('the owner parks a queued task; a reader may not; an App manager may', async () => {
     const t = await create(ctx(member.id), {});
-    await expectCode(M.parkAgentTask({}, { taskId: t.id }, ctx(reader.id)), 'TASK_NOT_OWNER');
-    const parked = await M.parkAgentTask({}, { taskId: t.id }, ctx(member.id));
+    await expectCode(M.parkAgentTask({}, { taskRef: t.id }, ctx(reader.id)), 'TASK_NOT_OWNER');
+    const parked = await M.parkAgentTask({}, { taskRef: t.id }, ctx(member.id));
     expect(parked.status).toBe('backlog');
     expect((await events(t.id)).map((e) => e.type)).toEqual(['task.created', 'assignment.queued', 'task.parked']);
     const t2 = await create(ctx(member.id), {});
-    expect((await M.parkAgentTask({}, { taskId: t2.id }, ctx(admin.id))).status).toBe('backlog');
+    expect((await M.parkAgentTask({}, { taskRef: t2.id }, ctx(admin.id))).status).toBe('backlog');
   });
 
   it('parking refuses an assigned, started, already-backlog or ended task', async () => {
-    await expectCode(M.parkAgentTask({}, { taskId: (await anneTask()).id }, ctx(member.id)), 'TASK_INVALID_TRANSITION');
-    await expectCode(M.parkAgentTask({}, { taskId: (await anneTask({ start: true })).id }, ctx(member.id)), 'TASK_INVALID_TRANSITION');
+    await expectCode(M.parkAgentTask({}, { taskRef: (await anneTask()).id }, ctx(member.id)), 'TASK_INVALID_TRANSITION');
+    await expectCode(M.parkAgentTask({}, { taskRef: (await anneTask({ start: true })).id }, ctx(member.id)), 'TASK_INVALID_TRANSITION');
     const bl = await create(ctx(member.id), { status: 'BACKLOG' });
-    await expectCode(M.parkAgentTask({}, { taskId: bl.id }, ctx(member.id)), 'TASK_INVALID_TRANSITION');
+    await expectCode(M.parkAgentTask({}, { taskRef: bl.id }, ctx(member.id)), 'TASK_INVALID_TRANSITION');
     const done = await anneTask({ start: true });
-    await asWorker(anne, () => M.finishAgentTask({}, { taskId: done.id, result: { outcome: 'succeeded' } }, ctx(member.id)));
-    await expectCode(M.parkAgentTask({}, { taskId: done.id }, ctx(member.id)), 'TASK_ENDED');
+    await asWorker(anne, () => M.finishAgentTask({}, { taskRef: done.id, result: { outcome: 'succeeded' } }, ctx(member.id)));
+    await expectCode(M.parkAgentTask({}, { taskRef: done.id }, ctx(member.id)), 'TASK_ENDED');
   });
 
   it('whoever may assign makes a backlog task ready: it becomes pending and enters the queue', async () => {
     const t = await create(ctx(member.id), { status: 'BACKLOG' });
-    await expectCode(M.makeAgentTaskReady({}, { taskId: t.id }, ctx(reader.id)), 'TASK_NOT_OWNER');
-    const ready = await M.makeAgentTaskReady({}, { taskId: t.id }, ctx(member.id));
+    await expectCode(M.makeAgentTaskReady({}, { taskRef: t.id }, ctx(reader.id)), 'TASK_NOT_OWNER');
+    const ready = await M.makeAgentTaskReady({}, { taskRef: t.id }, ctx(member.id));
     expect(ready.status).toBe('pending');
     expect(F.AgentTask.queued(ready)).toBe(true);
     expect((await events(t.id)).map((e) => e.type)).toEqual(['task.created', 'task.ready', 'assignment.queued']);
   });
 
   it('making ready refuses a pending or ended task', async () => {
-    await expectCode(M.makeAgentTaskReady({}, { taskId: (await create(ctx(member.id), {})).id }, ctx(member.id)), 'TASK_INVALID_TRANSITION');
+    await expectCode(M.makeAgentTaskReady({}, { taskRef: (await create(ctx(member.id), {})).id }, ctx(member.id)), 'TASK_INVALID_TRANSITION');
     const done = await anneTask({ start: true });
-    await asWorker(anne, () => M.finishAgentTask({}, { taskId: done.id, result: { outcome: 'succeeded' } }, ctx(member.id)));
-    await expectCode(M.makeAgentTaskReady({}, { taskId: done.id }, ctx(member.id)), 'TASK_ENDED');
+    await asWorker(anne, () => M.finishAgentTask({}, { taskRef: done.id, result: { outcome: 'succeeded' } }, ctx(member.id)));
+    await expectCode(M.makeAgentTaskReady({}, { taskRef: done.id }, ctx(member.id)), 'TASK_ENDED');
   });
 
   it('assigning a backlog task moves it to pending (cor:agt:050:02)', async () => {
     const t = await create(ctx(member.id), { status: 'BACKLOG' });
-    const out = await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: 'Liam' } }, ctx(member.id));
+    const out = await M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: 'Liam' } }, ctx(member.id));
     expect(out.status).toBe('pending');
     expect(out.assigneeWorkerId).toBe(liam.id);
   });
 
   it('cancelling from backlog: the owner and the reports-to chain, not an unrelated worker', async () => {
     const mine = await create(ctx(member.id), { status: 'BACKLOG' });
-    const out = await M.cancelAgentTask({}, { taskId: mine.id }, ctx(member.id));
+    const out = await M.cancelAgentTask({}, { taskRef: mine.id }, ctx(member.id));
     expect(out.status).toBe('cancelled');
     expect((await events(mine.id)).at(-1)!.payload).toEqual({ fromStatus: 'backlog', openChildCount: 0 });
     await db.worker.update({ where: { id: anne.id }, data: { reportsToWorkerId: rook.id } });
     const hers = await asWorker(anne, () => create(ctx(member.id), { status: 'BACKLOG' }));
-    await expectCode(asWorker(liam, () => M.cancelAgentTask({}, { taskId: hers.id }, ctx(member.id))), 'TASK_NOT_OWNER');
-    const viaChain = await asWorker(rook, () => M.cancelAgentTask({}, { taskId: hers.id }, ctx(member.id)));
+    await expectCode(asWorker(liam, () => M.cancelAgentTask({}, { taskRef: hers.id }, ctx(member.id))), 'TASK_NOT_OWNER');
+    const viaChain = await asWorker(rook, () => M.cancelAgentTask({}, { taskRef: hers.id }, ctx(member.id)));
     expect(viaChain.status).toBe('cancelled');
   });
 
   it('a backlog child never makes its started parent wait; a ready one does', async () => {
     const parent = await anneTask({ start: true });
     const child = await asWorker(anne, () =>
-      M.createAgentTask({}, { input: { parentTaskId: parent.id, title: 'later', status: 'BACKLOG' } }, ctx(member.id)));
+      M.createAgentTask({}, { input: { parentTaskRef: parent.id, title: 'later', status: 'BACKLOG' } }, ctx(member.id)));
     expect(child.status).toBe('backlog');
     const fresh = () => db.agentTask.findUniqueOrThrow({ where: { id: parent.id } });
     expect(await F.AgentTask.waitingOnChildren(await fresh(), {}, ctx(member.id))).toBe(false);
-    await asWorker(anne, () => M.makeAgentTaskReady({}, { taskId: child.id }, ctx(member.id)));
+    await asWorker(anne, () => M.makeAgentTaskReady({}, { taskRef: child.id }, ctx(member.id)));
     expect(await F.AgentTask.waitingOnChildren(await fresh(), {}, ctx(member.id))).toBe(true);
   });
 
@@ -580,14 +580,14 @@ describe('backlog — parked, unassigned (#1754, cor:agt:050:02)', () => {
 
   it('assigning a backlog task writes task.ready beside task.assigned (the uniform left-backlog signal)', async () => {
     const t = await create(ctx(member.id), { status: 'BACKLOG' });
-    await M.assignAgentTask({}, { taskId: t.id, assignee: { worker: 'Liam' } }, ctx(member.id));
+    await M.assignAgentTask({}, { taskRef: t.id, assignee: { worker: 'Liam' } }, ctx(member.id));
     expect((await events(t.id)).map((e) => e.type)).toEqual(['task.created', 'task.ready', 'task.assigned']);
   });
 
   it('two concurrent make-ready calls: one typed refusal, never a duplicate event pair', async () => {
     const t = await create(ctx(member.id), { status: 'BACKLOG' });
     const codes = await Promise.all([ctx(member.id), ctx(admin.id)].map((c) =>
-      M.makeAgentTaskReady({}, { taskId: t.id }, c).then(() => 'NO_ERROR', (e: GraphQLError) => String(e.extensions?.code))));
+      M.makeAgentTaskReady({}, { taskRef: t.id }, c).then(() => 'NO_ERROR', (e: GraphQLError) => String(e.extensions?.code))));
     expect(codes.sort()).toEqual(['NO_ERROR', 'TASK_INVALID_TRANSITION']);
     const ev = (await events(t.id)).map((e) => e.type);
     expect(ev.filter((t2) => t2 === 'task.ready')).toHaveLength(1);
@@ -598,8 +598,8 @@ describe('backlog — parked, unassigned (#1754, cor:agt:050:02)', () => {
   it('a backlog child counts as not open in a parent cancel (openChildCount)', async () => {
     const parent = await anneTask();
     await asWorker(anne, () =>
-      M.createAgentTask({}, { input: { parentTaskId: parent.id, title: 'later', status: 'BACKLOG' } }, ctx(member.id)));
-    const out = await M.cancelAgentTask({}, { taskId: parent.id }, ctx(member.id));
+      M.createAgentTask({}, { input: { parentTaskRef: parent.id, title: 'later', status: 'BACKLOG' } }, ctx(member.id)));
+    const out = await M.cancelAgentTask({}, { taskRef: parent.id }, ctx(member.id));
     expect(out.status).toBe('cancelled');
     expect((await events(parent.id)).at(-1)!.payload).toEqual({ fromStatus: 'pending', openChildCount: 0 });
   });
@@ -630,12 +630,12 @@ describe('backlog — parked, unassigned (#1754, cor:agt:050:02)', () => {
 describe('start / progress / finish — the assignee only (cor:agt:050:08)', () => {
   it('lifecycle S1 + S2: the assignee starts, records progress and finishes with its result', async () => {
     const t = await anneTask();
-    const started = await asWorker(anne, () => M.startAgentTask({}, { taskId: t.id }, ctx(member.id)));
+    const started = await asWorker(anne, () => M.startAgentTask({}, { taskRef: t.id }, ctx(member.id)));
     expect(started.status).toBe('started');
     expect(started.startedAt).toBeInstanceOf(Date);
-    await asWorker(anne, () => M.recordAgentTaskProgress({}, { taskId: t.id }, ctx(member.id)));
+    await asWorker(anne, () => M.recordAgentTaskProgress({}, { taskRef: t.id }, ctx(member.id)));
     const done = await asWorker(anne, () => M.finishAgentTask(
-      {}, { taskId: t.id, result: { outcome: 'succeeded', summary: 'Merged as abc123 after review.', evidence: 'https://github.com/o/r/pull/1' } },
+      {}, { taskRef: t.id, result: { outcome: 'succeeded', summary: 'Merged as abc123 after review.', evidence: 'https://github.com/o/r/pull/1' } },
       ctx(member.id)));
     expect(done.status).toBe('finished');
     expect(done.resultOutcome).toBe('succeeded');
@@ -650,22 +650,22 @@ describe('start / progress / finish — the assignee only (cor:agt:050:08)', () 
     const t = await anneTask({ start: true });
     const before = await db.agentTask.findUniqueOrThrow({ where: { id: t.id } });
     await expectCode(
-      asWorker(rook, () => M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'failed' } }, ctx(member.id))),
+      asWorker(rook, () => M.finishAgentTask({}, { taskRef: t.id, result: { outcome: 'failed' } }, ctx(member.id))),
       'TASK_NOT_ASSIGNEE',
     );
     // 050:05 S3: the owner (a coordinator, say) cannot finish it for the assignee either.
-    await expectCode(M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, ctx(member.id)), 'TASK_NOT_ASSIGNEE');
-    await expectCode(M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, ctx(admin.id)), 'TASK_NOT_ASSIGNEE');
+    await expectCode(M.finishAgentTask({}, { taskRef: t.id, result: { outcome: 'succeeded' } }, ctx(member.id)), 'TASK_NOT_ASSIGNEE');
+    await expectCode(M.finishAgentTask({}, { taskRef: t.id, result: { outcome: 'succeeded' } }, ctx(admin.id)), 'TASK_NOT_ASSIGNEE');
     const after = await db.agentTask.findUniqueOrThrow({ where: { id: t.id } });
     expect(after).toEqual(before);
   });
 
   it('only the assignee starts or records progress', async () => {
     const t = await anneTask();
-    await expectCode(asWorker(rook, () => M.startAgentTask({}, { taskId: t.id }, ctx(member.id))), 'TASK_NOT_ASSIGNEE');
-    await expectCode(M.startAgentTask({}, { taskId: t.id }, ctx(member.id)), 'TASK_NOT_ASSIGNEE');
-    await asWorker(anne, () => M.startAgentTask({}, { taskId: t.id }, ctx(member.id)));
-    await expectCode(asWorker(rook, () => M.recordAgentTaskProgress({}, { taskId: t.id }, ctx(member.id))), 'TASK_NOT_ASSIGNEE');
+    await expectCode(asWorker(rook, () => M.startAgentTask({}, { taskRef: t.id }, ctx(member.id))), 'TASK_NOT_ASSIGNEE');
+    await expectCode(M.startAgentTask({}, { taskRef: t.id }, ctx(member.id)), 'TASK_NOT_ASSIGNEE');
+    await asWorker(anne, () => M.startAgentTask({}, { taskRef: t.id }, ctx(member.id)));
+    await expectCode(asWorker(rook, () => M.recordAgentTaskProgress({}, { taskRef: t.id }, ctx(member.id))), 'TASK_NOT_ASSIGNEE');
   });
 
   it('#3863: the refusal names which actor the server saw, and still refuses before any write', async () => {
@@ -676,11 +676,11 @@ describe('start / progress / finish — the assignee only (cor:agt:050:08)', () 
       return null;
     };
     // No worker session on the request: it acted as the person.
-    const person = await seen(M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, ctx(member.id)));
+    const person = await seen(M.finishAgentTask({}, { taskRef: t.id, result: { outcome: 'succeeded' } }, ctx(member.id)));
     expect(person).toMatchObject({ code: 'TASK_NOT_ASSIGNEE', actor: 'person' });
     expect(person!.message).toContain('carried no worker session');
     // A different worker's session: same code, told apart.
-    const other = await seen(asWorker(rook, () => M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, ctx(member.id))));
+    const other = await seen(asWorker(rook, () => M.finishAgentTask({}, { taskRef: t.id, result: { outcome: 'succeeded' } }, ctx(member.id))));
     expect(other).toMatchObject({ code: 'TASK_NOT_ASSIGNEE', actor: 'worker' });
     expect(other!.message).not.toContain('no worker session');
     // Neither names the assignee, and the task is unchanged.
@@ -690,33 +690,33 @@ describe('start / progress / finish — the assignee only (cor:agt:050:08)', () 
 
   it('a queued task can be started by nobody (050:08 edge case)', async () => {
     const t = await create(ctx(member.id), {});
-    await expectCode(M.startAgentTask({}, { taskId: t.id }, ctx(member.id)), 'TASK_NOT_ASSIGNEE');
+    await expectCode(M.startAgentTask({}, { taskRef: t.id }, ctx(member.id)), 'TASK_NOT_ASSIGNEE');
   });
 
   it('a person assignee and the worker that person drives are different parties', async () => {
     const t = await create(ctx(member.id), { assignee: { user: member.id } });
-    await expectCode(asWorker(anne, () => M.startAgentTask({}, { taskId: t.id }, ctx(member.id))), 'TASK_NOT_ASSIGNEE');
-    const started = await M.startAgentTask({}, { taskId: t.id }, ctx(member.id));
+    await expectCode(asWorker(anne, () => M.startAgentTask({}, { taskRef: t.id }, ctx(member.id))), 'TASK_NOT_ASSIGNEE');
+    const started = await M.startAgentTask({}, { taskRef: t.id }, ctx(member.id));
     expect(started.status).toBe('started');
   });
 
   it('finishing a pending task is refused (start it first; #1705 interim)', async () => {
     const t = await anneTask();
     await expectCode(
-      asWorker(anne, () => M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, ctx(member.id))),
+      asWorker(anne, () => M.finishAgentTask({}, { taskRef: t.id, result: { outcome: 'succeeded' } }, ctx(member.id))),
       'TASK_INVALID_TRANSITION',
     );
-    await expectCode(asWorker(anne, () => M.recordAgentTaskProgress({}, { taskId: t.id }, ctx(member.id))), 'TASK_INVALID_TRANSITION');
+    await expectCode(asWorker(anne, () => M.recordAgentTaskProgress({}, { taskRef: t.id }, ctx(member.id))), 'TASK_INVALID_TRANSITION');
   });
 
   it('starting twice is TASK_INVALID_TRANSITION; lifecycle S7: a finished task never starts again', async () => {
     const t = await anneTask({ start: true });
-    await expectCode(asWorker(anne, () => M.startAgentTask({}, { taskId: t.id }, ctx(member.id))), 'TASK_INVALID_TRANSITION');
-    await asWorker(anne, () => M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, ctx(member.id)));
-    await expectCode(asWorker(anne, () => M.startAgentTask({}, { taskId: t.id }, ctx(member.id))), 'TASK_ENDED');
+    await expectCode(asWorker(anne, () => M.startAgentTask({}, { taskRef: t.id }, ctx(member.id))), 'TASK_INVALID_TRANSITION');
+    await asWorker(anne, () => M.finishAgentTask({}, { taskRef: t.id, result: { outcome: 'succeeded' } }, ctx(member.id)));
+    await expectCode(asWorker(anne, () => M.startAgentTask({}, { taskRef: t.id }, ctx(member.id))), 'TASK_ENDED');
     // A result cannot be changed after finishing (050:01 open question; #1705 interim).
     await expectCode(
-      asWorker(anne, () => M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'failed' } }, ctx(member.id))),
+      asWorker(anne, () => M.finishAgentTask({}, { taskRef: t.id, result: { outcome: 'failed' } }, ctx(member.id))),
       'TASK_ENDED',
     );
   });
@@ -724,7 +724,7 @@ describe('start / progress / finish — the assignee only (cor:agt:050:08)', () 
   it('an outcome is one word — free text never reaches the event stream', async () => {
     const t = await anneTask({ start: true });
     await expectCode(
-      asWorker(anne, () => M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'it went fine I think' } }, ctx(member.id))),
+      asWorker(anne, () => M.finishAgentTask({}, { taskRef: t.id, result: { outcome: 'it went fine I think' } }, ctx(member.id))),
       'BAD_USER_INPUT',
     );
   });
@@ -733,9 +733,9 @@ describe('start / progress / finish — the assignee only (cor:agt:050:08)', () 
     const t = await create(ctx(member.id), {
       title: 'SECRET-TITLE', description: 'SECRET-DESC', source: 'SECRET-SOURCE', assignee: { worker: anne.id },
     });
-    await asWorker(anne, () => M.startAgentTask({}, { taskId: t.id }, ctx(member.id)));
+    await asWorker(anne, () => M.startAgentTask({}, { taskRef: t.id }, ctx(member.id)));
     await asWorker(anne, () => M.finishAgentTask(
-      {}, { taskId: t.id, result: { outcome: 'succeeded', summary: 'SECRET-SUMMARY', evidence: 'SECRET-EVIDENCE' } }, ctx(member.id)));
+      {}, { taskRef: t.id, result: { outcome: 'succeeded', summary: 'SECRET-SUMMARY', evidence: 'SECRET-EVIDENCE' } }, ctx(member.id)));
     const blob = JSON.stringify(await events(t.id));
     expect(blob).not.toMatch(/SECRET-/);
   });
@@ -755,9 +755,9 @@ describe('reads — the App\'s participants, workers included (cor:agt:050:21)',
 
   it('S2: a non-participant does not get the task; a pure App key and another App\'s worker neither', async () => {
     const t = await create(ctx(member.id), {});
-    expect(await Q.agentTask({}, { id: t.id }, ctx(outsider.id))).toBeNull();
-    expect(await Q.agentTask({}, { id: t.id }, ctx(undefined, { appId: app.id }))).toBeNull();
-    expect(await asWorker(zed, () => Q.agentTask({}, { id: t.id }, ctx(member.id)))).toBeNull();
+    expect(await Q.agentTask({}, { ref: t.id }, ctx(outsider.id))).toBeNull();
+    expect(await Q.agentTask({}, { ref: t.id }, ctx(undefined, { appId: app.id }))).toBeNull();
+    expect(await asWorker(zed, () => Q.agentTask({}, { ref: t.id }, ctx(member.id)))).toBeNull();
     expect(await Q.agentTaskTree({}, { root: t.id }, ctx(outsider.id))).toBeNull();
     await expectCode(Q.agentTasks({}, { appRef: app.id }, ctx(outsider.id)), 'APP_NOT_FOUND');
     await expectCode(Q.agentTeamEvents({}, { appRef: app.id }, ctx(outsider.id)), 'APP_NOT_FOUND');
@@ -766,7 +766,7 @@ describe('reads — the App\'s participants, workers included (cor:agt:050:21)',
   it('a soft-deleted App\'s tasks read as missing', async () => {
     const t = await create(ctx(member.id), {});
     await db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } });
-    expect(await Q.agentTask({}, { id: t.id }, ctx(member.id))).toBeNull();
+    expect(await Q.agentTask({}, { ref: t.id }, ctx(member.id))).toBeNull();
   });
 
   it('differential: agentTask is readable exactly for the App-participant audience (isAppParticipant)', async () => {
@@ -777,23 +777,23 @@ describe('reads — the App\'s participants, workers included (cor:agt:050:21)',
       ctx(platformAdmin.id, { roles: ['ADMIN'] }),
     ];
     for (const c of principals) {
-      const readable = (await Q.agentTask({}, { id: t.id }, c)) !== null;
+      const readable = (await Q.agentTask({}, { ref: t.id }, c)) !== null;
       const participates = await isAppParticipant(c, { id: app.id, organizationId: org.id, ownerUserId: null });
       expect({ user: c.userId, readable }).toEqual({ user: c.userId, readable: participates });
     }
     // The worker arm: this App's live, unretired workers, driven by a credential
     // that may STILL drive them (Rook P1-2) — and nobody else's.
-    expect(await asWorker(anne, () => Q.agentTask({}, { id: t.id }, ctx(member.id)))).not.toBeNull();
-    expect(await asWorker(anne, () => Q.agentTask({}, { id: t.id }, ctx(outsider.id)))).toBeNull();
-    expect(await asWorker(retired, () => Q.agentTask({}, { id: t.id }, ctx(member.id)))).toBeNull();
-    expect(await asWorker(zed, () => Q.agentTask({}, { id: t.id }, ctx(member.id)))).toBeNull();
+    expect(await asWorker(anne, () => Q.agentTask({}, { ref: t.id }, ctx(member.id)))).not.toBeNull();
+    expect(await asWorker(anne, () => Q.agentTask({}, { ref: t.id }, ctx(outsider.id)))).toBeNull();
+    expect(await asWorker(retired, () => Q.agentTask({}, { ref: t.id }, ctx(member.id)))).toBeNull();
+    expect(await asWorker(zed, () => Q.agentTask({}, { ref: t.id }, ctx(member.id)))).toBeNull();
   });
 
   it('filters: status, owner, assignee, tag, roots, queued', async () => {
     const a = await create(ctx(member.id), { tags: ['x'] });
     const b = await anneTask({ start: true });
     const child = await asWorker(anne, () =>
-      M.createAgentTask({}, { input: { parentTaskId: b.id, title: 'child' } }, ctx(member.id)));
+      M.createAgentTask({}, { input: { parentTaskRef: b.id, title: 'child' } }, ctx(member.id)));
     const ids = async (args: Record<string, unknown>) =>
       (await Q.agentTasks({}, { appRef: app.id, ...args }, ctx(member.id))).map((t: any) => t.id).sort();
     expect(await ids({ status: ['STARTED'] })).toEqual([b.id]);
@@ -803,7 +803,7 @@ describe('reads — the App\'s participants, workers included (cor:agt:050:21)',
     expect(await ids({ tag: 'x' })).toEqual([a.id]);
     expect(await ids({ rootsOnly: true })).toEqual([a.id, b.id].sort());
     expect(await ids({ queued: true })).toEqual([a.id, child.id].sort());
-    expect(await ids({ parentTaskId: b.id })).toEqual([child.id]);
+    expect(await ids({ parentTaskRef: b.id })).toEqual([child.id]);
   });
 
   describe('creator filter (#2370): matches what `createdBy` projects', () => {
@@ -863,19 +863,19 @@ describe('reads — the App\'s participants, workers included (cor:agt:050:21)',
     const fresh = () => db.agentTask.findUniqueOrThrow({ where: { id: parent.id } });
     expect(await T.waitingOnChildren(await fresh(), {}, ctx(member.id))).toBe(false);
     const child = await asWorker(anne, () =>
-      M.createAgentTask({}, { input: { parentTaskId: parent.id, title: 'review', assignee: { worker: 'Rook' } } }, ctx(member.id)));
+      M.createAgentTask({}, { input: { parentTaskRef: parent.id, title: 'review', assignee: { worker: 'Rook' } } }, ctx(member.id)));
     expect(await T.waitingOnChildren(await fresh(), {}, ctx(member.id))).toBe(true);
-    await asWorker(anne, () => M.cancelAgentTask({}, { taskId: child.id }, ctx(member.id)));
+    await asWorker(anne, () => M.cancelAgentTask({}, { taskRef: child.id }, ctx(member.id)));
     expect(await T.waitingOnChildren(await fresh(), {}, ctx(member.id))).toBe(false);
   });
 
   it('agentTaskTree returns the root and every descendant, root first', async () => {
     const root = await anneTask({ start: true });
     const c1 = await asWorker(anne, () =>
-      M.createAgentTask({}, { input: { parentTaskId: root.id, title: 'c1', assignee: { worker: 'Rook' } } }, ctx(member.id)));
-    await asWorker(rook, () => M.startAgentTask({}, { taskId: c1.id }, ctx(member.id)));
+      M.createAgentTask({}, { input: { parentTaskRef: root.id, title: 'c1', assignee: { worker: 'Rook' } } }, ctx(member.id)));
+    await asWorker(rook, () => M.startAgentTask({}, { taskRef: c1.id }, ctx(member.id)));
     const g1 = await asWorker(rook, () =>
-      M.createAgentTask({}, { input: { parentTaskId: c1.id, title: 'g1' } }, ctx(member.id)));
+      M.createAgentTask({}, { input: { parentTaskRef: c1.id, title: 'g1' } }, ctx(member.id)));
     await create(ctx(member.id), { title: 'unrelated' });
     const tree = await Q.agentTaskTree({}, { root: root.id }, ctx(reader.id));
     expect(tree.map((t: any) => t.id)).toEqual([root.id, c1.id, g1.id]);
@@ -885,7 +885,7 @@ describe('reads — the App\'s participants, workers included (cor:agt:050:21)',
     const t = await anneTask({ start: true });
     const all = await Q.agentTeamEvents({}, { appRef: app.id }, ctx(reader.id));
     expect(all.map((e: any) => e.type)).toEqual(['task.created', 'task.assigned', 'task.started']);
-    const started = await Q.agentTeamEvents({}, { appRef: app.id, types: ['task.started'], taskId: t.id }, ctx(reader.id));
+    const started = await Q.agentTeamEvents({}, { appRef: app.id, types: ['task.started'], taskRef: t.id }, ctx(reader.id));
     expect(started).toHaveLength(1);
     expect(await Q.agentTeamEvents({}, { appRef: app.id, alarmsOnly: true }, ctx(reader.id))).toEqual([]);
   });
@@ -933,11 +933,11 @@ describe('#1731: the strict App manager of #1713 (Rook P1-1) is replaced by #779
     await db.appAgent.create({ data: { appId: app.id, agentId: teamAgent.id } });
     await db.appMember.create({ data: { appId: app.id, userId: outsider.id, role: 'owner' } });
     const theirs = await anneTask({ start: true });
-    await M.reassignAgentTask({}, { taskId: theirs.id, assignee: { worker: 'Liam' } }, ctx(outsider.id));
+    await M.reassignAgentTask({}, { taskRef: theirs.id, assignee: { worker: 'Liam' } }, ctx(outsider.id));
     expect((await db.agentTask.findUniqueOrThrow({ where: { id: theirs.id } })).assigneeWorkerId).toBe(liam.id);
-    await M.cancelAgentTask({}, { taskId: theirs.id }, ctx(outsider.id));
+    await M.cancelAgentTask({}, { taskRef: theirs.id }, ctx(outsider.id));
     const queued = await create(ctx(member.id), {});
-    await M.assignAgentTask({}, { taskId: queued.id, assignee: { worker: 'Liam' } }, ctx(outsider.id));
+    await M.assignAgentTask({}, { taskRef: queued.id, assignee: { worker: 'Liam' } }, ctx(outsider.id));
     expect((await create(ctx(outsider.id), { owner: { user: member.id } })).ownerUserId).toBe(member.id);
   });
 
@@ -945,17 +945,17 @@ describe('#1731: the strict App manager of #1713 (Rook P1-1) is replaced by #779
     await db.appMember.create({ data: { appId: app.id, userId: outsider.id, role: 'owner' } });
     await db.appMember.update({ where: { appId_userId: { appId: app.id, userId: outsider.id } }, data: { role: 'member' } });
     const theirs = await anneTask();
-    await expectCode(M.cancelAgentTask({}, { taskId: theirs.id }, ctx(outsider.id)), 'TASK_NOT_OWNER');
+    await expectCode(M.cancelAgentTask({}, { taskRef: theirs.id }, ctx(outsider.id)), 'TASK_NOT_OWNER');
   });
 });
 
 describe('#1713 review: a worker session stops authorizing when its driver stops participating (Rook P1-2)', () => {
   it('bind, remove the AppMember: the worker reads null and its writes are TASK_NOT_FOUND', async () => {
     const t = await anneTask();
-    expect(await asWorker(anne, () => Q.agentTask({}, { id: t.id }, ctx(member.id)))).not.toBeNull();
+    expect(await asWorker(anne, () => Q.agentTask({}, { ref: t.id }, ctx(member.id)))).not.toBeNull();
     await db.appMember.delete({ where: { appId_userId: { appId: app.id, userId: member.id } } });
-    expect(await asWorker(anne, () => Q.agentTask({}, { id: t.id }, ctx(member.id)))).toBeNull();
-    await expectCode(asWorker(anne, () => M.startAgentTask({}, { taskId: t.id }, ctx(member.id))), 'TASK_NOT_FOUND');
+    expect(await asWorker(anne, () => Q.agentTask({}, { ref: t.id }, ctx(member.id)))).toBeNull();
+    await expectCode(asWorker(anne, () => M.startAgentTask({}, { taskRef: t.id }, ctx(member.id))), 'TASK_NOT_FOUND');
     await expectCode(asWorker(anne, () => Q.agentTasks({}, { appRef: app.id }, ctx(member.id))), 'APP_NOT_FOUND');
     expect((await db.agentTask.findUniqueOrThrow({ where: { id: t.id } })).status).toBe('pending');
   });
@@ -963,7 +963,7 @@ describe('#1713 review: a worker session stops authorizing when its driver stops
   it('a revoked org membership stops it too', async () => {
     const t = await anneTask();
     await db.orgMember.updateMany({ where: { organizationId: org.id, userId: contrib.id }, data: { deletedAt: new Date() } });
-    expect(await asWorker(anne, () => Q.agentTask({}, { id: t.id }, ctx(contrib.id)))).toBeNull();
+    expect(await asWorker(anne, () => Q.agentTask({}, { ref: t.id }, ctx(contrib.id)))).toBeNull();
   });
 });
 
@@ -1007,7 +1007,7 @@ describe('#1713 review: writes re-gate inside their transaction (Diego P2-A)', (
       await tx.appMember.delete({ where: { appId_userId: { appId: app.id, userId: reader.id } } });
     });
     await r.holding;
-    const write = M.cancelAgentTask({}, { taskId: t.id }, ctx(reader.id)).then(
+    const write = M.cancelAgentTask({}, { taskRef: t.id }, ctx(reader.id)).then(
       () => 'NO_ERROR', (e: GraphQLError) => String(e.extensions?.code));
     await untilSomeoneWaits();
     r.release();
@@ -1024,7 +1024,7 @@ describe('#1713 review: writes re-gate inside their transaction (Diego P2-A)', (
       await tx.$executeRaw`UPDATE apps SET uninstalled_at = now() WHERE id = ${app.id}`;
     });
     await r.holding;
-    const write = asWorker(anne, () => M.startAgentTask({}, { taskId: t.id }, ctx(member.id))).then(
+    const write = asWorker(anne, () => M.startAgentTask({}, { taskRef: t.id }, ctx(member.id))).then(
       () => 'NO_ERROR', (e: GraphQLError) => String(e.extensions?.code));
     await untilSomeoneWaits();
     r.release();
@@ -1042,7 +1042,7 @@ describe('#1713 review: writes re-gate inside their transaction (Diego P2-A)', (
     });
     await r.holding;
     const write = asWorker(anne, () =>
-      M.finishAgentTask({}, { taskId: t.id, result: { outcome: 'succeeded' } }, ctx(member.id))).then(
+      M.finishAgentTask({}, { taskRef: t.id, result: { outcome: 'succeeded' } }, ctx(member.id))).then(
       () => 'NO_ERROR', (e: GraphQLError) => String(e.extensions?.code));
     await untilSomeoneWaits();
     r.release();
@@ -1060,7 +1060,7 @@ describe('#1713 review: writes re-gate inside their transaction (Diego P2-A)', (
       await tx.appMember.deleteMany({ where: { appId: app.id, userId: reader.id } });
     });
     await r.holding;
-    const write = M.cancelAgentTask({}, { taskId: t.id }, ctx(reader.id)).then(
+    const write = M.cancelAgentTask({}, { taskRef: t.id }, ctx(reader.id)).then(
       () => 'NO_ERROR', (e: GraphQLError) => String(e.extensions?.code));
     await untilSomeoneWaits();
     r.release();

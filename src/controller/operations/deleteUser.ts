@@ -5,11 +5,14 @@ import { encryptToken } from '../../lib/tokenCrypto.js';
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
 import { deleteToolConnection } from '../../lib/emailClient.js';
 import { deleteSecretsForOwner } from '../../lib/secrets.js';
+import { assertOwnerLimitSnapshotFresh, deleteOwnerLimits, logOwnerLimitChanges, type OwnerLimitChange } from '../../lib/ownerLimits/changes.js';
 import { releasePrincipal } from '../../lib/principal/mintPrincipal.js';
 import { softDeleteOrganizationCore } from './softDeleteOrganization.js';
+import { assertLedgerSnapshotFresh } from '../../lib/metering/ledgerOwner.js';
+import { dispatchChatToolTeardown, type ChatToolTeardown } from '../../lib/chatToolTeardown.js';
 import { assertIssuerInvitationSnapshotFresh, revokeOrgInvitationsByIssuer } from '../../lib/auth/revokeOrgInvitations.js';
 import { AuthoritySnapshotStale, lockAuthorityAnchors } from '../../lib/auth/authorityAnchors.js';
-import { retryOnSerializationFailure } from '../../lib/serializableRetry.js';
+import { retryOnDeadlock, retryOnSerializationFailure } from '../../lib/serializableRetry.js';
 import { assertNoMintedCorpusCascade } from '../../lib/mintedSpecPermanence.js';
 import { endHeldGrants } from '../../lib/grants/departure.js';
 import {
@@ -127,19 +130,28 @@ export async function deleteUserAccount(
   db: PrismaClient,
   { targetUserId, actorUserId, reason }: DeleteUserAccountArgs,
 ): Promise<void> {
-  // One immutable op id per call, minted OUTSIDE the retry so a serialization retry reuses it.
+  // One immutable op id per call, minted OUTSIDE both retries so a serialization or deadlock retry reuses it.
   const auditId = generateId();
   // Resolve org domains before opening the SERIALIZABLE transaction so every
   // authority anchor precedes its row locks. A fresh cross-connection check
   // after the anchors retries with the complete set if membership changed.
   // The shared retry includes jitter for both P2034 and stale snapshots.
-  const { toolConnections, assetKeys } = await retryOnSerializationFailure(async () => {
+  //
+  // #4690 (#3851's finding): two concurrent erasures of people whose grants are crossed deadlock in the grant writes
+  // (the issuer and requester UPDATEs and endHeldGrants all lock grant rows), and Postgres aborts one with 40P01. A
+  // deadlock aborts the WHOLE transaction and nothing here has an effect outside the database before commit (every
+  // helper runDeletionTxn calls takes `tx`; the asset purge, tool-connection teardown and deletion notice run below,
+  // after commit), so the attempt is re-run: retryOnDeadlock wraps the scope read and the transaction, so every attempt
+  // re-reads the membership scope, takes its locks again and re-judges under them (a target the winner already erased
+  // refuses "User not found", never erases twice). It is nested inside the serialization retry, so
+  // isSerializationFailure is not widened for any other caller (#4318).
+  const { toolConnections, chatTeardowns, assetKeys, limitChanges } = await retryOnSerializationFailure(() => retryOnDeadlock(async () => {
     const membershipScope = (await db.orgMember.findMany({
       where: { userId: targetUserId, deletedAt: null },
       select: { organizationId: true },
     })).map((m) => m.organizationId).sort();
     return runDeletionTxn(db, targetUserId, actorUserId, membershipScope, reason === undefined ? null : { auditId, reason });
-  });
+  }));
   // Provider-sidecar teardown AFTER the commit: the tools hold their own
   // copy of the OAuth credential + change subscriptions, so deleting the
   // core ExchangeConnection rows alone would leave those live. Outside
@@ -149,6 +161,9 @@ export async function deleteUserAccount(
   for (const c of toolConnections) {
     void deleteToolConnection(c.provider, c.toolConnectionId);
   }
+  // #4828: the Telegram and Slack registrations of the organizations that died with the account, the same post-commit posture.
+  dispatchChatToolTeardown(chatTeardowns);
+  logOwnerLimitChanges(actorUserId, limitChanges);
   // Same posture for the deleted memories' files: the Asset rows went
   // with the cascade, so these keys are the last record of the bytes.
   // Post-commit and best-effort — a dead object store must log, not fail.
@@ -163,10 +178,11 @@ export async function deleteUserAccount(
 }
 
 /**
- * The single SERIALIZABLE deletion transaction {@link deleteUserAccount}
- * retries. Locks the target's User row up front (`FOR UPDATE`) so two
- * concurrent deletions of the same account serialize instead of double-firing
- * the cascades, and re-checks liveness under the lock.
+ * The single SERIALIZABLE deletion transaction {@link deleteUserAccount} retries,
+ * on a serialization failure (P2034 / raw 40001) and on a deadlock (raw 40P01,
+ * #4690); each attempt re-runs this whole body. Locks the target's User row up
+ * front (`FOR UPDATE`) so two concurrent deletions of the same account serialize
+ * instead of double-firing the cascades, and re-checks liveness under the lock.
  */
 async function runDeletionTxn(
   db: PrismaClient,
@@ -176,6 +192,10 @@ async function runDeletionTxn(
   audit: { auditId: string; reason: string } | null,
 ): Promise<{
   toolConnections: Array<{ provider: string; toolConnectionId: string }>;
+  /** #4828: chat tool registrations of the sole-member organizations deleted with the account, torn down post-commit. */
+  chatTeardowns: ChatToolTeardown[];
+  /** #5009: the owner-limit rows removed with the account and its sole-member organizations, logged post-commit. */
+  limitChanges: OwnerLimitChange[];
   /** Object-store keys of the deleted memories' assets — purged post-commit. */
   assetKeys: CollectedAssetKeys;
 }> {
@@ -210,7 +230,11 @@ async function runDeletionTxn(
         WHERE id = ${targetUserId} AND deleted_at IS NULL FOR UPDATE
       `;
       if (locked.length === 0) throw new Error('User not found');
+      // #5352 (hrn:node:hadronmemory.com:specs:cor:dmo:170:08): this SERIALIZABLE snapshot predates the lock, so a ledger append that
+      // committed meanwhile would be missed by the clear below; with the row held no new entry can name the person. Stale: retried.
+      await assertLedgerSnapshotFresh(tx, db, { userId: targetUserId });
       await assertUserGrantSnapshotFresh(tx, db, targetUserId);
+      await assertOwnerLimitSnapshotFresh(tx, db, [{ userId: targetUserId }, ...membershipScope.map((organizationId) => ({ organizationId }))]);
       for (const orgId of membershipScope) {
         await tx.$queryRaw`
           SELECT id FROM org_members
@@ -280,8 +304,14 @@ async function runDeletionTxn(
       // the whole transaction back — NOTHING is deleted.
       if (blockers.length > 0) throw new SoleOrgOwnerError(blockers);
 
+      const chatTeardowns: ChatToolTeardown[] = [];
+      const limitChanges: OwnerLimitChange[] = [];
       for (const orgId of soleMemberOrgIds) {
-        await softDeleteOrganizationCore(tx, orgId, actorUserId);
+        // #5352: the organization row FOR UPDATE (the lock softDeleteOrganizationCore takes) BEFORE the snapshot check, for the
+        // reason given at the person's check above.
+        await tx.$queryRaw`SELECT id FROM organizations WHERE id = ${orgId} FOR UPDATE`;
+        await assertLedgerSnapshotFresh(tx, db, { organizationId: orgId });
+        chatTeardowns.push(...(await softDeleteOrganizationCore(tx, orgId, actorUserId, undefined, limitChanges)));
       }
       // Soft-delete every remaining live membership row (the platform-wide
       // OrgMember revocation shape — removeOrgMember; audit tuple persists).
@@ -337,11 +367,18 @@ async function runDeletionTxn(
       await tx.agentImport.deleteMany({
         where: { importedAgent: { ownerUserId: targetUserId } },
       });
+      // #5077 (cor:aut:020:03): the runs of the person's Apps go with the person. `app_runs` has no foreign key to `apps`, so
+      // the App delete below does not remove them, and the user row is kept as a tombstone, so the cascade on
+      // `app_runs.owner_user_id` never fires here. Usage events and ledger entries are not linked to a run by a foreign key
+      // and stay. The run's served prompt, manual pin, poll bindings and event receipts go by their own cascades.
+      await tx.appRun.deleteMany({ where: { ownerUserId: targetUserId } });
       // User-owned Apps: after foreign strict-owner holdings detach, the
       // App cascade removes the remaining app-scoped memories, keys,
-      // members, installs, runs, schedules, webhooks, pending setups — and
+      // members, installs, schedules, webhooks, pending setups — and
       // their Worker castings (Worker.appId cascades).
       await tx.app.deleteMany({ where: { ownerUserId: targetUserId } });
+      // #5074: the person's own daily counters (`user` scope; no foreign key, so no cascade). Idempotent under retry.
+      await tx.quotaCounter.deleteMany({ where: { scopeKind: 'user', scopeId: targetUserId } });
       // Worker castings of the target's agents: `Worker.agentId` is ON DELETE
       // RESTRICT (#974), so any surviving casting would fail the agent delete
       // below with P2003 and roll back the whole erasure. In v1 this set is
@@ -421,6 +458,7 @@ async function runDeletionTxn(
       await tx.memoryConfigTemplate.deleteMany({ where: { ownerUserId: targetUserId } });
       await tx.pendingSetup.deleteMany({ where: { userId: targetUserId } });
       await deleteSecretsForOwner(tx, 'user', targetUserId);
+      limitChanges.push(...(await deleteOwnerLimits(tx, { userId: targetUserId }, 'owner-deleted')));
 
       // ── 3b. #1647: audit + notice intent, in THIS transaction ───────
       // Read the address BEFORE the scrub nulls it. The audit and the intent commit with the erasure or not at all;
@@ -477,13 +515,19 @@ async function runDeletionTxn(
         },
       });
 
+      // #5302 (hrn:node:hadronmemory.com:specs:cor:dmo:170:08, Edge Cases: an erased person's entries are "kept without the person"),
+      // AFTER the soft delete above: the append-only trigger lets the owner link go only for a person with no live row. Only the owner
+      // column changes. A merge never comes here (mergeUsers re-points instead, #5014). Before the grant writes below, so the grant
+      // row lock stays the last lock this transaction takes.
+      await tx.$executeRaw`UPDATE credit_ledger_entries SET owner_user_id = NULL WHERE owner_user_id = ${targetUserId}`;
+
       // #3690 (S2a-h, cor:acl:140:03 and :08, ruling 0255 item 3), AFTER the soft delete above: the database lets an issuer link go only
       // for an erased person (a users row that is soft-deleted or gone), and that is true only from here.
       //  - Grants this person HOLDS end (the grant allows nothing and the record stays, holder id sealed). The soft delete fires no
       //    foreign-key action, so this is explicit; the Agents, Workers and Apps erased above ended theirs by the delete triggers.
       //  - Grants this person ISSUED stay as they were, with the issuer link gone and the reason kept (`:08`); one row can be both.
       // Last among the writes that lock grant rows, so the grant row lock is the last lock this transaction takes.
-      await endHeldGrants(tx, 'user', targetUserId);
+      await endHeldGrants(tx, 'user', targetUserId, 'USER_ERASED');
       // #3998: secret_read_clients.issuer_user_id stays sealed history; client authorization reads this current grant link.
       await tx.$executeRaw`UPDATE grants SET issuer_user_id = NULL WHERE issuer_user_id = ${targetUserId}`;
       // #3813 / cor:acl:140:08, ruling 0265: a requester's link dies in this same erasure transaction.
@@ -513,6 +557,8 @@ async function runDeletionTxn(
           provider: string;
           toolConnectionId: string;
         }>,
+        chatTeardowns,
+        limitChanges,
         assetKeys,
       };
     },

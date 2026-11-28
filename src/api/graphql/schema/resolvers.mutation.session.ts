@@ -1,3 +1,5 @@
+import { lockMemoryForChannelChange } from '../../../lib/channels.js';
+import { ownerLimitCaller, requireNodeHeadroom } from '../../../lib/ownerLimits/nodes.js';
 import { assertPositiveSessionTimeout } from '../../../lib/sessionTimeout.js';
 import { edgeRunOrder } from '../../../lib/edgeOrder.js';
 import { lockStopFence } from '../../../lib/stopSignals/state.js';
@@ -20,7 +22,7 @@ import {
 import { authoredContentChanged, clearNodeAuthorship } from '../../../lib/nodeAuthorship.js';
 import { nextRevisionNumber, RevisionSlotsExhaustedError } from '../../../lib/revisionSlot.js';
 import { isLiveSlotLoc } from '../../../lib/agentRevisions.js';
-import { lockAncestorsForCreate, lockAncestorsForCreateMany, lockNodeForDelete, lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
+import { acquireLockSet, ancestorLocs, lockAncestorsForCreate, lockAncestorsForCreateMany, lockNodeForDelete, lockPathForCreateUnder } from '../../../lib/nodeSubtreeLock.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
 import { canReadMemory, filterReadableMemoryIds } from '../../../mcp/access-control.js';
@@ -29,20 +31,25 @@ import { hasRequestOperationKey, getRequestOperationKey } from '../../../lib/req
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { makeKeyVerifier, verifyDataKey } from '../../../lib/memoryUnlock.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
+import { missingRequiredTaskArgs } from '../../../lib/taskArgs.js';
 import {
   parseUrnInput,
   assertFullyQualifiedUrn,
   UrnNotQualifiedError,
+  UrnParseError,
   hasSchemePrefix,
   splitNodeUrn,
   normalizeUrnForLookup,
   legacyMemoryUrnToCanonical,
   agentSlugFromUrn,
+  parseUrnV2,
 } from '../../../lib/urn.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
 import { resolveWorkerRef as resolveWorkerRefId } from '../../../lib/entityRef/workerRef.js';
 import { isId } from '../../../lib/entityRef/shape.js';
-import { isAppGateRefusal } from '../../../lib/auth/workerRead.js';
+import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
+import { refNamesNothing, refHasUnstorableChars } from '../../../lib/entityRef/refNamesNothing.js';
+import { isAppGateRefusal, appNotFound } from '../../../lib/auth/workerRead.js';
 import { serveBindInTransaction, resolveReadableWorkerRef, resolveWorkerIdByNameGated, resolveWorkerBindCandidatesByName, provisionWorkerMemory, requireWorkerReadAccess, resolveReportsToTarget } from './resolvers.worker.js';
 import { lockAppReportsTo, writeReportsTo } from '../../../lib/workerReportsTo.js';
 import { eventActor } from '../../../lib/agentTasks/events.js';
@@ -57,7 +64,8 @@ import {
   handoffSessionId,
 } from '../../../lib/workerHandoff.js';
 import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
-import { deriveEdgeLoc } from '../../../lib/edgeLoc.js';
+import { foreignIncludeReader } from '../../../lib/includes/foreignIncludeReader.js';
+import { deriveEdgeLoc, edgeLocDecodesAsDerived } from '../../../lib/edgeLoc.js';
 import { generateUniqueHandle } from '../../../lib/userHandle.js';
 import { ensureUserPrincipal } from '../../../lib/principal/mintPrincipal.js';
 import { isRoutingName, routingNameOf } from '../../../lib/runner/selectNextEdge.js';
@@ -65,7 +73,12 @@ import { compileTemplate } from '../../../lib/template.js';
 import { chargeRequestServed } from '../../../lib/includes/resolveNodeContent.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
-import { NodeNotFoundError, AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import {
+  NodeNotFoundError,
+  AgentNotFoundError,
+  AppNotFoundError,
+  AmbiguousLegacyUrnError,
+} from '../../../lib/entityRef/errors.js';
 import { triggerManualRun } from './resolvers.appRun.js';
 import { GraphQLError } from 'graphql';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
@@ -99,7 +112,10 @@ import {
   ConnectionNotFoundError,
   type SessionInput,
   type UsageEventInput,
+  requireCallerIdentity,
+  sessionScopeFilter,
 } from './resolvers.helpers.js';
+import { assertRestoreKeepsRetirement } from '../../../lib/restoreUnretireGuard.js';
 import { assertNoMintedSpecRemoval, assertNoMintedSpecUnmark } from '../../../lib/mintedSpecPermanence.js';
 import { preserveHeartbeatIfLapsed } from '../../../lib/sessionActivity.js';
 import { recordSessionOutcome as recordOutcome } from '../../../lib/sessionOutcome.js';
@@ -113,7 +129,7 @@ import {
   toCandidates,
   writeResumeClaim,
 } from '../../../lib/resumeClaims.js';
-import { lapsedResumeVerdict, resumeOwnLapsedSessionInTx } from '../../../lib/teamAttention.js';
+import { lapsedResumeVerdict, resumeOwnLapsedSessionInTx } from '../../../lib/ownWorkerSessions.js';
 import { liveTxContext, withAuthorizedTx } from './authorizedTx.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
@@ -132,6 +148,7 @@ import {
   getConnectProvider,
   issueConnectStart,
 } from '../../../integrations/mailboxConnect.js';
+import { refusalText } from '../../../lib/refEcho.js';
 
 /** `ConnectionProvider` enum value -> the emailClient provider key a connect flow is mounted under (#2897). */
 const CONNECTION_PROVIDER_KEYS: Record<string, string> = {
@@ -231,7 +248,44 @@ const launchGrantInvalid = () =>
 
 /** startSession's answer for a worker ref that names nothing the caller may see: one envelope for absent and unreadable alike. */
 const workerRefNotFound = (workerRef: string) =>
-  new GraphQLError(`Worker not found: ${workerRef}`, { extensions: { code: 'WORKER_NOT_FOUND' } });
+  new GraphQLError('Worker not found', { extensions: { code: 'WORKER_NOT_FOUND' } }); // #5168: no ref quoted
+
+/**
+ * #4836 — startSession's appRef refusal judge, PURE so the race arms can be pinned without a database.
+ *
+ * Standing (reach) is decided by the caller, then state here, in that order — cor:api:140:02's partition,
+ * the same one `updateApp` runs: only a caller who can reach the App is told its state.
+ *
+ * - No standing → the one unknown-App answer, `appNotFound()` (#3977's shared V58 envelope, so this door
+ *   can never drift from the team surfaces' bytes). That covers a missing, deleted, uninstalled or
+ *   existing-but-inaccessible App and a malformed/ambiguous ref alike — existence is not confirmed to a
+ *   caller who cannot reach it (cor:dmo:070:05, the Proposed clause; V58).
+ * - Standing + `deletedAt` → the same unknown-App answer: a row that died between `resolveAppRef` and the
+ *   row read is a missing App for EVERYONE (resolveAppRef already excludes soft-deleted rows on both
+ *   paths, so this arm is the TOCTOU gap only).
+ * - Standing + `uninstalledAt` → the specific `APP_UNINSTALLED`, with the appId the caller's own ref
+ *   resolved to (#944: by PK the row is unambiguous, so a member earns the more specific refusal; by URN
+ *   an uninstalled App never resolves at all — URNs are unique only among ACTIVE rows, spec 021 FR-027 —
+ *   so that case is folded into unknown-App at resolution, above).
+ * - Otherwise null: the ref stands, the caller may attribute a session to the App.
+ *
+ * A participant may always attribute (any role counts, cor:acl:030:01), so there is no
+ * member-lacks-authority arm on THIS door; the V58 exception stays alive on this mutation one level down,
+ * at the bind (a launch-grant holder who lost the App keeps the FORBIDDEN that fails the start, #10775).
+ */
+export function startSessionAppRefRefusal(
+  standing: boolean,
+  app: { id: string; deletedAt: Date | null; uninstalledAt: Date | null },
+): GraphQLError | null {
+  if (!standing) return appNotFound();
+  if (app.deletedAt) return appNotFound();
+  if (app.uninstalledAt) {
+    return new GraphQLError('Cannot start a session in an uninstalled App.', {
+      extensions: { code: 'APP_UNINSTALLED', appId: app.id },
+    });
+  }
+  return null;
+}
 
 /**
  * #1937 — the worker read gate for an id/URN ref, collapsed: a caller who may not read the worker's App's staff
@@ -488,7 +542,7 @@ export async function writeSessionHandoff(
         },
         writerCtx,
         'create',
-        { authoring: { kind: 'platform', record: 'session-handoff' } },
+        { ownerLimit: 'count-only', authoring: { kind: 'platform', record: 'session-handoff' }, sizeCeiling: 'skip' },
       );
     }
 
@@ -508,7 +562,7 @@ export async function writeSessionHandoff(
       },
       writerCtx,
       'create',
-      { authoring: { kind: 'platform', record: 'session-handoff' } },
+      { ownerLimit: 'count-only', authoring: { kind: 'platform', record: 'session-handoff' }, sizeCeiling: 'skip' },
     );
   } catch (e) {
     throw new GraphQLError(
@@ -520,12 +574,169 @@ export async function writeSessionHandoff(
   }
 }
 
+// #3587: the revision snapshot read and the revision row write, split so `restoreRevision` can run both inside its
+// own transaction (the auto-save then rolls back with a refused or failed restore).
+const STANDALONE_REVISION_TX_TIMEOUT_MS = 35_000;
+
+/**
+ * Test seam (#3587 gate item P2s, "a retirement between the auto-save and the check"): awaited inside
+ * `restoreRevision`'s transaction between the auto-save write and the retirement check, so a test can land a
+ * retirement in that window: committed (the check reads after the auto-save, not a stale earlier read) or held open
+ * (the check waits on the retirement's row lock). Null (the default) skips it; setting it outside NODE_ENV=test throws.
+ */
+let restorePauseBeforeRetirementCheck: (() => Promise<void>) | null = null;
+export function setRestorePauseBeforeRetirementCheckForTests(fn: (() => Promise<void>) | null): void {
+  if (fn && process.env.NODE_ENV !== 'test') throw new Error('restore pause seam is test-only');
+  restorePauseBeforeRetirementCheck = fn;
+}
+
+type RevisionSnapshotRead = {
+  nodes: Array<Record<string, unknown>>;
+  edges: Array<Record<string, unknown>>;
+};
+
+/** Snapshot all non-revision nodes + edges of a system memory, through `client` (the pool or a transaction). */
+async function readRevisionSnapshot(client: Prisma.TransactionClient | Context['db'], sysMemId: string): Promise<RevisionSnapshotRead> {
+  const nodeRows = await client.node.findMany({
+    where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
+    // #4244: `role` is recorded so a boot-prompt source recreated by a restore keeps the role a compile needs.
+    select: { id: true, loc: true, name: true, nodeType: true, role: true, description: true, content: true, data: true, tags: true, seq: true },
+  });
+  const nodeIds = nodeRows.map((n) => n.id);
+  const nodes = nodeRows.map(({ id: _id, ...n }) => ({ ...n, tags: n.tags ?? [] }));
+  const edges = await client.edge.findMany({
+    // Derived INCLUDE edges (#2040) are not snapshotted: restore re-derives them from content.
+    where: { sourceId: { in: nodeIds }, deletedAt: null, governedKind: null },
+    include: { source: { select: { loc: true } }, target: { select: { loc: true } } },
+    // #4034: the reader breaks equal-priority ties by snapshot order, so write it in the live read's order.
+    orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
+  });
+  const edgeSnapshots = edges.map((e) => ({
+    sourceLoc: e.source.loc,
+    targetLoc: e.target.loc,
+    loc: e.loc,
+    name: e.name,
+    description: e.description,
+    isRunnable: e.isRunnable,
+    data: e.data,
+    // #4034 (plan D3, edgeFormat 2): a snapshot that drops these makes a pinned chat fire every conditional rule.
+    condition: e.condition ?? null,
+    priority: e.priority,
+  }));
+  return { nodes, edges: edgeSnapshots };
+}
+
+/**
+ * Ensure the `revisions` parent, allocate the next slot and insert the revision row. Inside `tx`, which must already
+ * hold the `revisions` path key (the order every `revisions:<label>` create takes it in).
+ */
+async function writeRevisionRow(
+  tx: Prisma.TransactionClient,
+  sysMemId: string,
+  snapshot: RevisionSnapshotRead,
+  description: string | undefined,
+  createdBy: string | null,
+  /**
+   * #5015 (cor:acl:150:04) — REQUIRED, so a new caller states it. `refuse` (createRevision, an admin's own snapshot):
+   * the nodes this row adds (the `revisions` parent when no row holds its loc, plus the revision node) are judged
+   * against the system memory owner's `nodes` limit. `count-only` (restoreRevision's auto-save): counted, never judged,
+   * and no owner-limit key is taken, which keeps #3587's rule that the restore takes no advisory key after a row lock.
+   */
+  ownerLimit: { mode: 'refuse'; caller: { userId: string } | null } | { mode: 'count-only' },
+): Promise<{ label: string; revLoc: string }> {
+  // #664/#752: revLoc is `revisions:<label>`, so a concurrent non-recursive delete of the `revisions` parent could
+  // count zero descendants and then orphan this row. Hold the ancestor-path lock across the insert (advisory before
+  // row; READ COMMITTED so the delete's count sees this post-commit).
+  // #2498: the slot is allocated INSIDE the serialized section. The `revisions` path lock is taken first and the
+  // count is read after it is granted, on READ COMMITTED's fresh statement snapshot, so concurrent saves each see
+  // the previous save's row and take distinct slots.
+  await lockPathForCreateUnder(tx, sysMemId, 'revisions');
+  // The parent ensure must not abort the transaction (#3587 D5): inside one, a unique violation aborts it whatever
+  // is caught, so this is ON CONFLICT DO NOTHING, which waits for a competing insert and then does nothing.
+  // #5015 — its count says whether it inserted one (a row at the loc, a tombstone included, makes it a no-op).
+  const { count: parentAdded } = await tx.node.createMany({
+    data: [{ id: generateId(), memoryId: sysMemId, loc: 'revisions', name: 'revisions', nodeType: 'system' }],
+    skipDuplicates: true,
+  });
+  // #2507: the highest number ever used, soft-deleted and archived rows included (no deletedAt filter).
+  const slotRows = await tx.node.findMany({
+    where: { memoryId: sysMemId, loc: { startsWith: 'revisions:rev-' } },
+    select: { loc: true },
+  });
+  let revNum: number;
+  try {
+    revNum = nextRevisionNumber(slotRows.map((r) => r.loc));
+  } catch (e) {
+    if (e instanceof RevisionSlotsExhaustedError) {
+      throw new GraphQLError(e.message, { extensions: { code: 'REVISION_SLOTS_EXHAUSTED' } });
+    }
+    throw e;
+  }
+  const label = `rev-${revNum}`;
+  const revLoc = `revisions:${label}`;
+  await lockAncestorsForCreate(tx, sysMemId, revLoc);
+  if (ownerLimit.mode === 'refuse') {
+    // The memory row FOR SHARE pins its owner against a concurrent transfer (finding `node-write-owner-transfer-race`);
+    // the owner-limit key is then the save's last lock (gate ruling 5), and a refusal rolls back the parent ensure.
+    await tx.$queryRaw`SELECT id FROM memories WHERE id = ${sysMemId} FOR SHARE`;
+    // The parent is already written, so the owner's count already holds it.
+    await requireNodeHeadroom(tx, {
+      memoryId: sysMemId, amount: BigInt(1 + parentAdded), alreadyWritten: BigInt(parentAdded), caller: ownerLimit.caller,
+    });
+  }
+  await tx.node.create({
+    data: {
+      id: generateId(), memoryId: sysMemId, loc: revLoc, name: label,
+      nodeType: 'system',
+      description: description ?? `Revision ${revNum}`,
+      data: {
+        revision: revNum,
+        label,
+        published: false,
+        createdBy,
+        snapshot: { edgeFormat: CHAT_SCRIPT_EDGE_FORMAT, nodes: snapshot.nodes, edges: snapshot.edges },
+      } as InputJsonValue,
+    },
+  });
+  return { label, revLoc };
+}
+
+
 // ── #2086 / #1931 / #1948: refresh a bound session's model and family ─────────────────────────────────────────
 /** A supplied family must be a valid token; checked before any write (and, on a resume, before the claim is spent). */
 /** #4244: an Agent revision that is not there (unknown or retired loc), refused before any write. */
-function revisionNotFound(revisionLoc: string): GraphQLError {
-  return new GraphQLError(`Revision not found: ${revisionLoc}`, { extensions: { code: 'BAD_USER_INPUT' } });
+function revisionNotFound(): GraphQLError {
+  return new GraphQLError('Revision not found', { extensions: { code: 'BAD_USER_INPUT' } });
 }
+
+/**
+ * #5266: the two database faults of the session insert that are the caller's to cause, answered typed instead of as INTERNAL_SERVER_ERROR.
+ * A unique violation on the session's own id is SESSION_ID_TAKEN: the id is caller-chosen, a repeat is no resume (a resume goes through the
+ * claim and `--session` paths, cor:dmo:070:05), and the answer is the same whoever owns the existing row and names nothing of it. A foreign
+ * key violation on the parent or previous link (a session deleted between the check and the write) is SESSION_NOT_FOUND. No message quotes a
+ * value (#5225). Any other fault passes through untouched.
+ */
+export async function answerStartSessionWriteFaults<T>(work: Promise<T>): Promise<T> {
+  try {
+    return await work;
+  } catch (e) {
+    const err = e as { code?: string; meta?: { modelName?: unknown; target?: unknown; constraint?: unknown; field_name?: unknown } } | null;
+    const target = Array.isArray(err?.meta?.target) ? (err!.meta!.target as unknown[]).join(',') : String(err?.meta?.target ?? '');
+    // Only the SESSION table's own id: the same transaction writes other tables, and a unique violation on any of those (their `id`
+    // column is the same bare name) is not a taken session id and must not be answered as one (a retry could never succeed).
+    if (err?.code === 'P2002' && err.meta?.modelName === 'Session' && (/^id$/.test(target) || /sessions_pkey/.test(target))) {
+      throw new GraphQLError('A session with this id already exists.', { extensions: { code: 'SESSION_ID_TAKEN' } });
+    }
+    // Prisma 6.19's P2003 meta carries `{ modelName, constraint }` (probed on the real write: sessions_parent_session_id_fkey /
+    // sessions_prev_session_id_fkey); `field_name` is read as the older shape.
+    const fk = String(err?.meta?.constraint ?? err?.meta?.field_name ?? '');
+    if (err?.code === 'P2003' && /parent_session_id|prev_session_id|parentSessionId|prevSessionId/.test(fk)) {
+      throw notFoundError('SESSION_NOT_FOUND', 'Session not found');
+    }
+    throw e;
+  }
+}
+
 
 function explicitFamilyOrThrow(family: string | null | undefined): string | null {
   const explicit = family != null ? normalizeFamily(family) : null;
@@ -575,8 +786,11 @@ type ResumeSessionInput = {
   /** #4291: refreshed on an open session it resumes, recorded on one it starts. */
   effort?: string | null;
   transcriptPath?: string | null;
-  /** #3822: the worker the caller expects to recover (the CLI worktree's last-bound worker). */
-  expectedWorkerId?: string | null;
+  /**
+   * #3822: the worker the caller expects to recover (the CLI worktree's last-bound worker). #5163: a reference, an id
+   * or a worker URN (cor:api:140:01).
+   */
+  expectedWorkerRef?: string | null;
 };
 
 /**
@@ -590,7 +804,7 @@ async function ownSessionForClaim(ctx: Context, sessionId: string) {
     select: { id: true, userId: true, appId: true, workerId: true, endedAt: true, deletedAt: true },
   });
   if (!session || session.deletedAt || !ctx.userId || ctx.impersonation || session.userId !== ctx.userId || !session.appId) {
-    throw new GraphQLError(`Session not found: ${sessionId}`, { extensions: { code: 'BAD_USER_INPUT' } });
+    throw new GraphQLError('Session not found', { extensions: { code: 'BAD_USER_INPUT' } });
   }
   if (!session.workerId) {
     throw new GraphQLError(
@@ -622,18 +836,21 @@ const resumeRefused = (dormant: boolean) =>
  * Disclosure: the found worker is the caller's own (its claim or live session), so naming it tells nothing new. The
  * expected worker is caller-supplied, so its NAME is given only when the caller passes the worker read gate
  * (`resolveReadableWorkerRef`, the gate every worker-state read uses); otherwise only the id it sent is echoed, so this
- * is no id-to-name oracle (#3901 BLIND, Glen's limit).
+ * is no id-to-name oracle (#3901 BLIND, Glen's limit). #5163: a URN names no id the caller sent, so `expectedWorkerId`
+ * is the resolved id only when the caller passes that gate, and null otherwise, the same null an unknown URN gets: a
+ * URN is never a URN-to-id oracle.
  *
  * `picked`: the caller chose the found item by `session`. Then A may still have something waiting, so the message
  * says only that the pick is another worker's (#3901 BLIND, Glen P3-1).
  */
 const workerMismatch = (
-  expected: { id: string; name: string | null },
+  expected: { id: string | null; name: string | null },
   found: { id: string; name: string; source: 'CLAIM' | 'LIVE_SESSION' },
   picked: boolean,
 ) => {
   const what = found.source === 'CLAIM' ? 'resume claim' : 'live session';
-  const label = expected.name ?? `worker ${expected.id}`;
+  // #5163: a URN the caller may not read (or that names nothing) carries no id and no name, so it is named generically.
+  const label = expected.name ?? (expected.id ? `worker ${expected.id}` : 'the worker you named');
   const head = picked
     ? `The session you picked is ${found.name}'s ${what}, not ${label}'s.`
     : `Nothing of ${label}'s waits to resume: the ${what} waiting for you is ${found.name}'s.`;
@@ -684,7 +901,7 @@ export const sessionMutations = {
           // which masks not-found to null); malformed URNs propagate their
           // own typed error from assertFullyQualifiedUrn.
           if (e instanceof AgentNotFoundError) {
-            throw new GraphQLError(`Agent not found: ${agentRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
+            throw new GraphQLError('Agent not found', { extensions: { code: 'BAD_USER_INPUT' } }); // #5168: no ref quoted
           }
           throw e;
         }
@@ -715,8 +932,31 @@ export const sessionMutations = {
         try {
           ({ id: resolvedAppId } = await resolveAppRef(ctx.db, appRef));
         } catch (e) {
-          if (e instanceof AppNotFoundError) {
-            throw new GraphQLError(`App not found: ${appRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
+          // #4836: the ref-RESOLUTION failures fold into the one unknown-App
+          // answer (appNotFound()). Two reasons their own typed errors must
+          // not reach the wire on this door: their messages ECHO the caller's
+          // value (a token pasted into appRef by mistake would print into a
+          // terminal, CI log or error tracker), and a "malformed" vs "missing"
+          // distinction would confirm which App URNs resolve. NARROW catch
+          // (review:narrow-catch-blocks): a database failure inside the lookup
+          // propagates — an outage reported as a missing App is the one thing
+          // this fold must never hide. The shared parser is untouched;
+          // memory/node not-found keeps its echo (cor:api:140:03). This fold
+          // is App refs on this door only (#4837 tracks the other doors).
+          if (
+            e instanceof AppNotFoundError ||
+            e instanceof AmbiguousLegacyUrnError ||
+            e instanceof UrnNotQualifiedError ||
+            // Defensive (SEC10 P3-1): no input reaches UrnParseError through
+            // resolveAppRef today — the qualification boundary throws
+            // UrnNotQualifiedError, parseUrnInput never throws (it falls
+            // through to type 'unknown'), and normalizeUrnForLookup is a pure
+            // string transform. Listed so the fold names the whole
+            // ref-resolution family: a future parser change that starts
+            // throwing it lands on the right side of this catch.
+            e instanceof UrnParseError
+          ) {
+            throw appNotFound();
           }
           throw e;
         }
@@ -724,63 +964,40 @@ export const sessionMutations = {
           where: { id: resolvedAppId },
           select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
         });
-        // resolveAppRef already excludes soft-deleted rows, and excludes
-        // uninstalled ones on the URN path only — re-check both here so the ID
-        // path can't attach a session to a dead App.
+        // #4836 (cor:dmo:070:05, the Proposed clause; V58): REACH first, state
+        // after — cor:api:140:02's partition, the same one updateApp runs, so
+        // only a caller who can reach the App is told its state. A caller
+        // without standing gets the one unknown-App answer whatever the App's
+        // state and whatever the ref's form, byte-identical across a missing,
+        // deleted, uninstalled and existing-but-inaccessible App: no ref
+        // echoed, no appId in extensions. (resolveAppRef already excludes
+        // soft-deleted rows on both paths, so the judge's deletedAt arm closes
+        // only the resolve-then-read race; an uninstalled App is unreachable
+        // by URN at resolution — the #944 asymmetry the judge keeps, so a
+        // MEMBER naming one by PK still earns the specific APP_UNINSTALLED.)
         //
-        // The URN/PK asymmetry on APP_UNINSTALLED is deliberate, not an
-        // oversight (#944 review): App URNs are unique only among ACTIVE rows
-        // (spec 021 FR-027), so an uninstalled App's URN may name several dead
-        // rows and/or belong to a different live App — "not found" is the only
-        // honest answer there. By PK the row is unambiguous, so it earns the
-        // more specific refusal. Both forms are tested.
-        if (app.deletedAt) {
-          throw new GraphQLError(`App not found: ${appRef}`, { extensions: { code: 'BAD_USER_INPUT' } });
-        }
-        if (app.uninstalledAt) {
-          throw new GraphQLError('Cannot start a session in an uninstalled App.', {
-            extensions: { code: 'APP_UNINSTALLED', appId: resolvedAppId },
-          });
-        }
-        // Precedence (documented decision, #943): an App-key CREDENTIAL wins
-        // over a caller-supplied ref. A pure App-key principal IS an App, so a
-        // ref naming a different App is a client bug, not a widening — refuse
-        // it typed rather than silently honouring one or the other.
-        //
-        // #1037: keyed on the ABSENCE of a userId, not on `ctx.appId` alone.
-        // The comment always said "credential"; the check caught the MCP
-        // active-App SELECTION too, so a user whose connection was pinned to B
-        // could not deliberately start a session in A — the exact precedence
-        // this PR promises, contradicted one level above where it is granted.
-        // The distinction is spelled out in the very next comment block, which
-        // is a good measure of how easily this field name misleads
-        // (findings:auth-appid-credential-vs-selection). A user's selection
-        // yields to the argument; the participant gate below still runs on the
-        // resolved App, so yielding never widens reach.
-        if (ctx.appId && !ctx.userId && ctx.appId !== resolvedAppId) {
-          throw new GraphQLError(
-            `appRef "${appRef}" does not name the App this request is authenticated for.`,
-            { extensions: { code: 'SESSION_APP_MISMATCH', appId: ctx.appId } },
-          );
-        }
-        // Authority. A pure App-key principal (no userId) needs no membership:
-        // its credential IS the App. Everyone else — including a HYBRID
-        // principal carrying MCP's active-App SELECTION, which is not a
-        // credential (findings:auth-appid-credential-vs-selection) — must be a
-        // member of the resolved App, the same predicate the team-chat gate
-        // uses. Without this, any caller could stamp any App's id onto a
-        // session and author into that team's chat as its persona.
-        if (ctx.userId || !ctx.appId) {
-          if (!(await isAppParticipant(ctx, app))) {
-            throw new GraphQLError(
-              'You are not a member of this App, so a session cannot be attributed to it.',
-              { extensions: { code: 'FORBIDDEN' } },
-            );
-          }
-        }
+        // Standing is #943's predicate unchanged — the same one the team-chat
+        // gate uses: a participant (AppMember at any role, org CONTRIBUTOR+,
+        // a user-owned App's owner — isAppParticipant) — or a pure App-key
+        // CREDENTIAL, which IS its App and reaches exactly it
+        // (findings:auth-appid-credential-vs-selection). A HYBRID principal
+        // (userId + the MCP active-App SELECTION) is judged on the USER: the
+        // selection is a convenience, not a credential (#1037). #4836
+        // amendment 1: a pure App key naming any OTHER App — existing or not —
+        // gets the unknown-App answer too (the old typed SESSION_APP_MISMATCH
+        // told an existing App from a missing one to a caller holding a key;
+        // a key reaches only its own App). A member keeps every specific
+        // refusal, and the precedence below is unchanged.
+        const standing =
+          ctx.appId && !ctx.userId
+            ? ctx.appId === resolvedAppId
+            : await isAppParticipant(ctx, app);
+        const refusal = startSessionAppRefRefusal(standing, app);
+        if (refusal) throw refusal;
         appId = resolvedAppId;
-        // An explicit argument outranks a selection but not a credential — the
-        // credential branch above already refused a disagreeing ref.
+        // An explicit argument outranks a selection but not a credential — a
+        // credential's ref was just judged on exactly that: a disagreeing one
+        // has no standing and never reaches here.
         if (appSource !== 'credential') appSource = 'argument';
       }
 
@@ -1292,7 +1509,15 @@ export const sessionMutations = {
           { kind: 'user', id: ctx.userId },
         );
       }
-      const bound = await ctx.db.$transaction(async (tx) => {
+      // #5266: a parent or previous session that does not exist, or that the caller may not read, is one typed answer, judged before the
+      // bind writes anything (a raw foreign-key failure reached the wire as INTERNAL_SERVER_ERROR). The same code for both, so it is no
+      // existence oracle, and it never quotes the value (#5225).
+      for (const linked of [input.parentSessionId, input.prevSessionId]) {
+        if (linked === undefined || linked === null) continue;
+        const readable = await ctx.db.session.findFirst({ where: { AND: [{ id: linked }, await sessionScopeFilter(ctx)] }, select: { id: true } });
+        if (!readable) throw notFoundError('SESSION_NOT_FOUND', 'Session not found');
+      }
+      const bound = await answerStartSessionWriteFaults(ctx.db.$transaction(async (tx) => {
         if (launchAnchors.length) await lockAuthorityAnchors(tx, launchAnchors, 'shared');
         // #1001: appId may have come only from an App key or an MCP active-App
         // selection, so neither the appRef nor Worker branches necessarily
@@ -1659,7 +1884,7 @@ export const sessionMutations = {
           supersededIds = ids;
         }
         return created;
-      });
+      }));
       for (const id of supersededIds) sessionKeyCache.evict(id);
       return bound;
     }),
@@ -1680,7 +1905,7 @@ export const sessionMutations = {
     ) => {
       const session = await ctx.db.session.findUnique({ where: { id } });
       if (!session || session.deletedAt) {
-        throw new GraphQLError(`Session not found: ${id}`, { extensions: { code: 'BAD_USER_INPUT' } });
+        throw new GraphQLError('Session not found', { extensions: { code: 'BAD_USER_INPUT' } });
       }
       await requireSessionWriteAccess(ctx, session);
       // #1931: refresh a binding without guessing a model family from its host.
@@ -1729,7 +1954,7 @@ export const sessionMutations = {
         case 'no_credential':
           throw new GraphQLError('A credential is required', { extensions: { code: 'UNAUTHENTICATED' } });
         case 'not_found':
-          throw new GraphQLError(`Session not found: ${sessionId}`, { extensions: { code: 'BAD_USER_INPUT' } });
+          throw new GraphQLError('Session not found', { extensions: { code: 'BAD_USER_INPUT' } });
         case 'forbidden':
           throw authorizationDenied();
         case 'ok':
@@ -1757,7 +1982,7 @@ export const sessionMutations = {
       // "taken" derives from active sessions post-#928).
       const session = await ctx.db.session.findUnique({ where: { id } });
       if (!session || session.deletedAt) {
-        throw new GraphQLError(`Session not found: ${id}`, { extensions: { code: 'BAD_USER_INPUT' } });
+        throw new GraphQLError('Session not found', { extensions: { code: 'BAD_USER_INPUT' } });
       }
       await requireSessionWriteAccess(ctx, session);
 
@@ -1842,25 +2067,61 @@ export const sessionMutations = {
       const explicitFamily = explicitFamilyOrThrow(given.family);
       const explicitEffort = explicitEffortOrThrow(given.effort);
       // #3822: likewise a blank expected worker refuses before any read. Null or omitted means no narrowing.
-      const expectedWorkerId = given.expectedWorkerId == null ? null : given.expectedWorkerId.trim();
-      if (expectedWorkerId === '') {
-        throw new GraphQLError('expectedWorkerId must not be blank: omit it to resume without naming a worker.', { extensions: { code: 'BAD_USER_INPUT' } });
+      const expectedRef = given.expectedWorkerRef == null ? null : given.expectedWorkerRef.trim();
+      if (expectedRef === '') {
+        throw new GraphQLError('expectedWorkerRef must not be blank: omit it to resume without naming a worker.', { extensions: { code: 'BAD_USER_INPUT' } });
       }
-      // #3912: a URN or a name is not an id. Refuse it here, before any read, so it never reaches the read gate that
-      // would name it back ("Bea's, not Bea's"). After the NOTHING_TO_RESUME line above, so a caller who may not resume
-      // learns nothing about the value; a valid id takes the path it always did.
-      if (expectedWorkerId !== null && !isId(expectedWorkerId)) {
-        throw new GraphQLError('expectedWorkerId must be a worker id, not a URN or a name: pass the id the worker was bound with.', { extensions: { code: 'BAD_USER_INPUT' } });
+      // #5163 (cor:api:140:00, :01): the expected worker is a reference, an id or a fully qualified worker URN.
+      //  - An id takes the path it always did (#3822), byte for byte.
+      //  - Anything else must be a worker URN, judged on its shape alone before any read (a name, a relative URN, another
+      //    type, a wrong arity or a code point no stored URN holds): URN_NOT_QUALIFIED, the boundary's typed refusal,
+      //    which never quotes the value (#5168). After the NOTHING_TO_RESUME line above, so a caller who may not resume
+      //    learns nothing about the value.
+      //  - A well-formed URN resolves through the shared resolver. One that names nothing (an unknown App or worker, an
+      //    ambiguous legacy App URN) is `id: null`: nothing of it can wait, so the call takes today's mismatch or
+      //    nothing-to-resume path. One that resolves to a worker the caller may not read takes the same path (the
+      //    caller holds nothing of it) and echoes no id, so unknown and unreadable are one answer. Only a name-resolution
+      //    outcome folds; a database fault propagates.
+      // The mismatch refusal gives back as expectedWorkerId the id the caller sent, or for a URN the resolved id only
+      // once the caller passes the worker read gate (decided where the refusal is built, below).
+      let expected: { id: string | null; viaUrn: boolean } | null = null;
+      if (expectedRef !== null) {
+        if (isId(expectedRef)) {
+          expected = { id: expectedRef, viaUrn: false };
+        } else {
+          if (refHasUnstorableChars(expectedRef)) throw new UrnNotQualifiedError(expectedRef);
+          let parsed: ReturnType<typeof parseUrnV2>;
+          try {
+            parsed = parseUrnV2(expectedRef);
+          } catch (e) {
+            throw new UrnNotQualifiedError(expectedRef, e instanceof UrnParseError ? e : undefined);
+          }
+          if (parsed.type !== 'worker') throw new UrnNotQualifiedError(expectedRef);
+          let id: string | null = null;
+          try {
+            ({ id } = await resolveWorkerRefId(ctx.db, expectedRef));
+          } catch (e) {
+            if (!refNamesNothing(e, { ambiguousNamesNothing: true })) throw e;
+          }
+          expected = { id, viaUrn: true };
+        }
       }
+      const expectedWorkerId = expected?.id ?? null;
+      // #5163: a URN that names nothing narrows to nothing: no claim or live session of it can wait.
+      const namesNothing = expected !== null && expectedWorkerId === null;
       const now = new Date();
       // #3901 LOCAL (Gene P2): the expected worker's claims are filtered in the query, before the candidate cap.
-      const claims = await liveClaimsOf(ctx.db, userId, now, expectedWorkerId ? { workerId: expectedWorkerId } : {});
+      const claims = namesNothing
+        ? []
+        : await liveClaimsOf(ctx.db, userId, now, expectedWorkerId ? { workerId: expectedWorkerId } : {});
       // #3822: with an expected worker the call is the no-argument resume restricted to that worker; everything
       // below decides on its claims and live sessions only. Another worker's items are read only to refuse.
       // #3901 BLIND (Glen P2): the expected worker's live pool is filtered in the query, BEFORE the scan cap, so
       // other workers' sessions can never refuse RESUME_AMBIGUOUS on a resume of the expected worker.
       const liveOfExpected = () =>
-        liveWorkerSessionsOf(ctx.db, userId, now, expectedWorkerId ? { workerId: expectedWorkerId } : {});
+        namesNothing
+          ? Promise.resolve([] as Awaited<ReturnType<typeof liveWorkerSessionsOf>>)
+          : liveWorkerSessionsOf(ctx.db, userId, now, expectedWorkerId ? { workerId: expectedWorkerId } : {});
       /**
        * #3822: nothing of the expected worker's waits (or the pick is another worker's). Refuse WORKER_MISMATCH when
        * something of another worker of the caller's does (a claim first, as the no-argument resume decides claims
@@ -1869,24 +2130,31 @@ export const sessionMutations = {
        */
       type Found = { workerId: string; appId: string | null; source: 'CLAIM' | 'LIVE_SESSION' };
       const mismatchOrNothing = async (pick: string | null) => {
-        if (!expectedWorkerId) return nothingToResume();
-        const [other] = await liveClaimsOf(ctx.db, userId, now, { notWorkerId: expectedWorkerId, ...(pick ? { sessionId: pick } : {}) });
+        if (!expected) return nothingToResume();
+        // A URN that names nothing excludes no worker: every item of the caller's is another worker's.
+        const notExpected = expectedWorkerId ? { notWorkerId: expectedWorkerId } : {};
+        const [other] = await liveClaimsOf(ctx.db, userId, now, { ...notExpected, ...(pick ? { sessionId: pick } : {}) });
         let found: Found | null = other ? { workerId: other.workerId, appId: other.appId, source: 'CLAIM' } : null;
         if (!found) {
-          const otherLive = await firstLiveWorkerSessionOf(ctx.db, userId, now, { notWorkerId: expectedWorkerId, ...(pick ? { id: pick } : {}) });
+          const otherLive = await firstLiveWorkerSessionOf(ctx.db, userId, now, { ...notExpected, ...(pick ? { id: pick } : {}) });
           if (otherLive) found = { workerId: otherLive.workerId!, appId: otherLive.appId, source: 'LIVE_SESSION' };
         }
         if (!found) return nothingToResume();
         const foundWorker = await ctx.db.worker.findUnique({ where: { id: found.workerId }, select: { name: true } });
         let expectedName: string | null = null;
-        try {
-          expectedName = (await resolveReadableWorkerRef(ctx, expectedWorkerId)).worker.name;
-        } catch (e) {
-          // Narrow: an absent or unreadable worker is named by nothing but the id the caller sent.
-          if (!(e instanceof GraphQLError && e.extensions?.code === 'WORKER_NOT_FOUND')) throw e;
+        if (expectedWorkerId) {
+          try {
+            expectedName = (await resolveReadableWorkerRef(ctx, expectedWorkerId)).worker.name;
+          } catch (e) {
+            // Narrow: an absent or unreadable worker is named by nothing but the id the caller sent.
+            if (!(e instanceof GraphQLError && e.extensions?.code === 'WORKER_NOT_FOUND')) throw e;
+          }
         }
+        // #5163: a URN gives its resolved id back only to a caller who may read the worker (the name says so); an
+        // unreadable one echoes null, exactly as a URN naming nothing does.
+        const echoId = expected.viaUrn && expectedName === null ? null : expectedWorkerId;
         return workerMismatch(
-          { id: expectedWorkerId, name: expectedName },
+          { id: echoId, name: expectedName },
           { id: found.workerId, name: foundWorker?.name ?? found.workerId, source: found.source },
           pick !== null,
         );
@@ -2073,8 +2341,8 @@ export const sessionMutations = {
 
     startAgentSession: async (
       _: unknown,
-      { agentId, externalUserId, sessionTimeoutSeconds }: {
-        agentId: string;
+      { agentRef, externalUserId, sessionTimeoutSeconds }: {
+        agentRef: string;
         externalUserId?: string;
         sessionTimeoutSeconds?: number;
       },
@@ -2094,6 +2362,18 @@ export const sessionMutations = {
         // IS NULL) cannot operate any agent.
         // 023-app-shape Phase 2b: App↔Agent goes through AppAgent. Check
         // that the requested Agent is installed in the calling App.
+        // #4141: `agentRef` is a PK or a URN. A relative URN is a shape refusal (propagates, after the App-key
+        // gate above); everything that names no live Agent (unknown, soft-deleted, ambiguous legacy) folds into the
+        // SAME refusal an uninstalled Agent gets, so the answer carries no Agent id (cor:api:140:02). Only a
+        // resolver miss folds: a database fault propagates. The RESOLVED id feeds every use below.
+        let agentId: string;
+        try {
+          ({ id: agentId } = await resolveAgentRef(tx, agentRef));
+        } catch (error) {
+          if (error instanceof UrnNotQualifiedError) throw error;
+          if (!refNamesNothing(error, { ambiguousNamesNothing: true })) throw error;
+          throw forbiddenError('Forbidden: App is not allowed to operate this agent');
+        }
         if (!(await isAgentInstalledForAppOperation(tx, app.id, agentId))) {
           throw forbiddenError('Forbidden: App is not allowed to operate this agent');
         }
@@ -2351,91 +2631,15 @@ export const sessionMutations = {
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
 
-      // Snapshot all non-revision nodes + edges in the system memory
-      const nodes = await ctx.db.node.findMany({
-        where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
-        // #4244: `role` is recorded so a boot-prompt source recreated by a restore keeps the role a compile needs.
-        select: { loc: true, name: true, nodeType: true, role: true, description: true, content: true, data: true, tags: true, seq: true },
-      });
-      const nodeIds = (await ctx.db.node.findMany({
-        where: { memoryId: sysMemId, deletedAt: null, NOT: { loc: { startsWith: 'revisions' } } },
-        select: { id: true },
-      })).map((n) => n.id);
-      const edges = await ctx.db.edge.findMany({
-        // Derived INCLUDE edges (#2040) are not snapshotted: restore re-derives them from content.
-        where: { sourceId: { in: nodeIds }, deletedAt: null, governedKind: null },
-        include: { source: { select: { loc: true } }, target: { select: { loc: true } } },
-        // #4034: the reader breaks equal-priority ties by snapshot order, so write it in the live read's order.
-        orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
-      });
-      const edgeSnapshots = edges.map((e) => ({
-        sourceLoc: e.source.loc,
-        targetLoc: e.target.loc,
-        loc: e.loc,
-        name: e.name,
-        description: e.description,
-        isRunnable: e.isRunnable,
-        data: e.data,
-        // #4034 (plan D3, edgeFormat 2): a snapshot that drops these makes a pinned chat fire every conditional rule.
-        condition: e.condition ?? null,
-        priority: e.priority,
-      }));
-
-      // Ensure revisions parent exists
-      try {
-        await ctx.db.node.upsert({
-          where: { loc_memoryId: { loc: 'revisions', memoryId: sysMemId } },
-          create: { id: generateId(), memoryId: sysMemId, loc: 'revisions', name: 'revisions', nodeType: 'system' },
-          update: {},
-        });
-      } catch (err) {
-        // #2476: only the cold-path race loss means the parent exists.
-        if (!isNodeLocUniqueViolation(err)) throw err;
-      }
-
-      // #664/#752: revLoc is `revisions:<label>`, so a concurrent non-recursive
-      // delete of the `revisions` parent could count zero descendants and then
-      // orphan this row. Hold the ancestor-path lock across the insert (advisory
-      // before row; READ COMMITTED so the delete's count sees this post-commit).
-      // #2498: the slot is allocated INSIDE the serialized section. The `revisions` path lock is
-      // taken first (the key every `revisions:<label>` create takes) and the count is read after it
-      // is granted, on READ COMMITTED's fresh statement snapshot, so concurrent saves (a restore's
-      // auto-save included) each see the previous save's row and take distinct slots.
-      const { label, revLoc } = await ctx.db.$transaction(async (tx) => {
-        await lockPathForCreateUnder(tx, sysMemId, 'revisions');
-        // #2507: the highest number ever used, soft-deleted and archived rows included (no deletedAt filter).
-        const slotRows = await tx.node.findMany({
-          where: { memoryId: sysMemId, loc: { startsWith: 'revisions:rev-' } },
-          select: { loc: true },
-        });
-        let revNum: number;
-        try {
-          revNum = nextRevisionNumber(slotRows.map((r) => r.loc));
-        } catch (e) {
-          if (e instanceof RevisionSlotsExhaustedError) {
-            throw new GraphQLError(e.message, { extensions: { code: 'REVISION_SLOTS_EXHAUSTED' } });
-          }
-          throw e;
-        }
-        const label = `rev-${revNum}`;
-        const revLoc = `revisions:${label}`;
-        await lockAncestorsForCreate(tx, sysMemId, revLoc);
-        await tx.node.create({
-          data: {
-            id: generateId(), memoryId: sysMemId, loc: revLoc, name: label,
-            nodeType: 'system',
-            description: description ?? `Revision ${revNum}`,
-            data: {
-              revision: revNum,
-              label,
-              published: false,
-              createdBy: ctx.userId ?? null,
-              snapshot: { edgeFormat: CHAT_SCRIPT_EDGE_FORMAT, nodes: nodes.map((n) => ({ ...n, tags: n.tags ?? [] })), edges: edgeSnapshots },
-            } as InputJsonValue,
-          },
-        });
-        return { label, revLoc };
-      });
+      // #3587 (D2): the snapshot is read OUTSIDE the transaction, as before, so a large system memory is not read
+      // inside the transaction's timeout. The restore's auto-save reads the same snapshot with its own `tx`.
+      const snapshotRead = await readRevisionSnapshot(ctx.db, sysMemId);
+      // #3587 (D6): a restore now holds the `revisions` key for up to its 30 s, so this save, which waits behind it,
+      // gets an explicit bound above that rather than Prisma's 5 s default.
+      const { label, revLoc } = await ctx.db.$transaction(
+        (tx) => writeRevisionRow(tx, sysMemId, snapshotRead, description, ctx.userId ?? null, { mode: 'refuse', caller: ownerLimitCaller(ctx) }),
+        { timeout: STANDALONE_REVISION_TX_TIMEOUT_MS },
+      );
 
       return { revisionLoc: revLoc, label, published: false, createdAt: new Date().toISOString() };
     },
@@ -2456,7 +2660,7 @@ export const sessionMutations = {
       const sysMemId = (agent as any).systemMemoryId as string;
       if (!sysMemId) throw new Error('Agent has no system memory');
       // Only a direct live slot is a revision: anything else (a descendant, a tombstone, another node) is not one.
-      if (!isLiveSlotLoc(revisionLoc)) throw revisionNotFound(revisionLoc);
+      if (!isLiveSlotLoc(revisionLoc)) throw revisionNotFound();
 
       return ctx.db.$transaction(async (tx) => {
         // Lock order: the revisions path (the key every save and restore takes), then this revision's loc, then the
@@ -2470,7 +2674,7 @@ export const sessionMutations = {
         const revNode = await tx.node.findFirst({
           where: { memoryId: sysMemId, loc: revisionLoc, deletedAt: null },
         });
-        if (!revNode) throw revisionNotFound(revisionLoc);
+        if (!revNode) throw revisionNotFound();
         if (publishedLoc === revisionLoc) {
           throw new GraphQLError('The published revision cannot be deleted. Publish another revision first.', {
             extensions: { code: 'REVISION_PUBLISHED' },
@@ -2520,7 +2724,7 @@ export const sessionMutations = {
         const revNode = await tx.node.findFirst({
           where: { memoryId: sysMemId, loc: revisionLoc, deletedAt: null },
         });
-        if (!revNode) throw revisionNotFound(revisionLoc);
+        if (!revNode) throw revisionNotFound();
 
         const revData = (revNode.data as Record<string, unknown>) ?? {};
         const label = versionLabel ?? (revData.label as string) ?? revisionLoc;
@@ -2558,7 +2762,7 @@ export const sessionMutations = {
       const revNode = await ctx.db.node.findFirst({
         where: { memoryId: sysMemId, loc: revisionLoc, deletedAt: null },
       });
-      if (!revNode) throw revisionNotFound(revisionLoc);
+      if (!revNode) throw revisionNotFound();
 
       const revData = (revNode.data as Record<string, unknown>) ?? {};
       const snapshot = revData.snapshot as { edgeFormat?: number; nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> } | undefined;
@@ -2566,8 +2770,8 @@ export const sessionMutations = {
       // #4034 (D3): only a v2 snapshot holds edge condition/priority and node seq to restore.
       const restoresScriptFields = snapshot.edgeFormat === CHAT_SCRIPT_EDGE_FORMAT;
 
-      // Auto-save current state before restoring
-      await sessionMutations.createRevision({}, { agentRef: resolvedAgentId, description: `Auto-save before restoring ${revisionLoc}` }, ctx);
+      // #3587: the auto-save before restoring is written INSIDE the restore's transaction (below), so a refused or
+      // failed restore rolls it back too and "nothing was written" holds.
 
       // Restore is ATOMIC (#752 review, Codex P1): the destructive soft-deletes
       // AND the snapshot restore run in ONE transaction, so any failure — the
@@ -2581,11 +2785,30 @@ export const sessionMutations = {
       const locToId = new Map<string, string>();
       await ctx.db.$transaction(
         async (tx) => {
-          await lockAncestorsForCreateMany(
-            tx,
-            sysMemId,
-            snapshot.nodes.map((n) => n.loc as string).filter((l) => typeof l === 'string' && l !== ''),
+          // #1213: this owning restore can recreate snapshot roles and tombstone live signals.
+          // Join the bounded system-memory handshake before any loc or node-row lock/read.
+          await lockMemoryForChannelChange(tx, sysMemId);
+          const snapshotLocs = snapshot.nodes.map((n) => n.loc as string).filter((l) => typeof l === 'string' && l !== '');
+          // #3587 (D1/Riana Q2): ONE complete advisory set first, in the one global order (#1214): the snapshot
+          // locs' ancestors plus the `revisions` path key the auto-save takes. No advisory key may be first taken
+          // after a row lock, so nothing below adds one; the helpers' own acquisitions only re-take these.
+          await acquireLockSet(tx, [
+            ...new Set(snapshotLocs.flatMap((l) => ancestorLocs(l))),
+            'revisions',
+          ].map((loc) => ({ memoryId: sysMemId, loc })));
+          await lockAncestorsForCreateMany(tx, sysMemId, snapshotLocs);
+          // Unlocked and before any row lock: encryption is one-way, so a stale false only over-refuses.
+          const sysMem = await tx.memory.findUnique({ where: { id: sysMemId }, select: { isEncrypted: true } });
+          // Auto-save current state before restoring, in this transaction.
+          await writeRevisionRow(
+            tx, sysMemId, await readRevisionSnapshot(tx, sysMemId), `Auto-save before restoring ${revisionLoc}`, ctx.userId ?? null,
+            { mode: 'count-only' },
           );
+          if (restorePauseBeforeRetirementCheck) await restorePauseBeforeRetirementCheck();
+          // #3587 (ruling 0220): the authoritative check, under the row locks and before the soft-delete.
+          await assertRestoreKeepsRetirement(tx, {
+            memoryId: sysMemId, revisionLoc, snapshotNodes: snapshot.nodes, isEncrypted: sysMem?.isEncrypted ?? false,
+          });
 
           // Delete all current non-revision nodes in the system memory.
           //
@@ -2599,9 +2822,9 @@ export const sessionMutations = {
           // cor:agt:040:10), not written below, and a snapshot's copy of one is ignored.
           //
           // #4313: every statement of this step leaves compiled rows out BY TYPE, in its own WHERE. It used to leave
-          // them out by the ids of an earlier read, so a compile that committed between that read and this one (the
-          // transaction is READ COMMITTED and shares no lock with a compile) was tombstoned, or had its edges
-          // retired. No statement here depends on what an earlier one saw of compiled rows.
+          // them out by ids from an earlier read. Before S2 coordinated restore and compile, a compile between
+          // those reads could be tombstoned or lose its edges. Direct writes outside the memory-key protocol can
+          // still interleave, so no statement here depends on an earlier snapshot of compiled rows.
           const notCompiled = { nodeType: { not: COMPILED_BOOT_PROMPT_NODE_TYPE } };
           const live = await tx.node.findMany({
             where: { memoryId: sysMemId, deletedAt: null, ...notCompiled, NOT: { loc: { startsWith: 'revisions' } } },
@@ -2737,6 +2960,9 @@ export const sessionMutations = {
               const edgeFields = {
                 sourceId,
                 targetId,
+                // #2947: a snapshot carries no provenance flag, so a restored edge is classified exactly as the migration
+                // backfill classifies one: derived iff its loc decodes as the derivation of its own name; no loc is derived.
+                locAuthored: e.loc != null && !edgeLocDecodesAsDerived(edgeLoc, edgeName),
                 name: edgeName,
                 description: (e.description as string | null) ?? null,
                 isRunnable: (e.isRunnable as boolean | null) ?? null,
@@ -3300,6 +3526,7 @@ export const sessionMutations = {
       },
       ctx: Context,
     ) => {
+      requireCallerIdentity(ctx);
       // #542 — the task node is identified by a single `nodeRef` (ID or a
       // fully-qualified node URN), resolved by the shared `resolveNodeRef`
       // (spec 007) exactly like every other `<object>Ref` arg. The loose
@@ -3336,7 +3563,7 @@ export const sessionMutations = {
           assertFullyQualifiedUrn(targetNodeUrn, 'node');
         } catch (e) {
           if (e instanceof UrnNotQualifiedError) {
-            throw new GraphQLError(e.message, {
+            throw new GraphQLError(refusalText(e), {
               extensions: { code: e.name },
             });
           }
@@ -3365,7 +3592,7 @@ export const sessionMutations = {
         });
 
         if (!memory || !(await canReadMemory(ctx.db, auth, memory.id))) {
-          throw new GraphQLError(`Memory not found: "${resolvedMemoryUrn}".`, {
+          throw new GraphQLError('Memory not found.', {
             extensions: { code: 'NOT_FOUND' },
           });
         }
@@ -3375,7 +3602,7 @@ export const sessionMutations = {
           include: { outgoingEdges: { where: { deletedAt: null, target: { deletedAt: null } }, include: { target: true }, orderBy: edgeRunOrder() } },
         });
         if (!node) {
-          throw new GraphQLError(`Node "${targetNodeUrn}" not found.`, {
+          throw new GraphQLError('Node not found.', {
             extensions: { code: 'NOT_FOUND' },
           });
         }
@@ -3411,6 +3638,8 @@ export const sessionMutations = {
         // empty-content targets are skipped), so the read events below describe
         // what crossed the boundary rather than what the node links to.
         const inlined: unknown[] = [];
+        // #4689: foreign URN includes resolve under this principal's own read access (ruling A).
+        const foreignReader = foreignIncludeReader(ctx.db, auth);
         const assembled = await assembleRunNodePrompt(
           { ...node, loc },
           stringArgs ?? undefined,
@@ -3419,7 +3648,7 @@ export const sessionMutations = {
               (await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { urn: true } })).urn,
             // #40: each compiled piece is served, so it counts toward the request's aggregate.
             compileTemplate: (content, data, memoryId) =>
-              compileTemplate(content, data, memoryId, ctx.db, {}).then(text => chargeRequestServed(ctx, content, text)),
+              compileTemplate(content, data, memoryId, ctx.db, {}, undefined, { foreignReader }).then(text => chargeRequestServed(ctx, content, text)),
             includeTarget: target => !!target && readableTargets.has(target.memoryId),
             onTargetInlined: (target) => inlined.push(target),
           },
@@ -3468,7 +3697,56 @@ export const sessionMutations = {
       // App-run kernel re-renders the same task via this resolver's assemble
       // path, so the two modes stay in lockstep. Without `appRef`, behavior is
       // unchanged — the rendered prompt is returned for an LLM agent to run.
+      // #317 — required task-argument validation (spec cor:dmo:060:11, v1). The one
+      // enforcement point for GraphQL, the CLI and MCP `hadron_run_task` in EXECUTE mode
+      // (appRef, which delegates here). MCP render mode and `hadron_run_action` build their
+      // own bundle and are out of scope by the #317 gate. Judged AFTER
+      // the caller's read access: a task the caller cannot read (or that does not
+      // exist) is skipped here and answers exactly what it answered before, so the
+      // refusal discloses nothing of an unreadable task's schema. Judged BEFORE any
+      // render, usage event or AppRun, so a refusal has no side effects.
+      const assertRequiredTaskArgs = async (targetNodeUrn: string): Promise<void> => {
+        // The run kernel assembles EVERY hop of a minted AppRun through this resolver, with the
+        // hop's merged view (event data + upstream extractions) as `args` and a run principal as
+        // the caller. That is not a caller's argument list, and a refusal there would land AFTER
+        // the AppRun was minted and budget spent, contradicting "the run was not started"
+        // (LOCAL F1). The door is the caller's own call; a kernel hop is exempt.
+        if (isRunPrincipal(auth)) return;
+        let memUrn: string;
+        let loc: string;
+        try {
+          assertFullyQualifiedUrn(targetNodeUrn, 'node');
+          ({ memoryUrn: memUrn, loc } = splitWholeNodeUrn(targetNodeUrn));
+        } catch {
+          return; // malformed: the existing path produces its own answer
+        }
+        const normalized = normalizeUrnForLookup(parseUrnInput(memUrn.trim()).value);
+        const memory = await ctx.db.memory.findFirst({
+          where: { OR: [{ urn: normalized }, { urn: legacyMemoryUrnToCanonical(normalized) }], deletedAt: null },
+          select: { id: true },
+        });
+        if (!memory || !(await canReadMemory(ctx.db, auth, memory.id))) return;
+        const node = await ctx.db.node.findUnique({
+          where: { loc_memoryId: { loc, memoryId: memory.id } },
+          select: { memoryId: true, abstract: true, content: true, data: true },
+        });
+        if (!node) return;
+        // Without a cached session key an encrypted memory's `data` stays ciphertext, which is
+        // not an object, so nothing is refused: the unchanged pre-#317 behaviour, never a new
+        // refusal. Every divergence between this lookup and loadAndRender's lands the same way
+        // (validation skipped, the existing answer stands); none can produce a false refusal.
+        await decryptNodesBatch(ctx.db, [node]);
+        const missing = missingRequiredTaskArgs(node.data, args);
+        if (missing.length > 0) {
+          throw new GraphQLError(
+            `Missing required task argument${missing.length > 1 ? 's' : ''}: ${missing.join(', ')}. The task declares ${missing.length > 1 ? 'them' : 'it'} in its data.args as required with no default; the run was not started.`,
+            { extensions: { code: 'BAD_USER_INPUT', missingArgs: missing } },
+          );
+        }
+      };
+
       const dispatch = async (nodeUrn: string): Promise<string> => {
+        await assertRequiredTaskArgs(nodeUrn);
         if (!appRef) return loadAndRender(nodeUrn);
         assertFullyQualifiedUrn(nodeUrn, 'node');
         const run = await triggerManualRun(ctx, {
@@ -3498,7 +3776,7 @@ export const sessionMutations = {
         ({ id: resolvedNodeId } = await resolveNodeRefForCaller(ctx, ref));
       } catch (e) {
         if (e instanceof NodeNotFoundError || e instanceof UrnNotQualifiedError) {
-          throw new GraphQLError(e.message, { extensions: { code: 'NOT_FOUND' } });
+          throw new GraphQLError(refusalText(e), { extensions: { code: 'NOT_FOUND' } });
         }
         throw e;
       }
@@ -3510,7 +3788,7 @@ export const sessionMutations = {
         select: { loc: true, memory: { select: { urn: true } } },
       });
       if (!resolved) {
-        throw new GraphQLError(`Node "${ref}" not found.`, {
+        throw new GraphQLError('Node not found.', {
           extensions: { code: 'NOT_FOUND' },
         });
       }

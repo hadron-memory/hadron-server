@@ -19,6 +19,11 @@
 // taught explicitly. Names are normalized by dropping a `public.` schema
 // prefix (the default search_path): `fn` and `public.fn` are one object.
 //
+// The one dynamic statement the parser accepts (#4704, reversing the #4691 disposition that post-push refuses DDL built at run
+// time): a DO block's `EXECUTE pg_catalog.format('DROP SEQUENCE|INDEX [IF EXISTS] %s', <regclass cast>)` or the matching
+// `ALTER TABLE %s DROP CONSTRAINT [IF EXISTS] %I`. A drop creates no object, and the template list and the argument shape
+// (see catalogDdlSpan) keep every CREATE-shaped dynamic string unrecognized.
+//
 // One statement can create MORE than one object (`ALTER TABLE t ADD
 // CONSTRAINT a CHECK (…), ADD CONSTRAINT b UNIQUE (…)`), so `classify`
 // returns a LIST of classifications; an empty list is a recognized
@@ -36,6 +41,7 @@ export const OBJECT_KINDS = [
   'foreign-key-constraint',
   'unique-constraint',
   'generated-column',
+  'identity-column',
   'function',
   'trigger',
   'table',
@@ -586,6 +592,62 @@ function balancedClose(text, openAt) {
   return -1;
 }
 
+const REGCLASS_CAST = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*(?:\(.*\))?\s*::\s*(?:pg_catalog\s*\.\s*)?regclass$/is;
+const REGPROCEDURE_CAST = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*::\s*(?:pg_catalog\s*\.\s*)?regprocedure$/i;
+const REGCLASS_CAST_TAIL = /\)\s*::\s*(?:pg_catalog\s*\.\s*)?regclass$/i;
+
+/** An argument that IS a regclass value: a bare (qualified) name or ONE call, cast to regclass. Shape only: the cast itself turns any text into a relation's name or fails. */
+function isRegclassCast(arg) {
+  if (!REGCLASS_CAST.test(arg)) return false;
+  const call = arg.indexOf('(');
+  if (call === -1) return true;
+  return balancedClose(arg, call) === arg.search(REGCLASS_CAST_TAIL); // the call's own parens end right before the cast
+}
+
+/**
+ * #4704 / #5096: the closed list of dynamic-DDL shapes a DO block may run, because none can create an object: a DROP whose
+ * target is resolved from the catalog at run time, and (#5096) an ALTER FUNCTION that only sets one function's search_path. Exactly `EXECUTE format('<template>', <args>);` with a plain single-quoted
+ * template (no E-string, no concatenation, no USING) from this closed list:
+ *   DROP SEQUENCE|INDEX [IF EXISTS] %s                    one arg, `<name or call>::regclass`
+ *   ALTER TABLE %s DROP CONSTRAINT [IF EXISTS] %I         arg 1 `<name or call>::regclass`, arg 2 any (%I quotes it)
+ *   ALTER FUNCTION %s SET search_path = public, pg_temp   one arg, a bare (qualified) name cast to regprocedure (#5096: it
+ *                                                         changes one function's configuration, creates no object)
+ * The function must be spelled `pg_catalog.format`: a bare `format` resolves by search_path and overload, so a function
+ * the closure created as `public.format(text, regclass)` would win and could run anything (blind seat F2, #4800). Nothing
+ * in the corpus creates one, but the spelling makes that a property of the text instead of an assumption.
+ * `%s` pastes its argument unquoted, so it is only allowed an argument that IS a regclass value: a bare (qualified)
+ * name or one function call, cast to regclass (a text variable cast that way is accepted: the cast turns the text into a
+ * relation's quoted name or fails, and cannot carry a second statement). A `%s` fed anything else (a literal, a concatenation,
+ * an uncast variable) stays unrecognized, as does
+ * every other template, so no CREATE can hide here. Returns the length of the matched span, or 0 when it is not this
+ * shape (the caller leaves the EXECUTE standing and the block refuses).
+ */
+function catalogDdlSpan(text, found) {
+  const openAt = found.index + found[0].length - 1;
+  const closeAt = balancedClose(text, openAt); // the index OF the matching `)`
+  if (closeAt === -1) return 0;
+  const callText = text.slice(openAt, closeAt + 1);
+  // balancedClose and splitTopLevel read single- and double-quoted spans (E'..' too) but not dollar quotes: a `$tag$ ) $tag$` in
+  // the arguments could close the call early. No accepted shape needs a `$`, so any `$` in the call refuses it.
+  if (callText.includes('$')) return 0;
+  const end = text.slice(closeAt + 1).match(/^\s*;/);
+  if (!end) return 0;
+  const parts = splitTopLevel(text.slice(openAt + 1, closeAt)).map((x) => x.trim());
+  const quoted = parts[0]?.match(/^'((?:[^']|'')*)'$/s);
+  if (!quoted) return 0;
+  const template = quoted[1].replace(/\s+/g, ' ').trim();
+  const args = parts.slice(1);
+  // Keywords match any case (Postgres does), but the placeholders are exact: format() rejects %S and %i.
+  const placeholders = template.match(/%./g) ?? [];
+  const same = (want) => placeholders.length === want.length && want.every((w, i) => placeholders[i] === w);
+  let ok = false;
+  if (/^DROP (?:SEQUENCE|INDEX) (?:IF EXISTS )?%s$/i.test(template)) ok = same(['%s']) && args.length === 1 && isRegclassCast(args[0]);
+  else if (/^ALTER TABLE %s DROP CONSTRAINT (?:IF EXISTS )?%I$/i.test(template)) ok = same(['%s', '%I']) && args.length === 2 && isRegclassCast(args[0]) && args[1] !== '';
+  else if (/^ALTER FUNCTION %s SET search_path = public, pg_temp$/i.test(template)) ok = same(['%s']) && args.length === 1 && REGPROCEDURE_CAST.test(args[0]);
+  if (!ok) return 0; // %I quotes its argument and %s only takes a regclass value, so no argument text can reach the statement as SQL
+  return closeAt + 1 + end[0].length - found.index;
+}
+
 /** Cut a trailing `-- comment` off a psql meta-command line (outside quoted arguments). */
 function stripMetaComment(raw) {
   let inS = false;
@@ -701,6 +763,15 @@ export function classify(stmt) {
       // identifier containing spaces, so the object word between ALTER and ADD
       // cannot be captured by \S+ — anchor on the verb pair alone (delta2 A5,
       // delta3 B2).
+      // #4337: exactly `ALTER [COLUMN] <col> ADD GENERATED {ALWAYS | BY DEFAULT} AS IDENTITY`, with no sequence
+      // options, names one object: that column's identity (its sequence is the identity's own, never named apart).
+      // The row records only `table.column`: a change between BY DEFAULT and ALWAYS makes no manifest diff, as with the other
+      // kinds, which record a name and not a definition (#4714 F12).
+      // Every other ADD GENERATED spelling (sequence options, anything trailing) still refuses.
+      if ((am = action.match(new RegExp(`^ALTER (?:COLUMN )?${IDENT}\\s+ADD GENERATED (?:ALWAYS|BY DEFAULT) AS IDENTITY$`, 'i')))) {
+        out.push({ kind: 'identity-column', name: `${table}.${unquote(am[1] ?? am[2])}` });
+        continue;
+      }
       if (/^ALTER\b.*\bADD\s+GENERATED\b/i.test(action)) {
         out.push({ unrecognized: sql });
         continue;
@@ -734,7 +805,17 @@ export function classify(stmt) {
     if (!(stmt.payloads ?? '').trim()) return [{ unrecognized: sql }];
     const body = stripPayloadComments(stmt.payloads ?? '');
     const out = [];
+    // #4704: a catalog-resolved DROP creates no object, so it classifies as [] and must not stand in the remainder. It is
+    // matched on the comment-stripped body, so a commented-out one cannot count, and it is blanked BY POSITION (same
+    // length, so every later index still lines up), never by searching for its text: two identical calls each lose
+    // their own span, and a lookalike elsewhere in the body is never cut by mistake. Only a call that
+    // catalogDdlSpan accepted WHOLE is blanked: anything else (a CREATE template, a `%s` with a literal, USING, a
+    // trailing concatenation, an unqualified `format`) stays standing and the EXECUTE check below refuses the block.
     let remainder = body;
+    for (const m of body.matchAll(/\bEXECUTE\s+pg_catalog\s*\.\s*format\s*\(/gi)) {
+      const span = catalogDdlSpan(body, m);
+      if (span > 0) remainder = remainder.slice(0, m.index) + ' '.repeat(span) + remainder.slice(m.index + span);
+    }
     for (const m of body.matchAll(/\bEXECUTE\s+\$([A-Za-z_]*)\$([\s\S]*?)\$\1\$/gi)) {
       // A dollar-quoted payload is copied VERBATIM by the stripper, so its
       // own comments would reach classify raw and break its ^-anchored heads

@@ -17,7 +17,7 @@ let app: any, owner: any, manager: any, assignee: any, outsider: any, agent: any
 const ctx = (userId=owner.id) => ({db,userId,roles:['READER']});
 async function edit(input: Record<string,unknown>, userId=owner.id) {
  expect(M.updateAgentTask, 'the one task edit mutation is implemented').toBeTypeOf('function');
- return M.updateAgentTask({}, {taskId:task.id,input}, ctx(userId));
+ return M.updateAgentTask({}, {taskRef:task.id,input}, ctx(userId));
 }
 const edited = () => db.agentTeamEvent.findMany({where:{taskId:task.id,type:'task.edited'}});
 beforeEach(async()=>{
@@ -66,15 +66,15 @@ describe('task edit #2645',()=>{
   await db.appMember.update({where:{appId_userId:{appId:app.id,userId:manager.id}},data:{role:'member'}});
   await expect(edit({title:'No'},manager.id)).rejects.toMatchObject({extensions:{code:'TASK_NOT_OWNER'}});
   const hidden=await edit({title:'No'},outsider.id).catch(e=>e);
-  const absent=await M.assignAgentTask({}, {taskId:task.id,assignee:{user:outsider.id}},ctx(outsider.id)).catch((e:any)=>e);
+  const absent=await M.assignAgentTask({}, {taskRef:task.id,assignee:{user:outsider.id}},ctx(outsider.id)).catch((e:any)=>e);
   expect({message:hidden.message,extensions:hidden.extensions}).toEqual({message:absent.message,extensions:absent.extensions});
   const key=await db.appKey.create({data:{appId:app.id,keyHash:generateId(),keyPreview:'test'}});
-  await expect(M.updateAgentTask({}, {taskId:task.id,input:{title:'No'}},{db,appId:app.id,appKeyId:key.id,roles:[]})).rejects.toMatchObject({extensions:{code:'TASK_NOT_FOUND'}});
+  await expect(M.updateAgentTask({}, {taskRef:task.id,input:{title:'No'}},{db,appId:app.id,appKeyId:key.id,roles:[]})).rejects.toMatchObject({extensions:{code:'TASK_NOT_FOUND'}});
   expect(await edited()).toHaveLength(0);
  });
  it('refuses an impersonation session even when the impersonated user owns the task',async()=>{
   const impersonation={sessionId:generateId(),actorUserId:manager.id,orgId:app.organizationId,expiresAt:new Date(Date.now()+3600_000)};
-  await expect(M.updateAgentTask({}, {taskId:task.id,input:{title:'Impersonated'}},{...ctx(),impersonation})).rejects.toMatchObject({extensions:{code:'FORBIDDEN'}});
+  await expect(M.updateAgentTask({}, {taskRef:task.id,input:{title:'Impersonated'}},{...ctx(),impersonation})).rejects.toMatchObject({extensions:{code:'FORBIDDEN'}});
   expect((await db.agentTask.findUniqueOrThrow({where:{id:task.id}})).title).toBe('Original');expect(await edited()).toHaveLength(0);
  });
  it('stores task.edited payloads only for editable field names',async()=>{
@@ -136,7 +136,7 @@ describe('task edit #2645',()=>{
  });
  it('exposes the patch through the GraphQL transport',async()=>{
   const apollo=new ApolloServer({typeDefs,resolvers});
-  const operation=await apollo.executeOperation({query:'mutation($id:ID!){updateAgentTask(taskId:$id,input:{title:"GraphQL"}){id title}}',variables:{id:task.id}},{contextValue:ctx()});
+  const operation=await apollo.executeOperation({query:'mutation($id:ID!){updateAgentTask(taskRef:$id,input:{title:"GraphQL"}){id title}}',variables:{id:task.id}},{contextValue:ctx()});
   await apollo.stop();
   expect(operation.body.kind).toBe('single');
   const result=(operation.body as any).singleResult;

@@ -19,6 +19,9 @@ import { PLATFORM_ACTIONS, type IssuerRuleKey } from './actions.js';
 import { managesApp } from '../auth/appManagement.js';
 import { resolveAppRef } from '../entityRef/appRef.js';
 import { requireSecretReadClientIssuer } from '../secrets/readClientIssuer.js';
+import { managesReadGrantTarget } from '../../api/graphql/schema/resolvers.automationReadGrant.js';
+import { READ_GRANT_MEMORY_SELECT } from '../automationReadGrant.js';
+import { LIVE_ORG_MEMBERSHIP } from '../auth/liveOrgMembership.js';
 
 /** #3823: whoever manages the App (the gate the boot-prompt actions' signer faces; the node-specific part is judged where the grant is spent). */
 async function requireAppManager(ctx: Context, appRef: string): Promise<void> {
@@ -35,8 +38,42 @@ async function requireSecretReadIssuer(ctx: Context, appRef: string, values?: un
   const id = values && typeof values === 'object' && !Array.isArray(values) ? (values as Record<string, unknown>).secret : undefined;
   if (typeof id !== 'string') throw authorizationDenied();
   const { id: appId } = await resolveAppRef(ctx.db, appRef);
-  const issuance = await requireSecretReadClientIssuer(ctx, id);
+  const issuance = await requireSecretReadClientIssuer(ctx, id, (values as Record<string, unknown>)['auto-delete'] === 'delete');
   if (issuance.appId !== appId) throw authorizationDenied();
+}
+
+/** A parameter's value, or undefined. */
+function valueOf(values: unknown, name: string): unknown {
+  return values && typeof values === 'object' && !Array.isArray(values) ? (values as Record<string, unknown>)[name] : undefined;
+}
+
+/**
+ * #5321 (cor:acl:140:02, Holger 2026-11-27: "The grant may be for all org memories (org ADMIN and OWNER approve, create/issue anyone)
+ * or the grant names one or more memories. Then owner of that memory approves."; earlier, "Only the memory's manager"):
+ *  - form (a), the value is the App's own organization's id: an ADMIN or OWNER of that organization, as a live MEMBER of it (no
+ *    platform-role arm: the grant allows only while its giver reads that knowledge, src/lib/grants/readGrant.ts);
+ *  - form (b), one or more memory ids: the signer manages EVERY named memory (an Agent's system memory: whoever manages that Agent,
+ *    the #2883 rule, `managesReadGrantTarget`). A member who only reads one cannot, and one unmanaged memory refuses the whole grant.
+ * Unknown, deleted, unmanaged, empty and mixed values are the one refusal.
+ */
+async function requireMemoryReadApprover(ctx: Context, appRef: string, values?: unknown): Promise<void> {
+  const v = valueOf(values, 'memory');
+  const ids = Array.isArray(v) ? v : [v];
+  if (ids.length === 0 || !ids.every((x): x is string => typeof x === 'string' && x !== '*') || !ctx.userId) throw authorizationDenied();
+  const { id: appId } = await resolveAppRef(ctx.db, appRef);
+  const app = await ctx.db.app.findFirst({ where: { id: appId, deletedAt: null }, select: { organizationId: true } });
+  if (!app) throw authorizationDenied();
+  if (!Array.isArray(v) && app.organizationId !== null && v === app.organizationId) {
+    const member = await ctx.db.orgMember.findFirst({
+      where: { organizationId: app.organizationId, userId: ctx.userId, role: { in: ['ADMIN', 'OWNER'] }, ...LIVE_ORG_MEMBERSHIP }, select: { userId: true },
+    });
+    if (!member) throw authorizationDenied();
+    return;
+  }
+  for (const id of new Set(ids as string[])) {
+    const memory = await ctx.db.memory.findFirst({ where: { id, deletedAt: null }, select: { ...READ_GRANT_MEMORY_SELECT, urn: true } });
+    if (!memory || !(await managesReadGrantTarget(ctx, memory))) throw authorizationDenied();
+  }
 }
 
 /** #3730 item 1: keyed by the closed {@link IssuerRuleKey} union — every key has a gate, and no other key can be indexed. */
@@ -45,6 +82,7 @@ export const ISSUER_RULES: Readonly<Record<IssuerRuleKey, IssuerGate>> = {
   APP_WEBHOOK_ADMIN: requireScheduleAdmin,
   APP_MANAGER: requireAppManager,
   SECRET_READ_CLIENT: requireSecretReadIssuer,
+  MEMORY_READ_APPROVER: requireMemoryReadApprover,
 };
 
 /**

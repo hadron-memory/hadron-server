@@ -194,8 +194,8 @@ describe('the scope primitive', () => {
 describe('the invariants file', () => {
   it('the migration carries a byte-identical copy and post-push includes it', () => {
     const source = readFileSync(new URL('../../../prisma/app-key-scope-invariants.sql', import.meta.url), 'utf8');
-    // #1709: the newest migration that carries the file (host:operate added to the closed list).
-    const migration = readFileSync(new URL('../../../prisma/migrations/20261014010100_host_operate_scope/migration.sql', import.meta.url), 'utf8');
+    // #5321: the newest migration that carries the file (grant:read added to the closed list; #1709's host:operate before it).
+    const migration = readFileSync(new URL('../../../prisma/migrations/20261127120000_grant_read_scope/migration.sql', import.meta.url), 'utf8');
     // Exactly the file, set off from the generated DDL above it by one blank line: nothing else may sit between.
     expect(migration.endsWith(`\n${source}`)).toBe(true);
     expect(readFileSync(new URL('../../../prisma/post-push.sql', import.meta.url), 'utf8')).toContain('\\ir app-key-scope-invariants.sql');

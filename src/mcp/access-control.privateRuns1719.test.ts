@@ -13,11 +13,11 @@ import { getAccessibleMemoryIds } from '../api/graphql/schema/resolvers.helpers.
 import { renderAttentionSection } from '../lib/channelReadState.js';
 import { makeProdRunDeps, runContext } from '../jobs/appRunDeps.js';
 import { hadronStoreFile } from '../lib/runner/tools/storeTools.js';
-import { putObject } from '../integrations/r2/client.js';
+import { putObject } from '../integrations/objectstore/index.js';
 import { hadronReadNode, hadronUpdateNode, hadronCreateNode } from '../lib/runner/tools/nodeTools.js';
 import { testRunAgentId } from '../test/runAgent.js';
 
-vi.mock('../integrations/r2/client.js', () => ({ putObject: vi.fn(), deleteObject: vi.fn() }));
+vi.mock('../integrations/objectstore/index.js', () => ({ putObject: vi.fn(), deleteObject: vi.fn() }));
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn() }));
 beforeEach(async () => { await cleanDb(db); });
 
@@ -210,7 +210,7 @@ it('a private channel contributes neither attention text nor a cursor advance to
   await db.node.update({ where: { id: f.node.id }, data: { loc: 'chats:team', nodeType: 'chat' } });
   const channel = await db.channel.create({ data: { memoryId: f.memory.id, loc: 'chats:team', name: 'Private channel name', chatRootNodeId: f.node.id, lastSeq: 5 } });
   const attention = await renderAttentionSection(db, { id: generateId(), agentId: f.agent.id, appId: f.app.id,
-    userId: f.owner.id, organizationId: f.org.id,
+    userId: f.owner.id, organizationId: f.org.id, ownerUserId: null,
     registerSnapshot: { attendee: { agentId: f.agent.id, appId: f.app.id }, rows: [{ channelId: channel.id, role: 'WATCH', mentionOnly: false }] } });
   expect(attention.text).toBe('');
   expect(attention.captured.size).toBe(0);

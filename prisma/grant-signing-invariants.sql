@@ -5,7 +5,8 @@
 -- is the DB clock (hadron_signing_now(), prisma/signing-invariants.sql), so a write queued behind a lock gets a later time than
 -- the one it waited for.
 --
--- ONE grant per request (gate selection 1; a selection is later scope). No signer is named (ruling 0255, item 12). A request
+-- ONE grant per request (gate selection 1). #5001: a request may also be one ITEM of a selection
+-- (selection_id and position_in_selection set, payload_version the selection's; prisma/grant-selection-signing-invariants.sql). No signer is named (ruling 0255, item 12). A request
 -- begins open on a PENDING grant (never activated, revoked or left by its holder) at the grant's current version, and ends
 -- exactly once. A record is inserted only against an open, unexpired request whose pins it repeats, by its signer's own
 -- unrevoked passkey, on a grant that is still pending, naming the grant's holder as signed; it is never updated. Both are
@@ -17,7 +18,11 @@ ALTER TABLE grant_signing_requests ADD CONSTRAINT chk_grant_signing_request_shap
   id ~ '^[A-Za-z0-9_-]{22}$'
   AND state IS NOT NULL AND state IN ('open','completed','declined','expired','stale','withdrawn')
   AND terms_hash ~ '^[0-9a-f]{64}$'
-  AND payload_version IN ('hadron-grant-signature-v1')
+  AND payload_version IN ('hadron-grant-signature-v1','hadron-grant-selection-signature-v1')
+  -- #5001: the selection version belongs to a selection item and the one-grant version to a request with no selection.
+  AND ((selection_id IS NULL) = (payload_version = 'hadron-grant-signature-v1'))
+  AND ((selection_id IS NULL) = (position_in_selection IS NULL))
+  AND (position_in_selection IS NULL OR position_in_selection >= 0)
   AND version >= 1
   AND (requester_user_id IS NOT NULL OR requester_app_id IS NOT NULL)
   AND (requester_user_id IS NULL OR requester_user_id <> '')
@@ -30,7 +35,9 @@ ALTER TABLE grant_signing_requests ADD CONSTRAINT chk_grant_signing_request_shap
 ALTER TABLE grant_signatures DROP CONSTRAINT IF EXISTS chk_grant_signature_shape;
 ALTER TABLE grant_signatures ADD CONSTRAINT chk_grant_signature_shape CHECK (
   terms_hash ~ '^[0-9a-f]{64}$'
-  AND payload_version IN ('hadron-grant-signature-v1')
+  AND payload_version IN ('hadron-grant-signature-v1','hadron-grant-selection-signature-v1')
+  -- #5001: a selection-version record names its touch record; a one-grant record never does.
+  AND ((selection_signature_id IS NULL) = (payload_version = 'hadron-grant-signature-v1'))
   AND version >= 1
   AND holder_kind IN ('user','agent','worker','app')
   AND holder_id <> ''
@@ -45,7 +52,7 @@ ALTER TABLE grant_signatures ADD CONSTRAINT chk_grant_signature_shape CHECK (
 
 -- Ends every open request of one grant: expired (at its deadline) when its lifetime has already passed, otherwise stale (now).
 CREATE OR REPLACE FUNCTION hadron_end_open_grant_signing_requests(p_grant_id text) RETURNS void
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE platform_now timestamp(3) := hadron_signing_now();
 BEGIN
   UPDATE grant_signing_requests SET state = 'expired'
@@ -55,15 +62,18 @@ BEGIN
 END $$;
 
 -- Requests: begin open on a pending grant at its version, pinned fields immutable, one end, DB-clock times, deleted only with
--- their grant (the FK cascade fires after the grant row is gone).
+-- their grant (the FK cascade fires after the grant row is gone), or with their App: an App's hard delete reaches a request by two
+-- cascades (App to grants, App to selections to items), and which fires first is not ours to rely on, so a request or signature whose
+-- grant's App is already gone may go too.
 CREATE OR REPLACE FUNCTION hadron_guard_grant_signing_request() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
   platform_now timestamp(3) := hadron_signing_now();
   lifetime interval;
+  sel grant_signing_selections%ROWTYPE;
 BEGIN
   IF TG_OP = 'DELETE' THEN
-    IF EXISTS (SELECT 1 FROM grants WHERE id = OLD.grant_id) THEN
+    IF EXISTS (SELECT 1 FROM grants gr JOIN apps ap ON ap.id = gr.app_id WHERE gr.id = OLD.grant_id) THEN
       RAISE EXCEPTION 'Grant signing requests are kept for the grant''s lifetime' USING ERRCODE = '23514';
     END IF;
     RETURN OLD;
@@ -88,16 +98,26 @@ BEGIN
     platform_now := hadron_signing_now();
     NEW.created_at := platform_now;
     NEW.expires_at := platform_now + lifetime;
+    IF NEW.selection_id IS NOT NULL THEN
+      -- #5001: an item belongs to an open selection of the grant's own App and ends at the selection's deadline, so the one
+      -- touch and its items expire together. The selection is read after the grant lock (grant, then selection: the lock order).
+      SELECT * INTO sel FROM grant_signing_selections WHERE id = NEW.selection_id FOR SHARE;
+      IF NOT FOUND OR sel.state <> 'open' OR platform_now >= sel.expires_at
+         OR NOT EXISTS (SELECT 1 FROM grants g WHERE g.id = NEW.grant_id AND g.app_id = sel.app_id) THEN
+        RAISE EXCEPTION 'A selection item needs an open selection of the grant''s own App' USING ERRCODE = '23514';
+      END IF;
+      NEW.expires_at := sel.expires_at;
+    END IF;
     RETURN NEW;
   END IF;
   -- UPDATE
   IF ROW(NEW.id, NEW.grant_id, NEW.version, NEW.terms_hash, NEW.payload_version,
          NEW.requester_user_id, NEW.requester_app_id, NEW.requester_worker_id, NEW.requester_session_id,
-         NEW.created_at, NEW.expires_at)
+         NEW.created_at, NEW.expires_at, NEW.selection_id, NEW.position_in_selection)
      IS DISTINCT FROM
      ROW(OLD.id, OLD.grant_id, OLD.version, OLD.terms_hash, OLD.payload_version,
          OLD.requester_user_id, OLD.requester_app_id, OLD.requester_worker_id, OLD.requester_session_id,
-         OLD.created_at, OLD.expires_at) THEN
+         OLD.created_at, OLD.expires_at, OLD.selection_id, OLD.position_in_selection) THEN
     RAISE EXCEPTION 'A grant signing request''s pinned fields are immutable' USING ERRCODE = '23514';
   END IF;
   IF OLD.state <> 'open' THEN
@@ -139,15 +159,16 @@ FOR EACH ROW EXECUTE FUNCTION hadron_guard_grant_signing_request();
 -- Records: insert-only against an open, unexpired request whose pins they repeat, by the signer's own unrevoked passkey, on a
 -- grant still pending, naming the grant's holder as it is at signing; never updated; deleted only with their grant.
 CREATE OR REPLACE FUNCTION hadron_guard_grant_signature() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
   -- Read only after both locks below: a clock sampled before a wait would judge a deadline that passed during it as unpassed.
   platform_now timestamp(3);
   req grant_signing_requests%ROWTYPE;
   g grants%ROWTYPE;
+  touch grant_selection_signatures%ROWTYPE;
 BEGIN
   IF TG_OP = 'DELETE' THEN
-    IF EXISTS (SELECT 1 FROM grants WHERE id = OLD.grant_id) THEN
+    IF EXISTS (SELECT 1 FROM grants gr JOIN apps ap ON ap.id = gr.app_id WHERE gr.id = OLD.grant_id) THEN
       RAISE EXCEPTION 'Grant signature records are never deleted' USING ERRCODE = '23514';
     END IF;
     RETURN OLD;
@@ -180,6 +201,18 @@ BEGIN
                   WHERE id = NEW.passkey_credential_id AND owner_id = NEW.signer_id AND revoked_at IS NULL) THEN
     RAISE EXCEPTION 'A grant signature needs the signer''s own unrevoked passkey' USING ERRCODE = '23514';
   END IF;
+  IF NEW.selection_signature_id IS NOT NULL THEN
+    -- #5001: a selection item's record repeats its touch record (signer, passkey, RP and assertion bytes) and its item must be
+    -- one of the items that touch signed, by grant id, version and terms hash. The touch record is read, never locked here:
+    -- its own insert took the selection's lock, and the caller holds the item's request.
+    SELECT * INTO touch FROM grant_selection_signatures WHERE id = NEW.selection_signature_id;
+    IF NOT FOUND OR touch.selection_id IS DISTINCT FROM req.selection_id
+       OR ROW(NEW.signer_id, NEW.passkey_credential_id, NEW.rp_id, NEW.authenticator_data, NEW.client_data_json, NEW.signature)
+          IS DISTINCT FROM ROW(touch.signer_id, touch.passkey_credential_id, touch.rp_id, touch.authenticator_data, touch.client_data_json, touch.signature)
+       OR NOT (touch.items @> jsonb_build_array(jsonb_build_object('grantId', NEW.grant_id, 'version', NEW.version, 'termsHash', NEW.terms_hash))) THEN
+      RAISE EXCEPTION 'A selection grant signature must be one of the items its touch record signed' USING ERRCODE = '23514';
+    END IF;
+  END IF;
   NEW.verified_at := platform_now;
   RETURN NEW;
 END $$;
@@ -192,7 +225,7 @@ FOR EACH ROW EXECUTE FUNCTION hadron_guard_grant_signature();
 -- too (#3649 slice C, slice B design choice 6): the completion marks its OWN request completed before it activates, so only
 -- the others are still open. Column-scoped, so the issuer-erasure move never pays for it.
 CREATE OR REPLACE FUNCTION hadron_grant_signing_stale() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
   IF ROW(NEW.version, NEW.revoked_at, NEW.holder_departed_at, NEW.activated_at, NEW.app_id, NEW.user_id, NEW.agent_id, NEW.worker_id,
          NEW.grantee_app_id, NEW.action, NEW.action_values, NEW.starts_at, NEW.expires_at, NEW.max_uses, NEW.reason)

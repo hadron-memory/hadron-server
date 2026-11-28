@@ -22,7 +22,7 @@ async function fixture() {
  await createDbAppMember(db, app.id, member.id, 'member');
  const outsider = await db.user.create({ data: { name: 'outsider' } });
  const node = await M.createNode({}, { input: { install: { appRef: app.id, agentRef: agent.id }, loc: 'source', name: 'Source', content: 'before' } }, context(admin.id));
- const target = await M.createNode({}, { input: { memoryId: node.memoryId, loc: 'target', name: 'Target', content: 'target' } }, context(admin.id));
+ const target = await M.createNode({}, { input: { memoryRef: node.memoryId, loc: 'target', name: 'Target', content: 'target' } }, context(admin.id));
  const edge = await db.edge.create({ data: { memoryId: node.memoryId, sourceId: node.id, targetId: target.id, loc: 'link', name: 'link' } });
  const revision = await db.nodeRevision.create({ data: { nodeId: node.id, memoryId: node.memoryId, loc: 'source', name: 'Earlier', content: 'earlier', tags: [], changes: [], revNo: 0 } });
  const memory = await db.memory.findUniqueOrThrow({ where: { id: node.memoryId } });
@@ -31,15 +31,15 @@ async function fixture() {
 type F = Awaited<ReturnType<typeof fixture>>;
 const doors: Array<[string, (f: F, ctx: Context) => Promise<unknown>]> = [
  ['moveNode', (f,c) => M.moveNode({}, { sourceRef: f.node.id, targetUrn: `hrn:node:${f.memory.urn}:moved` }, c)],
- ['searchReplaceInNodes', (f,c) => M.searchReplaceInNodes({}, { input: { nodeIds: [f.node.id], oldText: 'before', newText: 'after', fields: ['content'] } }, c)],
+ ['searchReplaceInNodes', (f,c) => M.searchReplaceInNodes({}, { input: { nodeRefs: [f.node.id], oldText: 'before', newText: 'after', fields: ['content'] } }, c)],
  ['deleteNode', (f,c) => M.deleteNode({}, { nodeRef: f.node.id }, c)],
  ['createEdge', (f,c) => M.createEdge({}, { sourceRef: f.node.id, targetRef: f.target.id, loc: 'newlink', name: 'new' }, c)],
  ['updateEdge', (f,c) => M.updateEdge({}, { edgeRef: f.edge.id, name: 'after' }, c)],
  ['deleteEdge', (f,c) => M.deleteEdge({}, { edgeRef: f.edge.id }, c)],
  ['mergeNodes', (f,c) => M.mergeNodes({}, { input: { source: f.node.id, target: f.target.id, include: ['CONTENT'] } }, c)],
- ['restoreNodeRevision', (f,c) => M.restoreNodeRevision({}, { revisionId: f.revision.id }, c)],
- ['deleteNodeRevision', (f,c) => M.deleteNodeRevision({}, { revisionId: f.revision.id }, c)],
- ['updateNodeRevision', (f,c) => M.updateNodeRevision({}, { revisionId: f.revision.id, revLabel: 'after' }, c)],
+ ['restoreNodeRevision', (f,c) => M.restoreNodeRevision({}, { nodeRevRef: f.revision.id }, c)],
+ ['deleteNodeRevision', (f,c) => M.deleteNodeRevision({}, { nodeRevRef: f.revision.id }, c)],
+ ['updateNodeRevision', (f,c) => M.updateNodeRevision({}, { nodeRevRef: f.revision.id, revLabel: 'after' }, c)],
  ['clearNodeHistory', (f,c) => M.clearNodeHistory({}, { nodeRef: f.node.id }, c)],
 ];
 async function snapshot(f: F) {
@@ -121,7 +121,7 @@ it.each([['moveNode',false],['moveNode',true],['mergeNodes',false],['mergeNodes'
  const f=await fixture();
  const system=await db.memory.create({data:{urn:`${f.org.urn}:agent-brain`,name:'Agent brain',class:'system',organizationId:f.org.id}});
  await db.agent.update({where:{id:f.agent.id},data:{systemMemoryId:system.id}});
- const brain=await M.createNode({}, {input:{memoryId:system.id,loc:'brain',name:'Brain',content:'private brain'}},context(f.admin.id));
+ const brain=await M.createNode({}, {input:{memoryRef:system.id,loc:'brain',name:'Brain',content:'private brain'}},context(f.admin.id));
  await db.orgMember.update({where:{organizationId_userId:{organizationId:f.org.id,userId:f.admin.id}},data:{role:'READER'}});
  await db.appMember.update({where:{appId_userId:{appId:f.app.id,userId:f.admin.id}},data:{role:'owner'}});
  const before=await snapshot(f);
@@ -168,7 +168,7 @@ it.each(['retired','tombstone','dry-run'] as const)('rechecks %s authority despi
  const c={...context(f.admin.id),db:wrapped};
  const call=mode==='retired'?M.replaceSubtree({}, {memoryId:f.node.memoryId},c)
   :mode==='tombstone'?M.deleteNode({}, {nodeRef:f.node.id},c)
-  :M.searchReplaceInNodes({}, {input:{nodeIds:[f.node.id],oldText:'before',newText:'after',fields:['content'],dryRun:true}},c);
+  :M.searchReplaceInNodes({}, {input:{nodeRefs:[f.node.id],oldText:'before',newText:'after',fields:['content'],dryRun:true}},c);
  await expect(call).rejects.toMatchObject({extensions:{code:'FORBIDDEN'}});expect(crossed).toBe(true);expect(await snapshot(f)).toEqual(before);
 });
 
@@ -202,7 +202,7 @@ it.each(['deleteNodeRevision','updateNodeRevision','clearNodeHistory'] as const)
   };
   const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value;
  }});
- const args=door==='clearNodeHistory'?{nodeRef:f.node.id}:{revisionId:f.revision.id,revLabel:'unauthorized'};
+ const args=door==='clearNodeHistory'?{nodeRef:f.node.id}:{nodeRevRef: f.revision.id,revLabel:'unauthorized'};
  await expect(M[door]({},args,{...context(f.admin.id),db:wrapped})).rejects.toMatchObject({extensions:{code:'NODE_NOT_FOUND'}});
  expect(moved).toBe(true);expect(await db.nodeRevision.findMany({where:{nodeId:f.node.id},orderBy:{id:'asc'}})).toEqual(before);
 });

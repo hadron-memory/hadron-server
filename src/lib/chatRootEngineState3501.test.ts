@@ -11,6 +11,7 @@ import { ensureCurrentNodeRevisionInTransaction } from './nodeRevisionSnapshot.j
 import { chatMutations } from '../api/graphql/schema/resolvers.mutation.chat.js';
 import type { Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { testRunAgentId } from '../test/runAgent.js';
+import { encryptWithSecret } from '../test/encryptMemoryWithSecret.js';
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 let root: { id: string; loc: string; memoryId: string }, userId: string, ctx: Context;
 beforeEach(async () => {
@@ -159,13 +160,12 @@ it('4: keyless write keeps the existing SESSION_EXPIRED refusal and writes nothi
   expect(await raw()).toEqual(before); expect(await db.chatRootEngineState.count()).toBe(0);
 });
 it('11: encryptMemory converts state on live AND tombstoned roots in its real conversion path', async () => {
-  const { memoryMutations } = await import('../api/graphql/schema/resolvers.mutation.memory.js');
   await updateChatRootData(db, root, enc(), d => d);
   const dead = await db.node.create({ data: { id: generateId(), memoryId: root.memoryId, loc: 'chats:dead', name: 'dead', nodeType: 'record', deletedAt: new Date(), data: {} } });
   await db.chatRootEngineState.create({ data: { chatRootNodeId: dead.id, state: { conversationName: 'tombstone-private-name', stageName: 'old-stage' } } });
   await db.memory.update({ where: { id: root.memoryId }, data: { class: 'private' } });
   const key = generateDataKey();
-  await memoryMutations.encryptMemory(null, { memoryRef: root.memoryId, dataKey: key.raw.toString('base64') }, ctx);
+  await encryptWithSecret(null, { memoryRef: root.memoryId, dataKey: key.raw.toString('base64') }, ctx);
   const rows = await db.chatRootEngineState.findMany({ where: { chatRootNodeId: { in: [root.id, dead.id] } } });
   expect(rows).toHaveLength(2);
   for (const row of rows) { expect(row.state).toHaveProperty('__enc'); expect(JSON.stringify(row.state)).not.toContain('stage'); }
@@ -176,7 +176,7 @@ it('10: plaintext clone carries operational state through the node-id map', asyn
   const { cloneMemoryGraphInTx } = await import('../controller/operations/cloneMemory.js');
   await updateChatRootData(db, root, enc(), d => ({ ...d, stageName: 'live-stage' }));
   const memory = await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } });
-  const copy = await db.$transaction(tx => cloneMemoryGraphInTx(tx, { sourceMemoryId: root.memoryId, name: 'copy', newUrn: `engine3501:copy-${generateId()}`, targetOrganizationId: memory.organizationId!, ownerUserId: userId, groupOwnerUserId: null, actorId: userId, copierReadableMemoryIds: null }));
+  const copy = await db.$transaction(tx => cloneMemoryGraphInTx(tx, { ownerLimitCaller: null, sourceMemoryId: root.memoryId, name: 'copy', newUrn: `engine3501:copy-${generateId()}`, targetOrganizationId: memory.organizationId!, ownerUserId: userId, groupOwnerUserId: null, actorId: userId, copierReadableMemoryIds: null }));
   expect((await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: copy.nodeIdMap.get(root.id)! } })).state).toMatchObject({ stageName: 'live-stage' });
 });
 it('read-only list overlay prefers live row, never seeds, and keeps encrypted names null', async () => {
@@ -197,7 +197,7 @@ it.each(['encrypt', 'promote'])('12/11: real %s commits on a second connection b
   let flip: () => Promise<unknown>;
   if (method === 'encrypt') {
     await db.memory.update({ where: { id: root.memoryId }, data: { class: 'private' } });
-    flip = () => memoryMutations.encryptMemory(null, { memoryRef: root.memoryId, dataKey: key.raw.toString('base64') }, ctx);
+    flip = () => encryptWithSecret(null, { memoryRef: root.memoryId, dataKey: key.raw.toString('base64') }, ctx);
   } else {
     const memory = await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } });
     const app = await db.app.create({ data: { id: generateId(), name: 'promotion3501', urn: `promotion3501:${generateId()}`, organizationId: memory.organizationId!, identifyUserMethod: 'SECRET', createUserPermission: 'IMPLICIT' } });
@@ -240,7 +240,7 @@ it('7: actual revision restore rewinds title, but myChats and the next turn reta
   const revision = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: root.id }, orderBy: { revNo: 'asc' } });
   await updateChatRootData(db, root, enc(), d => ({ ...d, stageName: 'live-stage' }));
   await reconcile();
-  await nodeMutations.restoreNodeRevision(null, { revisionId: revision.id }, ctx);
+  await nodeMutations.restoreNodeRevision(null, { nodeRevRef: revision.id }, ctx);
   expect((await raw()).data).toMatchObject({ title: 'Before' });
   const memory = await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } });
   const list = await chatQueries.myChats(null, { agentRef: memory.userMemoryOfAgentId! }, ctx);
@@ -305,7 +305,8 @@ it('1a encrypted FIRST unchanged-mirror turn strips legacy state without ciphert
 it('11/13: conversion never nests an undecryptable existing envelope as fresh plaintext', async () => {
   const { encryptChatEngineStateWithKey } = await import('./chatRootEngineState.js');
   const row = await db.chatRootEngineState.create({ data: { chatRootNodeId: root.id, state: { __enc: 'tampered' } } });
-  await expect(db.$transaction(tx => encryptChatEngineStateWithKey(tx, root.id, generateDataKey()))).rejects.toMatchObject({ extensions: { code: 'CHAT_STATE_INVALID' } });
+  // #3575 (ruling 0225): classified, not thrown; the caller reports it. The row is still preserved byte for byte.
+  expect(await db.$transaction(tx => encryptChatEngineStateWithKey(tx, root.id, generateDataKey()))).toBe('blocked');
   expect(await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).toEqual(row);
 });
 it('14: exact loc and id cannot substitute a root from outside the gated memory', async () => {
@@ -338,8 +339,8 @@ it('11: a plaintext cross-memory chat move still refuses, and merge relocation r
   const own = await db.memory.findUniqueOrThrow({ where: { id: root.memoryId } });
   const target = await db.memory.create({ data: { id: generateId(), organizationId: own.organizationId, name: 'target', urn: `engine3501:target-${generateId()}`, class: 'knowledge' } });
   const source = await raw();
-  await expect(db.$transaction(tx => moveNodeSubtree(tx, { source, destLoc: 'chats:moved', destMemoryId: target.id, editor: { userId } }))).rejects.toThrow('chat');
-  await mergeMemoryGraph(db, { sourceMemoryId: root.memoryId, targetMemoryId: target.id, fields: new Set(), deleteSourceMem: false, editor: { userId } });
+  await expect(db.$transaction(tx => moveNodeSubtree(tx, { ownerLimitCaller: null, source, destLoc: 'chats:moved', destMemoryId: target.id, editor: { userId } }))).rejects.toThrow('chat');
+  await mergeMemoryGraph(db, { ownerLimitCaller: null, sourceMemoryId: root.memoryId, targetMemoryId: target.id, fields: new Set(), deleteSourceMem: false, editor: { userId } });
   expect((await raw()).memoryId).toBe(target.id);
   expect((await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).state).toHaveProperty('stageName', 'live-stage');
 });
@@ -358,7 +359,7 @@ it('11: encrypted clone, transfer and memory merge retain their existing typed r
   const receivingOrg = await db.organization.create({ data: { id: generateId(), name: 'receiving', urn: `engine3501-receiving-${generateId()}` } });
   await db.orgMember.create({ data: { organizationId: receivingOrg.id, userId, role: 'ADMIN' } });
   await expect(memoryTransferMutations.transferMemoryOwnership(null, { memoryRef: root.memoryId, orgRef: receivingOrg.id, targetClass: 'knowledge' }, ctx)).rejects.toMatchObject({ extensions: { code: 'ENCRYPTED_MEMORY_TRANSFER_UNSUPPORTED' } });
-  await expect(mergeMemoryGraph(db, { sourceMemoryId: root.memoryId, targetMemoryId: target.id, fields: new Set(), deleteSourceMem: false, editor: { userId } })).rejects.toMatchObject({ extensions: { code: 'ENCRYPTED_MEMORY_MERGE_UNSUPPORTED' } });
+  await expect(mergeMemoryGraph(db, { ownerLimitCaller: null, sourceMemoryId: root.memoryId, targetMemoryId: target.id, fields: new Set(), deleteSourceMem: false, editor: { userId } })).rejects.toMatchObject({ extensions: { code: 'ENCRYPTED_MEMORY_MERGE_UNSUPPORTED' } });
   expect(await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).toEqual(before);
 });
 
@@ -370,7 +371,7 @@ it.each(['row', 'legacy', 'absent'] as const)('11: collision preserves target %s
   const targetData = kind === 'absent' ? { title: 'Target' } : { title: 'Target', conversationName: 'target-conversation', stageName: 'target-stage' };
   const survivor = await db.node.create({ data: { id: generateId(), memoryId: target.id, loc: root.loc, nodeType: 'record', name: 'Target', data: targetData } });
   if (kind === 'row') await db.chatRootEngineState.create({ data: { chatRootNodeId: survivor.id, state: { conversationName: 'target-conversation', stageName: 'target-live' } } });
-  await mergeMemoryGraph(db, { sourceMemoryId: root.memoryId, targetMemoryId: target.id, fields: new Set(['DATA']), deleteSourceMem: false, editor: { userId } });
+  await mergeMemoryGraph(db, { ownerLimitCaller: null, sourceMemoryId: root.memoryId, targetMemoryId: target.id, fields: new Set(['DATA']), deleteSourceMem: false, editor: { userId } });
   expect(await db.chatRootEngineState.findUnique({ where: { chatRootNodeId: root.id } })).toBeNull();
   const merged = await db.node.findUniqueOrThrow({ where: { id: survivor.id } });
   if (kind === 'absent') {
@@ -414,16 +415,15 @@ it.each([{ stageName: '\t', unknown: 'keep opaque' }, ['malformed', 'shape'], 42
   expect(stored).toHaveProperty('__enc');
   sessionKeyCache.set(generateId(), root.memoryId, key);
   expect(decryptNodeFields({ data: stored }, { id: root.memoryId, isEncrypted: true }).data).toEqual(state);
-  expect(await db.$transaction(tx => encryptChatEngineStateWithKey(tx, root.id, key))).toBe(false);
+  expect(await db.$transaction(tx => encryptChatEngineStateWithKey(tx, root.id, key))).toBe('unchanged');
 });
 
 it('security: real encryptMemory completes past malformed engine state and encrypts later content', async () => {
-  const { memoryMutations } = await import('../api/graphql/schema/resolvers.mutation.memory.js');
   const key = generateDataKey();
   await db.memory.update({ where: { id: root.memoryId }, data: { class: 'private' } });
   await db.chatRootEngineState.create({ data: { chatRootNodeId: root.id, state: { stageName: '\t' } } });
   const later = await db.node.create({ data: { id: generateId(), memoryId: root.memoryId, loc: 'zz:later', name: 'later', nodeType: 'note', content: 'SYNTHETIC-LATER-CONTENT' } });
-  await memoryMutations.encryptMemory(null, { memoryRef: root.memoryId, dataKey: key.raw.toString('base64') }, ctx);
+  await encryptWithSecret(null, { memoryRef: root.memoryId, dataKey: key.raw.toString('base64') }, ctx);
   const state = (await db.chatRootEngineState.findUniqueOrThrow({ where: { chatRootNodeId: root.id } })).state;
   const after = await db.node.findUniqueOrThrow({ where: { id: later.id } });
   expect(state).toHaveProperty('__enc');

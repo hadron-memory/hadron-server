@@ -30,12 +30,10 @@ beforeEach(async () => {
   await db.agentOrgGrant.create({ data: { orgId: carrier.id, agentId, activatedAt: new Date() } });
   await db.appMember.create({ data: { appId, userId: consumerId, role: 'member' } });
   for (const row of [
-    { loc: 'conversations', data: {} },
     { loc: 'conversations:flow', data: { stageOrder: ['step'], isSetup: false } },
     { loc: 'conversations:flow:step', data: { promptRef: 'prompts:step' } },
     { loc: 'conversations:next', data: { stageOrder: ['next'] } },
     { loc: 'conversations:next:next', data: { promptRef: 'prompts:step' } },
-    { loc: 'prompts', data: {} },
     { loc: 'prompts:step', content: 'PROTECTED MANAGER STAGE', data: {} },
     { loc: 'config', data: { privateConfig: 'PROTECTED CONFIG' } },
   ]) await db.node.create({ data: { memoryId: systemId, name: row.loc, nodeType: 'system', ...row } });
@@ -47,7 +45,7 @@ beforeEach(async () => {
 
 type Home = { chatId: string; memoryId: string; rootId: string };
 async function start(userId: string): Promise<Home> {
-  const out = await M.startChat({}, { agentRef: agentId, scope: 'private', conversationName: 'flow' }, context(userId));
+  const out = await M.startChat({}, { agentRef: agentId, scope: 'private', conversationName: 'flow', appRef: appId }, context(userId));
   const root = await chatNodeByLocOrThrow(db, out.chatId);
   return { chatId: out.chatId, memoryId: root.memoryId, rootId: root.id };
 }
@@ -61,10 +59,26 @@ async function legacy(reach: 'PUBLIC' | 'READER'): Promise<Home> {
   }
   return home;
 }
-async function demoted(): Promise<Home> {
-  // The manager has no App carrier; this must be a lawful standalone start, not a detached licensed start.
+/**
+ * #5394: before, an Agent manager with no App carrier started a lawful App-less home directly (the manager route). That
+ * route is retired: a start that names no App is refused CHAT_APP_NOT_IDENTIFIED, and one that names an App the manager
+ * does not take part in is the unknown-Agent refusal. A retained App-less manager home (written before #5394) is modelled
+ * by starting in the App and detaching the home, leaving the manager with no App membership, as before.
+ */
+async function retainedManagerHome(): Promise<Home> {
+  expect(await errorOf(() => M.startChat({}, { agentRef: agentId, scope: 'private', conversationName: 'flow' }, context(managerId))))
+    .toMatchObject({ code: 'CHAT_APP_NOT_IDENTIFIED' });
+  expect(await errorOf(() => start(managerId)), 'no App participation: the unknown-Agent refusal').toMatchObject({ code: 'AGENT_NOT_FOUND' });
+  await db.appMember.create({ data: { appId, userId: managerId, role: 'member' } });
   const home = await start(managerId);
+  await db.memory.update({ where: { id: home.memoryId }, data: { appId: null } });
+  await db.appMember.delete({ where: { appId_userId: { appId, userId: managerId } } });
   expect((await db.memory.findUniqueOrThrow({ where: { id: home.memoryId } })).appId).toBeNull();
+  return home;
+}
+async function demoted(): Promise<Home> {
+  // The manager has no App carrier; a retained App-less home (#5394: see retainedManagerHome).
+  const home = await retainedManagerHome();
   await db.orgMember.update({ where: { organizationId_userId: { organizationId: agentOrgId, userId: managerId } }, data: { role: 'READER' } });
   return home;
 }
@@ -116,7 +130,8 @@ describe('#4112 retained App-less turns require Agent management', () => {
   }
 
   it('a current Agent manager still sends and fires the rule in an App-less home (observer positive control)', async () => {
-    const home = await start(managerId);
+    // #5394: the home is a retained App-less one; a cold App-less start by the manager is refused (retainedManagerHome).
+    const home = await retainedManagerHome();
     expect((await db.memory.findUniqueOrThrow({ where: { id: home.memoryId } })).appId).toBeNull();
     const beforeSend = await messages(home);
     const sent = await observe(managerId, ctx => send(ctx, home));
@@ -169,12 +184,10 @@ describe('#4120 admission pins', () => {
       const agent = await db.agent.create({ data: { name: 'Owned', urn: 'managers4120.owned', ownerUserId: ownerId, systemMemoryId: sys.id, visibility: 'PUBLIC' } });
       userAgentId = agent.id; userSystemId = sys.id;
       for (const row of [
-        { loc: 'conversations', data: {} },
         { loc: 'conversations:flow', data: { stageOrder: ['step'], isSetup: false } },
         { loc: 'conversations:flow:step', data: { promptRef: 'prompts:step' } },
         { loc: 'conversations:next', data: { stageOrder: ['next'] } },
         { loc: 'conversations:next:next', data: { promptRef: 'prompts:step' } },
-        { loc: 'prompts', data: {} },
         { loc: 'prompts:step', content: 'OWNED STAGE', data: {} },
       ]) await db.node.create({ data: { memoryId: sys.id, name: row.loc, nodeType: 'system', ...row } });
       const source = await db.node.findUniqueOrThrow({ where: { loc_memoryId: { memoryId: sys.id, loc: 'conversations:flow:step' } } });

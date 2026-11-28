@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { GraphQLError } from 'graphql';
-import { BOOT_PROMPT_REFUSAL_CODES, bootPromptRefusal } from './refusal.js';
+import { BOOT_PROMPT_REFUSAL_CODES, bootPromptRefusal, bootPromptRefusalCode } from './refusal.js';
 
 describe('bootPromptRefusal', () => {
   it('has exactly the one agreed code list (#2045 / #2047), NOT_SET canonical', () => {
@@ -40,5 +40,18 @@ describe('bootPromptRefusal', () => {
       (code) => bootPromptRefusal(code, { surface: 'bind', agentName: 'A' }).message,
     );
     expect(new Set(messages).size).toBe(BOOT_PROMPT_REFUSAL_CODES.length);
+  });
+});
+
+describe('bootPromptRefusalCode surface scoping (#3920)', () => {
+  const run = bootPromptRefusal('BOOT_PROMPT_NOT_SET', { surface: 'run', agentName: 'a' });
+  const bind = bootPromptRefusal('BOOT_PROMPT_NOT_SET', { surface: 'bind', agentName: 'a' });
+  it('without a surface any boot-prompt refusal matches; with one only that surface does', () => {
+    expect(bootPromptRefusalCode(run)).toBe('BOOT_PROMPT_NOT_SET');
+    expect(bootPromptRefusalCode(bind)).toBe('BOOT_PROMPT_NOT_SET');
+    expect(bootPromptRefusalCode(run, 'run')).toBe('BOOT_PROMPT_NOT_SET');
+    expect(bootPromptRefusalCode(bind, 'run')).toBeNull();
+    expect(bootPromptRefusalCode(new Error('x'), 'run')).toBeNull();
+    expect(bootPromptRefusalCode(new GraphQLError('x', { extensions: { code: 'OTHER', surface: 'run' } }), 'run')).toBeNull();
   });
 });

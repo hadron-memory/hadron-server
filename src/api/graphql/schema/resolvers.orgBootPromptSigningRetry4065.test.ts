@@ -74,8 +74,8 @@ beforeEach(async () => {
   ] });
 });
 
-const preview = (ctx: Context) => Q.orgBootPromptSigningPreview!({}, { org: orgId }, ctx) as Promise<any>;
-const status = (ctx: Context) => Q.orgBootPromptSigning!({}, { org: orgId }, ctx) as Promise<any>;
+const preview = (ctx: Context) => Q.orgBootPromptSigningPreview!({}, { orgRef: orgId }, ctx) as Promise<any>;
+const status = (ctx: Context) => Q.orgBootPromptSigning!({}, { orgRef: orgId }, ctx) as Promise<any>;
 
 describe('#4065 signing reads retry a serialization abort', () => {
   it.each([['preview', preview], ['status', status]] as const)('%s completes after transient 40001 aborts', async (_n, read) => {
@@ -121,7 +121,7 @@ describe('#4065 signing reads retry a serialization abort', () => {
 
   it('leaves the switch off when turning it on keeps aborting', async () => {
     const f = flaky(Infinity);
-    await expect(M.setOrgBootPromptSigning!({}, { org: orgId, required: true }, f.ctx())).rejects.toBeDefined();
+    await expect(M.setOrgBootPromptSigning!({}, { orgRef: orgId, required: true }, f.ctx())).rejects.toBeDefined();
     expect((await db.organization.findUniqueOrThrow({ where: { id: orgId }, select: { bootPromptSigningRequired: true } })).bootPromptSigningRequired).toBe(false);
   });
 });

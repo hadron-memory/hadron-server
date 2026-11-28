@@ -85,11 +85,13 @@ describe('setAiModelPrice', () => {
   });
 
   it('rejects a duplicate (provider, model, effectiveAt) as BAD_USER_INPUT', async () => {
-    const effectiveAt = '2026-01-01T00:00:00.000Z';
+    // #5021: a fixed past date is now refused for its own reason; a day ahead reaches the duplicate check.
+    const effectiveAt = new Date(Date.now() + 86_400_000).toISOString();
     const input = { ...priceInput, effectiveAt };
     expect((await gql(SET_PRICE, platformCtx(), { input })).errors).toBeUndefined();
     const dup = await gql(SET_PRICE, platformCtx(), { input });
     expect(dup.errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
+    expect(dup.errors?.[0]?.message).toMatch(/already exists/);
   });
 
   it('refuses a price for openai-compatible, whose cost depends on the host serving it (#1389 review)', async () => {
@@ -144,7 +146,14 @@ describe('aiModelPrices read', () => {
 describe('grantCredits', () => {
   it('platform admin mints a grant', async () => {
     const res = await gql(GRANT, platformCtx(), {
-      input: { orgRef: orgId, amountMicroCents: '500000', note: 'pilot goodwill' },
+      // #5007: a grant names its source (hrn:node:hadronmemory.com:specs:cor:dmo:170:03).
+      input: {
+        orgRef: orgId,
+        amountMicroCents: '500000',
+        sourceType: 'goodwill',
+        sourceId: 'pilot-1',
+        note: 'pilot goodwill',
+      },
     });
     expect(res.errors).toBeUndefined();
     const row = (res.data as Record<string, Record<string, string>>).grantCredits;
@@ -161,7 +170,8 @@ describe('grantCredits', () => {
 
   it('rejects a zero amount', async () => {
     const res = await gql(GRANT, platformCtx(), {
-      input: { orgRef: orgId, amountMicroCents: '0' },
+      // #5007: with a valid source, so the zero check is what refuses.
+      input: { orgRef: orgId, amountMicroCents: '0', sourceType: 'goodwill', sourceId: 'zero' },
     });
     expect(res.errors?.[0]?.extensions?.code).toBe('BAD_USER_INPUT');
   });
@@ -202,13 +212,22 @@ describe('grantCredits', () => {
       input: { ...input, amountMicroCents: '999' },
     });
     expect(conflict.errors?.[0]?.extensions?.code).toBe('IDEMPOTENCY_CONFLICT');
+    // #5007 ruling 4: one fixed sentence, nothing about the stored entry.
+    expect(conflict.errors?.[0]?.message).toBe(
+      'This source is already recorded on the ledger with a different account, amount or kind.',
+    );
     expect(await db.creditLedgerEntry.count()).toBe(1);
   });
 });
 
 describe('ledger reads', () => {
   beforeEach(async () => {
-    await gql(GRANT, platformCtx(), { input: { orgRef: orgId, amountMicroCents: '500000' } });
+    // #5007: a grant names its source; checked, so the reads below never run
+    // against a ledger the grant silently failed to write.
+    const grant = await gql(GRANT, platformCtx(), {
+      input: { orgRef: orgId, amountMicroCents: '500000', sourceType: 'goodwill', sourceId: 'reads-1' },
+    });
+    expect(grant.errors).toBeUndefined();
     await db.creditLedgerEntry.create({
       data: {
         id: generateId(),

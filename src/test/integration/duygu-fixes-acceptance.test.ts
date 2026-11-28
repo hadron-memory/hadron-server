@@ -59,14 +59,14 @@ let seq = 0;
 /** A fresh loc per call, so cases never collide in the shared memory. */
 const loc = (prefix: string) => `${prefix}:${Date.now().toString(36)}${(seq++).toString(36)}`;
 
-async function specNode(k: string, l: string, edges?: { targetId: string; name: string }[]) {
-  const r = await gql(k, CREATE_SPEC, { i: { memoryId, loc: l, name: l, role: 'spec', data: { version: '0.0.1' }, ...(edges ? { edges } : {}) } });
+async function specNode(k: string, l: string, edges?: { targetRef: string; name: string }[]) {
+  const r = await gql(k, CREATE_SPEC, { i: { memoryRef: memoryId, loc: l, name: l, role: 'spec', data: { version: '0.0.1' }, ...(edges ? { edges } : {}) } });
   expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
   return r.data!.createSpecNode.id as string;
 }
 
 async function plainNode(k: string, l: string) {
-  const r = await gql(k, CREATE_NODE, { i: { memoryId, loc: l, name: l } });
+  const r = await gql(k, CREATE_NODE, { i: { memoryRef: memoryId, loc: l, name: l } });
   expect(r.errors, JSON.stringify(r.errors)).toBeUndefined();
   return r.data!.createNode.id as string;
 }
@@ -148,7 +148,7 @@ describe('#1300/#1307 — edges for a global-READER org OWNER, over HTTP', () =>
     const k = key.ownerAccount!;
     const parent = await specNode(k, loc('app:onb'));
     const sibling = await specNode(k, loc('app:onb'));
-    const orphan = await specNode(k, loc('app:onb'), [{ targetId: sibling, name: 'see-also' }]);
+    const orphan = await specNode(k, loc('app:onb'), [{ targetRef: sibling, name: 'see-also' }]);
 
     const r = await gql(k, CREATE_EDGE, { s: orphan, t: parent, n: 'part-of' });
     expect(r.errors).toBeUndefined();
@@ -163,7 +163,7 @@ describe('#1300/#1307 — edges for a global-READER org OWNER, over HTTP', () =>
   it('createSpecNode with inline edges is ATOMIC: a bad target leaves no node behind', async () => {
     const l = loc('app:onb');
     const r = await gql(key.ownerAccount!, CREATE_SPEC, {
-      i: { memoryId, loc: l, name: 'rule', role: 'spec', edges: [{ targetId: 'app:onb:does-not-exist', name: 'part-of' }] },
+      i: { memoryRef: memoryId, loc: l, name: 'rule', role: 'spec', edges: [{ targetRef: 'app:onb:does-not-exist', name: 'part-of' }] },
     });
     expect(r.errors?.[0]?.message).toMatch(/Edge target not found/);
     // No row at all, tombstones included: a create-then-soft-delete rollback
@@ -323,7 +323,7 @@ describe('#1301/#1305 — a governed refusal names a route, and that route works
     expect((await db.node.findUniqueOrThrow({ where: { id: n } })).data).toEqual({ version: '0.0.1' });
 
     // What the refusal says to do: a REPLACE carrying the keys already there.
-    const r = await gql(k, UPDATE_SPEC, { i: { id: n, data: { version: '0.0.1', provenance: 'x' } } });
+    const r = await gql(k, UPDATE_SPEC, { i: { ref: n, data: { version: '0.0.1', provenance: 'x' } } });
     expect(r.errors).toBeUndefined();
     expect(r.data!.updateSpecNode).toEqual({ id: n, data: { version: '0.0.1', provenance: 'x' } });
   });

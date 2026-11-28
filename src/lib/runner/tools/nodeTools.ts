@@ -18,7 +18,9 @@ import { runAuthoring, runReadsNode } from '../runAuthoring.js';
 import type { AuthContext } from '../../../middleware/auth.js';
 import { splitNodeUrn, normalizeUrnForLookup, legacyMemoryUrnToCanonical } from '../../urn.js';
 import { resolveFlowMemory, loadFlowNode } from '../loadFlowNode.js';
+import { createRefusalToolError } from '../../ownerLimits/errors.js';
 import type { RunToolDef, RunToolContext } from './types.js';
+import { requireOwnerRefOf } from '../../owner.js';
 
 /** Shared arg schema for the write tools (full NodeInput parity, minus edges — v1). */
 const WRITE_ARG_PROPERTIES = {
@@ -45,7 +47,7 @@ const WRITE_ARG_PROPERTIES = {
   },
   tags: { type: 'array', items: { type: 'string' } },
   description: { type: 'string', description: 'Short description.' },
-  abstract: { type: 'string', description: 'Paragraph-length summary (max 2000 chars).' },
+  abstract: { type: 'string', description: 'Paragraph-length summary (max 2000 chars); for the long form use `content`.' },
   properties: { type: 'object', description: 'Structured key-value properties.' },
   isRunnable: { type: 'boolean', description: 'Whether the node can be run as a task.' },
 } as const;
@@ -91,7 +93,7 @@ export const hadronReadNode: RunToolDef = {
     const { memoryUrn, loc } = splitNodeUrn(urn);
     let memory: Awaited<ReturnType<typeof resolveFlowMemory>>;
     let viaGrant = false;
-    try { memory = await resolveFlowMemory(ctx.db, memoryUrn, ctx.run.organizationId, urn); }
+    try { memory = await resolveFlowMemory(ctx.db, memoryUrn, requireOwnerRefOf(ctx.run), urn); }
     catch (err) {
       // #2883: a grant may name a memory outside the run's org (an Agent of another org, installed in this App). Only a
       // live grant admits it; every other shape rethrows the org-scoped answer unchanged, so a missing memory and an
@@ -133,7 +135,8 @@ export const hadronCreateNode: RunToolDef = {
   description:
     'Create a new Hadron node at the given fully-qualified URN (hrn:node:<root>:<memory>:<loc>). ' +
     'Fails if a node already exists there — use hadron_update_node to change one. ' +
-    'Set seq when appending ordered items of an ordinary node type. The default nodeType is record, and a record (or chat-message) outside a Channel refuses an explicit seq (SEQ_PROTECTED): seq is protected conversation order.',
+    'Set seq when appending ordered items of an ordinary node type. The default nodeType is record, and a record (or chat-message) outside a Channel refuses an explicit seq (SEQ_PROTECTED): seq is protected conversation order. ' +
+    'When the memory\'s owner has reached its node limit, nothing is written and the result is created: false with an error whose code is OWNER_LIMIT_REACHED.',
   inputSchema: {
     type: 'object',
     properties: WRITE_ARG_PROPERTIES,
@@ -143,7 +146,7 @@ export const hadronCreateNode: RunToolDef = {
   execute: async (ctx, args) => {
     const urn = String(args.urn ?? '');
     const { memoryUrn, loc } = splitNodeUrn(urn);
-    const memory = await resolveFlowMemory(ctx.db, memoryUrn, ctx.run.organizationId, urn);
+    const memory = await resolveFlowMemory(ctx.db, memoryUrn, requireOwnerRefOf(ctx.run), urn);
     // No pre-existence probe (PR-545 review, Copilot): writeNodeCore's own
     // create gate rejects live-loc collisions (NodeLocConflictError) and
     // resurrects soft-deleted ones — duplicating the check here would run
@@ -159,10 +162,13 @@ export const hadronCreateNode: RunToolDef = {
         } as never,
         ctx.principal,
         'create',
-        { authoring: runToolAuthoring(ctx, args) },
+        { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: runToolAuthoring(ctx, args) },
       );
       return { created: true, urn, id: written.id };
     } catch (err) {
+      // #5015: the owner's `nodes` limit is the model's to react to, not the end of the run.
+      const refused = createRefusalToolError(err);
+      if (refused) return { created: false, urn, ...refused };
       const code = (err as { extensions?: { code?: string } }).extensions?.code;
       if (code === 'NodeLocConflictError') {
         throw new Error(`Node already exists at "${urn}" — use hadron_update_node.`);
@@ -185,7 +191,7 @@ export const hadronUpdateNode: RunToolDef = {
   cost: 1,
   execute: async (ctx, args) => {
     const urn = String(args.urn ?? '');
-    const { memory, loc, node } = await loadFlowNode(ctx.db, urn, ctx.run.organizationId, principalAuth(ctx));
+    const { memory, loc, node } = await loadFlowNode(ctx.db, urn, requireOwnerRefOf(ctx.run), principalAuth(ctx));
     const fields = pickWriteFields(args);
     if (fields.data !== undefined) {
       // The model controls this input — validate before spreading (PR-545
@@ -201,18 +207,25 @@ export const hadronUpdateNode: RunToolDef = {
           : {};
       fields.data = { ...existing, ...(fields.data as Record<string, unknown>) };
     }
-    const written = await writeNodeCore(
-      {
-        memoryId: memory.id,
-        loc,
-        ...fields,
-        reason: `run tool hadron_update_node (run ${ctx.run.id})`,
-      } as never,
-      ctx.principal,
-      'update',
-      { authoring: runToolAuthoring(ctx, args), targetNodeId: node.id },
-    );
-    return { updated: true, urn, id: written.id };
+    try {
+      const written = await writeNodeCore(
+        {
+          memoryId: memory.id,
+          loc,
+          ...fields,
+          reason: `run tool hadron_update_node (run ${ctx.run.id})`,
+        } as never,
+        ctx.principal,
+        'update',
+        { ownerLimit: 'count-only', sizeCeiling: 'check', authoring: runToolAuthoring(ctx, args), targetNodeId: node.id },
+      );
+      return { updated: true, urn, id: written.id };
+    } catch (err) {
+      // #5019: a node over the deployment's size ceiling is the model's to shorten, not the end of the run.
+      const refused = createRefusalToolError(err);
+      if (refused) return { updated: false, urn, ...refused };
+      throw err;
+    }
   },
 };
 

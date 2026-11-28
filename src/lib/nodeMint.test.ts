@@ -4,7 +4,7 @@ import { GraphQLError } from 'graphql';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { db } from '../integrations/db/client.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, seedRootNode } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from '../mcp/server.js';
@@ -52,6 +52,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: reader.id, role: 'READER' },
   ] });
   memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'specs' }, as());
+  await seedRootNode(db, memory.id, 'specs');
 });
 
 describe('mintMemoryNodes (#1591)', () => {
@@ -96,7 +97,7 @@ describe('mintMemoryNodes (#1591)', () => {
   it('refuses an approval that an edit superseded before the mint', async () => {
     const n = await spec('pas:010');
     await approveAll();
-    await resolvers.Mutation.updateSpecNode(null, { input: { memoryId: memory.id, loc: 'pas:010', content: 'Changed.' } } as never, as());
+    await resolvers.Mutation.updateSpecNode(null, { input: { memoryRef: memory.id, loc: 'pas:010', content: 'Changed.' } } as never, as());
     const dry = await mint(true);
     expect(dry.blockers).toEqual([expect.objectContaining({ kind: 'NOT_APPROVED', loc: 'pas:010' })]);
     expect((await rowOf(n.id)).mintedAt).toBeNull();
@@ -154,7 +155,7 @@ describe('approveMemoryNodes skips unchanged minted nodes (#1591, #1612)', () =>
 
 describe('re-mint scope (#1612, cor:dmo:120:06)', () => {
   const edit = (loc: string, content: string) =>
-    resolvers.Mutation.updateSpecNode(null, { input: { memoryId: memory.id, loc, content } } as never, as());
+    resolvers.Mutation.updateSpecNode(null, { input: { memoryRef: memory.id, loc, content } } as never, as());
 
   it('puts a minted node edited since into scope: approve, then re-mint keeps the first mint and advances revision and hash', async () => {
     const n = await spec('pas:010');
@@ -235,7 +236,7 @@ describe('mint status reads (#1591)', () => {
     await spec('pas:020', { properties: { k: 'v' } });
     const locs = async (minted: boolean, viaSql: boolean) => {
       const res = await resolvers.Query.findNodes(null, {
-        filter: { memoryIds: [memory.id], minted, ...(viaSql ? { where: { path: ['k'], eq: 'v' } } : {}) },
+        filter: { memoryRefs: [memory.id], minted, ...(viaSql ? { where: { path: ['k'], eq: 'v' } } : {}) },
         ...(viaSql ? { limit: 1 } : {}),
       }, as());
       return res.hits.map((h: { node: { loc: string } }) => h.node.loc).filter((l: string) => l !== 'specs').sort();
@@ -271,7 +272,7 @@ describe('minted-spec permanence is off (#1591 ruling)', () => {
     const n = await spec('pas:010');
     await approveAll();
     await mint();
-    expect((await db.memory.findUniqueOrThrow({ where: { id: memory.id } })).corpusMintedAt).not.toBeNull();
+    expect(await db.node.count({ where: { memoryId: memory.id, mintedAt: { not: null } } })).toBeGreaterThan(0);
     // Permanence is off, but the generic delete still follows the governed-node
     // rule: the spec role is cleared first (the kind's update door), then the
     // node deletes as an ordinary one.
@@ -294,34 +295,44 @@ describe('the #1591 backfill migration', () => {
   };
 
   it('mints a never-draft memory at creation, a stamped corpus at its mint, and leaves an unminted draft alone', async () => {
-    const created = new Date('2026-01-01T00:00:00.000Z');
-    const stampedAt = new Date('2026-06-01T00:00:00.000Z');
-    const plain = await spec('pas:010', { createdAt: created });
-    const stamped = await db.memory.create({ data: {
-      id: generateId(), organizationId: org.id, urn: `${org.urn}:stamped`, name: 'stamped', class: 'knowledge', visibility: 'ORGANIZATION',
-      corpusMintedAt: stampedAt, corpusMintedBy: admin.id,
-    } });
-    const early = await db.node.create({ data: { id: generateId(), memoryId: stamped.id, loc: 'a', name: 'a', createdAt: created } });
-    const late = await db.node.create({ data: { id: generateId(), memoryId: stamped.id, loc: 'b', name: 'b', createdAt: new Date('2026-07-01T00:00:00.000Z') } });
-    const byClient = await db.memory.create({ data: {
-      id: generateId(), organizationId: org.id, urn: `${org.urn}:by-client`, name: 'by-client', class: 'knowledge', visibility: 'ORGANIZATION',
-      corpusMintedAt: stampedAt, corpusMintedBy: 'github:someone',
-    } });
-    const clientNode = await db.node.create({ data: { id: generateId(), memoryId: byClient.id, loc: 'a', name: 'a' } });
-    const draft = await db.memory.create({ data: {
-      id: generateId(), organizationId: org.id, urn: `${org.urn}:draft`, name: 'draft', class: 'knowledge', visibility: 'ORGANIZATION', corpusDraft: true,
-    } });
-    const drafted = await db.node.create({ data: { id: generateId(), memoryId: draft.id, loc: 'a', name: 'a' } });
+    // #5063 PR 2 dropped the three legacy columns this migration reads. Rebuild that historical shape on
+    // this worker's own database for the test (the migration's statements are unqualified and read
+    // `memories`), set the stamps by raw SQL, and drop the columns again afterwards.
+    await db.$executeRawUnsafe(`ALTER TABLE memories ADD COLUMN corpus_draft BOOLEAN NOT NULL DEFAULT false,
+      ADD COLUMN corpus_minted_at TIMESTAMP(3), ADD COLUMN corpus_minted_by TEXT`);
+    try {
+      const created = new Date('2026-01-01T00:00:00.000Z');
+      const stampedAt = new Date('2026-06-01T00:00:00.000Z');
+      const plain = await spec('pas:010', { createdAt: created });
+      const stamped = await db.memory.create({ data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:stamped`, name: 'stamped', class: 'knowledge', visibility: 'ORGANIZATION',
+      } });
+      await db.$executeRaw`UPDATE memories SET corpus_minted_at = '2026-06-01 00:00:00', corpus_minted_by = ${admin.id} WHERE id = ${stamped.id}`;
+      const early = await db.node.create({ data: { id: generateId(), memoryId: stamped.id, loc: 'a', name: 'a', createdAt: created } });
+      const late = await db.node.create({ data: { id: generateId(), memoryId: stamped.id, loc: 'b', name: 'b', createdAt: new Date('2026-07-01T00:00:00.000Z') } });
+      const byClient = await db.memory.create({ data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:by-client`, name: 'by-client', class: 'knowledge', visibility: 'ORGANIZATION',
+      } });
+      await db.$executeRaw`UPDATE memories SET corpus_minted_at = '2026-06-01 00:00:00', corpus_minted_by = 'github:someone' WHERE id = ${byClient.id}`;
+      const clientNode = await db.node.create({ data: { id: generateId(), memoryId: byClient.id, loc: 'a', name: 'a' } });
+      const draft = await db.memory.create({ data: {
+        id: generateId(), organizationId: org.id, urn: `${org.urn}:draft`, name: 'draft', class: 'knowledge', visibility: 'ORGANIZATION',
+      } });
+      await db.$executeRaw`UPDATE memories SET corpus_draft = true WHERE id = ${draft.id}`;
+      const drafted = await db.node.create({ data: { id: generateId(), memoryId: draft.id, loc: 'a', name: 'a' } });
 
-    await backfill();
+      await backfill();
 
-    expect(await rowOf(plain.id)).toMatchObject({ mintedAt: created, mintedByInfo: 'backfill', mintedBy: null, mintedRevNo: null, mintedHash: null });
-    expect(await rowOf(early.id)).toMatchObject({ mintedAt: stampedAt, mintedBy: admin.id, mintedByInfo: null });
-    // Added after the corpus was minted: permanent from its creation.
-    expect((await rowOf(late.id)).mintedAt).toEqual(new Date('2026-07-01T00:00:00.000Z'));
-    expect(await rowOf(clientNode.id)).toMatchObject({ mintedBy: null, mintedByInfo: 'github:someone' });
-    expect((await rowOf(drafted.id)).mintedAt).toBeNull();
-    // Status reads the backfilled record as minted, with no revision.
-    expect(await mintStatusOf(plain.id)).toMatchObject({ minted: true, revision: null, hash: null, mintedByInfo: 'backfill' });
+      expect(await rowOf(plain.id)).toMatchObject({ mintedAt: created, mintedByInfo: 'backfill', mintedBy: null, mintedRevNo: null, mintedHash: null });
+      expect(await rowOf(early.id)).toMatchObject({ mintedAt: stampedAt, mintedBy: admin.id, mintedByInfo: null });
+      // Added after the corpus was minted: permanent from its creation.
+      expect((await rowOf(late.id)).mintedAt).toEqual(new Date('2026-07-01T00:00:00.000Z'));
+      expect(await rowOf(clientNode.id)).toMatchObject({ mintedBy: null, mintedByInfo: 'github:someone' });
+      expect((await rowOf(drafted.id)).mintedAt).toBeNull();
+      // Status reads the backfilled record as minted, with no revision.
+      expect(await mintStatusOf(plain.id)).toMatchObject({ minted: true, revision: null, hash: null, mintedByInfo: 'backfill' });
+    } finally {
+      await db.$executeRawUnsafe('ALTER TABLE memories DROP COLUMN corpus_draft, DROP COLUMN corpus_minted_at, DROP COLUMN corpus_minted_by');
+    }
   });
 });

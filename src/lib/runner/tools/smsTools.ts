@@ -36,9 +36,12 @@ import {
   consumeQuota,
   consumeActionTicket,
   defaultQuotaLimit,
+  type QuotaScopeKind,
 } from '../../../jobs/appRuns.js';
 import { isSmsConfigured, sendSms } from '../../smsClient.js';
 import type { RunToolDef } from './types.js';
+import { requireOwnerRefOf } from '../../owner.js';
+import { requireOrgTenantForTool } from './orgOnly.js';
 import type { PrismaClient } from '../../../generated/prisma/index.js';
 
 /** E.164: +, leading non-zero digit, 15 digits max. */
@@ -59,7 +62,7 @@ export function maskPhoneNumber(to: string): string {
 }
 
 /** Undo one `sms.send` consumption (org-denied / no-ticket compensation). */
-async function refundSmsQuota(db: PrismaClient, scopeKind: 'app' | 'org', scopeId: string): Promise<void> {
+async function refundSmsQuota(db: PrismaClient, scopeKind: QuotaScopeKind, scopeId: string): Promise<void> {
   await db.quotaCounter.updateMany({
     where: { scopeKind, scopeId, action: 'sms.send', window: 'day', used: { gt: 0 } },
     data: { used: { decrement: 1 } },
@@ -90,6 +93,8 @@ export const hadronSendSms: RunToolDef = {
   },
   cost: 1,
   execute: async (ctx, args) => {
+    // #5077: organization-only; a person's run is refused before any query or counter.
+    const runOrgId = requireOrgTenantForTool(requireOwnerRefOf(ctx.run), 'hadron_send_sms');
     const to = String(args.to ?? '').trim();
     const body = typeof args.body === 'string' ? args.body : '';
     if (!E164_RE.test(to)) {
@@ -116,7 +121,7 @@ export const hadronSendSms: RunToolDef = {
       ctx.log(`hadron_send_sms: skipped — app SMS quota exhausted (to ${masked})`);
       return { isError: true, error: 'Daily SMS quota for this App is exhausted. Do not retry today.' };
     }
-    if (!(await consumeQuota(db, 'org', run.organizationId, 'sms.send', defaultQuotaLimit('org', 'sms.send')))) {
+    if (!(await consumeQuota(db, 'org', runOrgId, 'sms.send', defaultQuotaLimit('org', 'sms.send')))) {
       await refundSmsQuota(db, 'app', run.appId);
       ctx.log(`hadron_send_sms: skipped — organization SMS quota exhausted (to ${masked})`);
       return { isError: true, error: 'Daily SMS quota for this organization is exhausted. Do not retry today.' };
@@ -125,9 +130,9 @@ export const hadronSendSms: RunToolDef = {
     // Tier 2 — the outbound-communication ticket ledger (cor:acl:050:04:
     // an SMS irreversibly leaves the platform; no ticket ⇒ no send). The
     // counters above are refunded — no attempt happened.
-    if (!(await consumeActionTicket(db, run.organizationId, run.appId, 'comm.outbound', run.id))) {
+    if (!(await consumeActionTicket(db, { organizationId: runOrgId }, run.appId, 'comm.outbound', run.id))) {
       await refundSmsQuota(db, 'app', run.appId);
-      await refundSmsQuota(db, 'org', run.organizationId);
+      await refundSmsQuota(db, 'org', runOrgId);
       ctx.log(`hadron_send_sms: skipped — no comm.outbound ticket (to ${masked})`);
       return {
         isError: true,

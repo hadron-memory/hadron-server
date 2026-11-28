@@ -25,6 +25,7 @@ vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({
 let admin: { id: string };
 let agentId: string;
 let systemMemoryId: string;
+let appId: string;
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -38,10 +39,8 @@ beforeEach(async () => {
   agentId = created.id;
   systemMemoryId = created.systemMemoryId!;
   for (const n of [
-    { loc: 'conversations' },
     { loc: 'conversations:hello', data: { stageOrder: ['greet'], isSetup: false } },
     { loc: 'conversations:hello:greet', data: { promptRef: 'prompts:hello:greet' } },
-    { loc: 'prompts' },
     { loc: 'prompts:hello' },
     { loc: 'prompts:hello:greet', content: 'Hello world!' },
   ] as Array<{ loc: string; data?: unknown; content?: string }>) {
@@ -53,6 +52,8 @@ beforeEach(async () => {
       },
     });
   }
+  // #5394: a start runs under the App it names, and reuses only a home of that App.
+  appId = (await db.app.create({ data: { name: 'app-2476', urn: 'org-2476:app', organizationId: org.id, appAgents: { create: { agentId } } } })).id;
   // #2712: chats are served the Agent's boot prompt; an Agent without one is refused.
   await serveEveryAgent(db);
 });
@@ -96,7 +97,7 @@ async function seedParent(loc: string) {
     // Seed the parent in the actual start target, not in the Agent's definition.
     const home = await db.memory.create({ data: {
       name: 'Parent fixture home', urn: `parent2476-${generateId()}:home`, class: 'personal',
-      userId: admin.id, ownerUserId: admin.id, userMemoryOfAgentId: agentId, createdBy: admin.id,
+      userId: admin.id, ownerUserId: admin.id, userMemoryOfAgentId: agentId, createdBy: admin.id, appId,
     } });
     memoryId = home.id;
   }
@@ -108,14 +109,11 @@ const sites = [
     name: 'startChat (chats parent)',
     parentLoc: 'chats',
     run: (ctxDb: Context['db']) =>
-      resolvers.Mutation.startChat({}, { agentRef: agentId }, { db: ctxDb, roles: ['ADMIN'], userId: admin.id }),
+      resolvers.Mutation.startChat({}, { agentRef: agentId, appRef: appId }, { db: ctxDb, roles: ['ADMIN'], userId: admin.id }),
   },
-  {
-    name: 'createRevision (revisions parent)',
-    parentLoc: 'revisions',
-    run: (ctxDb: Context['db']) =>
-      resolvers.Mutation.createRevision({}, { agentRef: agentId }, { db: ctxDb, roles: ['ADMIN'], userId: admin.id }),
-  },
+  // #3587: the `revisions` parent ensure (createRevision and the restore's auto-save) is now INSERT ... ON CONFLICT DO NOTHING
+  // inside the revision transaction, where a caught unique violation would abort it; resolvers.restoreUnretire3587.test.ts
+  // (P4) pins the concurrent create instead.
 ] as const;
 
 describe('#2476 parent-node ensure: only the (loc, memory_id) race is swallowed', () => {

@@ -2,7 +2,8 @@
  * #1332 — recording a content-validation report (hrn:node:hadronmemory.com:specs:cor:dmo:160:01).
  * Pins follow the issue's acceptance list (1-7, 5a-5e, 6a-6d) and Vera's FIT readings (#80505).
  */
-import { readFileSync } from 'fs';
+import { readdirSync, readFileSync } from 'fs';
+import { inFreshRolledBackSession, shadowTable } from '../../../test/freshSession5089.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PrismaClient } from '../../../generated/prisma/index.js';
 import { GraphQLError } from 'graphql';
@@ -19,6 +20,7 @@ import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import {
   ContentValidationRefusal,
   deriveReporter,
+  judgeValidationTaskSet,
   recordContentValidationReportInTx,
   VALIDATION_TASK_SELECT,
   type ContentValidationReportInput,
@@ -111,7 +113,7 @@ beforeEach(async () => {
     const configId = (await db.memoryConfig.create({ data: { id: generateId(), memoryId: mem } })).id;
     await db.nodeRoleRule.create({ data: { id: generateId(), configId, role: 'guide', validationTaskId: validationTask, validationTaskRequired: true } });
   }
-  nodeId = ((await M.createNode({}, { input: { memoryId, loc: 'doc', name: 'Doc', content: 'body', role: 'guide' } }, person(leo))) as { id: string }).id;
+  nodeId = ((await M.createNode({}, { input: { memoryRef: memoryId, loc: 'doc', name: 'Doc', content: 'body', role: 'guide' } }, person(leo))) as { id: string }).id;
   await stamp(null);
   // A run App whose agent may write both memories; runs act on behalf of leo (#3278).
   appId = (await db.app.create({ data: { id: generateId(), organizationId: orgId, name: 'cv-app', urn: 'cv-org::cv-app' } })).id;
@@ -178,7 +180,7 @@ describe('#1332 who may record (cor:dmo:160:01 table)', () => {
 
   it('(3) a pruned past revision has no recorded stamp: AUTHOR_UNKNOWN, not refused', async () => {
     await stamp('HUMAN');
-    await M.updateNode({}, { input: { memoryId, loc: 'doc', content: 'two' } }, person(leo));
+    await M.updateNode({}, { input: { memoryRef: memoryId, loc: 'doc', content: 'two' } }, person(leo));
     await db.nodeRevision.deleteMany({ where: { nodeId, revNo: 1 } });
     const ok = await report(person(mia), { nodeRevision: 1 });
     expect((ok.report as Record<string, unknown>).authorCheck).toBe('AUTHOR_UNKNOWN');
@@ -186,7 +188,7 @@ describe('#1332 who may record (cor:dmo:160:01 table)', () => {
 
   it('a past revision is judged by its own snapshot stamp, not the current one', async () => {
     await stamp('HUMAN');
-    await M.updateNode({}, { input: { memoryId, loc: 'doc', content: 'two' } }, person(leo));
+    await M.updateNode({}, { input: { memoryRef: memoryId, loc: 'doc', content: 'two' } }, person(leo));
     // Revision 2 is leo's unstamped edit; revision 1 was mia's.
     expect(await refusal(report(person(mia), { nodeRevision: 1 }))).toBe('CONTENT_VALIDATION_REPORTER_IS_AUTHOR');
     const ok = await report(person(mia), { nodeRevision: 2 });
@@ -212,7 +214,7 @@ describe('#1332 who may record (cor:dmo:160:01 table)', () => {
 
 describe('#1332 state and history', () => {
   it('4. a late report for N after the content reached N+1 is stored and leaves N+1 unvalidated', async () => {
-    await M.updateNode({}, { input: { memoryId, loc: 'doc', content: 'two' } }, person(leo));
+    await M.updateNode({}, { input: { memoryRef: memoryId, loc: 'doc', content: 'two' } }, person(leo));
     const late = await report(person(mia), { nodeRevision: 1, outcome: 'PASS' });
     expect(late.state).toBe('STALE');
     expect(await reportCount()).toBe(1);
@@ -223,7 +225,7 @@ describe('#1332 state and history', () => {
   });
 
   it('#3762: an older FAIL is history after the current revision already has PASS', async () => {
-    await M.updateNode({}, { input: { memoryId, loc: 'doc', content: 'two' } }, person(leo));
+    await M.updateNode({}, { input: { memoryRef: memoryId, loc: 'doc', content: 'two' } }, person(leo));
     const pass = await report(person(mia), { nodeRevision: 2, outcome: 'PASS' });
     expect(pass.state).toBe('PASS');
     const late = await report(person(mia), { nodeRevision: 1, outcome: 'FAIL' });
@@ -242,7 +244,7 @@ describe('#1332 state and history', () => {
     expect(pass.state).toBe('PASS');
     const fail = await asRun(await mintRun(validationTask), (c) => report(c, { outcome: 'FAIL' }));
     expect(fail.state).toBe('FAIL');
-    await M.updateNode({}, { input: { memoryId, loc: 'doc', content: 'edited' } }, person(leo));
+    await M.updateNode({}, { input: { memoryRef: memoryId, loc: 'doc', content: 'edited' } }, person(leo));
     const cur = await db.node.findUniqueOrThrow({ where: { id: nodeId }, select: { revSeq: true } });
     const { resolveContentValidation } = await import('./resolvers.types.js');
     expect((await resolveContentValidation({ nodeId, memoryId, revSeq: cur.revSeq }, person(mia))).state).toBe('STALE');
@@ -285,7 +287,7 @@ describe('#1332 refusal order and the report\'s own checks', () => {
 
   it('6d. a task revision older than current and an older node revision are accepted (late)', async () => {
     await db.node.update({ where: { id: validationTask }, data: { revSeq: 3 } });
-    await M.updateNode({}, { input: { memoryId, loc: 'doc', content: 'two' } }, person(leo));
+    await M.updateNode({}, { input: { memoryRef: memoryId, loc: 'doc', content: 'two' } }, person(leo));
     const ok = await report(person(leo), { validationTaskRef: 'hrn:node:cv-org:mem:validate-task', validationTaskRevision: 2, nodeRevision: 1 });
     expect(ok.report).toMatchObject({ nodeRevision: 1, validationTaskRevision: 2 });
   });
@@ -375,7 +377,7 @@ describe('#1332 runId replay (refusal 5)', () => {
 
   it('5c. no cross-node or cross-memory oracle: a runId elsewhere is a fresh insert', async () => {
     await report(person(leo), { runId: 'shared' });
-    const other = ((await M.createNode({}, { input: { memoryId: otherMemoryId, loc: 'doc', name: 'Doc', content: 'b', role: 'guide' } }, person(leo))) as { id: string }).id;
+    const other = ((await M.createNode({}, { input: { memoryRef: otherMemoryId, loc: 'doc', name: 'Doc', content: 'b', role: 'guide' } }, person(leo))) as { id: string }).id;
     const fresh = await report(person(mia), { nodeRef: other, runId: 'shared' });
     expect(fresh.replayed).toBe(false);
     // The node moves from mem to other: the old report stays in mem's snapshot.
@@ -545,7 +547,7 @@ describe('#1332 fix head (LOCAL Bruno P2 on 21c79c2c; QA Charles observation)', 
       return { db: proxy as typeof db, fired: () => fired };
     };
     // The content reached revision 2; a late PASS for revision 1 leaves revision 2 STALE.
-    await M.updateNode({}, { input: { memoryId, loc: 'doc', content: 'two' } }, person(leo));
+    await M.updateNode({}, { input: { memoryRef: memoryId, loc: 'doc', content: 'two' } }, person(leo));
     const moveOut = () => db.node.update({ where: { id: nodeId }, data: { memoryId: hidden, revSeq: 3 } });
     const fresh = racingWith(moveOut);
     const late = await report(person(mia, { db: fresh.db }), { nodeRevision: 1, runId: 'late' });
@@ -676,7 +678,7 @@ describe('#1332 fix head (LOCAL Bruno P2 on 21c79c2c; QA Charles observation)', 
 
   it('§10 P3-3: a runId replays only for the same node revision and the same task', async () => {
     await report(person(leo), { runId: 'r' });
-    await M.updateNode({}, { input: { memoryId, loc: 'doc', content: 'two' } }, person(mia));
+    await M.updateNode({}, { input: { memoryRef: memoryId, loc: 'doc', content: 'two' } }, person(mia));
     expect(await refusal(report(person(leo), { runId: 'r', nodeRevision: 2 }))).toBe('CONTENT_VALIDATION_RUN_ID_CONFLICT');
     // The rule now names another task: the same runId with it conflicts, never replays.
     const next = (await db.node.create({ data: { id: generateId(), memoryId, loc: 'validate-2', name: 'V2', isRunnable: true, content: 'c' } })).id;
@@ -764,10 +766,24 @@ describe('#1332 storage invariants', () => {
     expect(await db.nodeContentValidationReport.findFirstOrThrow({ where: { runId: 'imm' } })).toMatchObject({ reporterUserId: mia });
   });
 
+  it('#5089: a session temp table named user_merges cannot forge the merge proof', async () => {
+    await report(person(leo), { runId: 'shadow' });
+    await expect(inFreshRolledBackSession(async (c) => {
+      await shadowTable(c, 'user_merges');
+      await c.query('INSERT INTO pg_temp.user_merges (source_user_id, target_user_id) VALUES ($1, $2)', [leo, mia]);
+      await c.query(`UPDATE node_content_validation_reports SET reporter_user_id = $1 WHERE run_id = 'shadow'`, [mia]);
+    })).rejects.toThrow(/append-only/);
+    expect(await db.nodeContentValidationReport.findFirstOrThrow({ where: { runId: 'shadow' } })).toMatchObject({ reporterUserId: leo });
+  });
+
   it('the migration carries the shared invariants file verbatim', () => {
     const shared = readFileSync('prisma/content-validation-report-invariants.sql', 'utf8');
-    const migration = readFileSync('prisma/migrations/20261105170000_content_validation_reporter/migration.sql', 'utf8');
-    expect(migration.endsWith(shared)).toBe(true);
+    // #5089: the newest migration to carry the file (it ends with it) is the carrier; the original one carried the older text.
+    const first = shared.split('\n')[0]!;
+    const dir = readdirSync('prisma/migrations').sort().reverse()
+      .find((d) => { try { return readFileSync(`prisma/migrations/${d}/migration.sql`, 'utf8').includes(first); } catch { return false; } });
+    expect(dir).toBeTruthy();
+    expect(readFileSync(`prisma/migrations/${dir}/migration.sql`, 'utf8').endsWith(shared)).toBe(true);
     expect(readFileSync('prisma/post-push.sql', 'utf8')).toContain('\\ir content-validation-report-invariants.sql');
   });
 });
@@ -911,8 +927,7 @@ describe('#3567 pins for the surviving #3534 mutants', () => {
   });
 
   it('v5 (cor:dmo:160:01 refusal 3, ruling 0199): a deleted task listed before a hidden live one still answers WRONG_TASK, not TASK_BROKEN', async () => {
-    // The deleted task is created FIRST and already deleted (a later UPDATE writes a new row version after the
-    // hidden task's), so the unordered task read returns it first (asserted below).
+    // The deleted task is created in its final state (deleted), so no UPDATE moves its row version.
     const deletedTask = (await db.node.create({ data: { id: generateId(), memoryId, loc: 'deleted-task', name: 'Gone', isRunnable: true, content: 'x', deletedAt: new Date() } })).id;
     const hidden = await taskInOtherOrg('cv-v5');
     // A runnable guide node is judged under two rule keys: 'guide' and 'task'.
@@ -921,10 +936,23 @@ describe('#3567 pins for the surviving #3534 mutants', () => {
     const config = await db.memoryConfig.findUniqueOrThrow({ where: { memoryId } });
     await db.nodeRoleRule.updateMany({ where: { configId: config.id, role: 'guide' }, data: { validationTaskId: deletedTask } });
     await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role: 'task', validationTaskId: hidden.task, validationTaskRequired: true } });
-    // Precondition, not a rule: the same unordered read the recorder makes returns the deleted task first.
-    // If the planner order ever flips, this fails loudly instead of the pin passing without testing anything.
-    const order = await db.$transaction((tx) => tx.node.findMany({ where: { id: { in: [deletedTask, hidden.task] } }, select: VALIDATION_TASK_SELECT }));
-    expect(order.map((t) => t.id)).toEqual([deletedTask, hidden.task]);
+    // #4943: the recorder's task read is unordered, and the planner returns either order (it flipped on CI twice on
+    // 2026-11-23), so the order this pin needs is DRIVEN, not hoped for. The recorder's own judgement runs over the real
+    // rows with the deleted task listed first (the order v5_break, `break` for `continue`, turns into BROKEN), and then
+    // listed second. Nothing here depends on heap or planner order.
+    const rows = await db.node.findMany({ where: { id: { in: [deletedTask, hidden.task] } }, select: VALIDATION_TASK_SELECT });
+    const deletedRow = rows.find((t) => t.id === deletedTask);
+    const hiddenRow = rows.find((t) => t.id === hidden.task);
+    expect(deletedRow?.deletedAt, 'the deleted task is deleted').toBeInstanceOf(Date);
+    expect(hiddenRow?.deletedAt, 'the hidden task is live').toBeNull();
+    const node = await db.node.findUniqueOrThrow({ where: { id: nodeId }, select: { role: true, isRunnable: true } });
+    const rules = await db.nodeRoleRule.findMany({ where: { configId: config.id } });
+    const canReadTaskMemory = async (m: string) => m !== hidden.mem; // leo is not a member of the hidden task's org
+    for (const listed of [[deletedRow!, hiddenRow!], [hiddenRow!, deletedRow!]]) {
+      const judged = await judgeValidationTaskSet({ role: node.role, runnable: node.isRunnable, rules, loadTasks: async () => listed, canReadTaskMemory });
+      expect(judged.state, `listed ${listed.map((t) => (t.id === deletedTask ? 'deleted' : 'hidden')).join(', ')}`).toBe('UNAVAILABLE');
+    }
+    // End to end, in whatever order the planner returns: WRONG_TASK, and nothing recorded.
     expect(await refusal(report(person(leo), { validationTaskRef: hidden.task }))).toBe('CONTENT_VALIDATION_WRONG_TASK');
     expect(await reportCount()).toBe(0);
   });

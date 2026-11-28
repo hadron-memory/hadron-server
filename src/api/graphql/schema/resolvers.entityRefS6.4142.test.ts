@@ -9,7 +9,9 @@
  *    `id` argument as an unknown argument, and every chunk-F survivor ref is
  *    non-null `ID!`. The wire is where a lagging client actually hits this —
  *    GraphQL refuses the whole operation, unlike MCP's silent argument drop.
- * 2. Behavior (through a real ApolloServer so argument validation runs): the
+ * 2. Behavior (mostly through a real ApolloServer so argument validation runs; the
+ *    encryptMemory, linkMemoryToUser and restoreRevision pins call the resolvers
+ *    directly, so they hold the resolver contract, not argument validation): the
  *    renamed args accept both the PK and the URN on every renamed field.
  * 3. `cor:api:140:03` parity: a gate refusal is byte-identical whether the
  *    caller passed the PK or the URN — the refusal surface must not vary with
@@ -25,7 +27,7 @@
  * 7. `hadron_create_memory` (MCP) still maps its `org` input onto the renamed
  *    `orgRef` and emits its two prose fragments byte-identically.
  *
- * Chunk A (memory reads) waits on #4136 and is deliberately absent.
+ * Chunk A (the memory reads) is pinned in resolvers.entityRefS6A.4142.test.ts.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -42,6 +44,7 @@ import type { AuthContext } from '../../../middleware/auth.js';
 import { formatGraphQLError } from '../formatError.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { encryptWithSecret } from '../../../test/encryptMemoryWithSecret.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -260,7 +263,7 @@ describe('#4142 S6 chunk B — memory writes', () => {
       { o: '' },
     ));
     expect(empty).toEqual({
-      message: 'URN "" is not fully qualified. Expected a org URN with at least 1 hierarchy segment (e.g., "acme.com").',
+      message: 'The ref is not a fully qualified org URN. Expected a org URN with at least 1 hierarchy segment (e.g., "acme.com").',
       code: 'URN_NOT_QUALIFIED',
     });
     const spaces = await refusal(ask(
@@ -364,16 +367,16 @@ describe('#4142 S6 chunk B — memory writes', () => {
 
   it('encryptMemory accepts memoryRef as PK and as URN (owner ctx)', async () => {
     const key = generateDataKey();
-    for (const ref of [knowledgeMemory.urn, knowledgeMemory.id]) {
+    for (const byUrn of [true, false]) {
       const memory = await db.memory.create({
         data: {
           id: generateId(), organizationId: null, ownerUserId: adminUser.id, userId: adminUser.id,
           urn: `${org.urn}:enc-${generateId()}`, name: 'enc', class: 'private', visibility: null,
         },
       });
-      const out = await resolvers.Mutation.encryptMemory(
+      const out = await encryptWithSecret(
         {},
-        { memoryRef: ref === knowledgeMemory.urn ? memory.urn : memory.id, dataKey: key.raw.toString('base64') },
+        { memoryRef: byUrn ? memory.urn : memory.id, dataKey: key.raw.toString('base64') },
         adminCtx(),
       );
       expect(out.isEncrypted).toBe(true);
@@ -490,6 +493,7 @@ describe('#4142 S6 chunk C — org mutations', () => {
 
 describe('#4142 S6 chunk D — agent mutations', () => {
   let agent: { id: string; urn: string };
+  let chatAppId: string;
 
   beforeEach(async () => {
     const systemMemory = await db.memory.create({
@@ -527,19 +531,20 @@ describe('#4142 S6 chunk D — agent mutations', () => {
     }
     // The App that hosts the caller's per-person memory (the JWT-user start
     // path resolves it via the agent link).
-    await db.app.create({
+    // #5394: the start names it (appRef).
+    chatAppId = (await db.app.create({
       data: {
         id: generateId(), organizationId: org.id, urn: `${org.urn}:s6-chat-app`, name: 's6-chat-app',
         appAgents: { create: { agentId: agent.id } },
       },
-    });
+    })).id;
   });
 
   it('startChat accepts agentRef as PK and as URN', async () => {
     // The chat's nodes are provisioned in the agent's system memory, so the
     // caller needs more than a read: the org ADMIN qualifies.
     for (const ref of [agent.id, agent.urn]) {
-      const a = await ask(adminCtx(), `mutation($ref: ID!) { startChat(agentRef: $ref) { chatId } }`, { ref });
+      const a = await ask(adminCtx(), `mutation($ref: ID!, $app: ID) { startChat(agentRef: $ref, appRef: $app) { chatId } }`, { ref, app: chatAppId });
       expect(a.error).toBeNull();
       expect((a.data as { chatId: string }).chatId).toBeTruthy();
     }
@@ -586,7 +591,7 @@ describe('#4142 S6 chunk D — agent mutations', () => {
     for (const ref of [agent.id, agent.urn]) {
       await expect(
         resolvers.Mutation.restoreRevision({}, { agentRef: ref, revisionLoc: 'revisions:none' }, adminCtx()),
-      ).rejects.toThrow(/Revision not found: revisions:none/);
+      ).rejects.toThrow(/^Revision not found$/); // #5168: the loc is not quoted back
     }
     await expect(
       resolvers.Mutation.restoreRevision({}, { agentRef: generateId(), revisionLoc: 'revisions:none' }, adminCtx()),
@@ -759,7 +764,7 @@ describe('#4142 S6 chunk F — required survivor refs', () => {
       { m: `  ${hidden.id}  ` },
     ));
     expect(paddedHidden).toEqual({
-      message: `No match for memoryRef "${hidden.id}".`,
+      message: 'No match for memoryRef.',
       code: 'NOT_FOUND',
     });
     const paddedMissing = await refusal(ask(
@@ -768,7 +773,7 @@ describe('#4142 S6 chunk F — required survivor refs', () => {
       { m: `  ${missing}  ` },
     ));
     expect(paddedMissing).toEqual({
-      message: `No match for memoryRef "${missing}".`,
+      message: 'No match for memoryRef.',
       code: 'NOT_FOUND',
     });
     // deleteMemorySubscription's caller-input conversion carries the same
@@ -874,11 +879,11 @@ describe('#4142 S6 chunk F — required survivor refs', () => {
   // -- 4. blank refs: BAD_USER_INPUT naming only the ref, before any gate ---
 
   it.each([
-    ['createMemorySubscription.memoryRef', `mutation { createMemorySubscription(memoryRef: "", orgRef: "x", role: READER) { role } }`, 'A memory is required: pass memoryRef.'],
-    ['createMemorySubscription.orgRef', `mutation($m: ID!) { createMemorySubscription(memoryRef: $m, orgRef: " ", role: READER) { role } }`, 'A org is required: pass orgRef.'],
-    ['addOrgMember.orgRef', `mutation { addOrgMember(orgRef: "", userRef: "x", role: CONTRIBUTOR) { id } }`, 'A org is required: pass orgRef.'],
-    ['ensureAppMember.appRef', `mutation { ensureAppMember(appRef: "", userRef: "x", role: "member") { userId } }`, 'A app is required: pass appRef.'],
-    ['revokeAgentSubscription.agentRef', `mutation { revokeAgentSubscription(userRef: "x", agentRef: " ") { revokedAt } }`, 'A agent is required: pass agentRef.'],
+    ['createMemorySubscription.memoryRef', `mutation { createMemorySubscription(memoryRef: "", orgRef: "x", role: READER) { role } }`, 'memoryRef is required.'],
+    ['createMemorySubscription.orgRef', `mutation($m: ID!) { createMemorySubscription(memoryRef: $m, orgRef: " ", role: READER) { role } }`, 'orgRef is required.'],
+    ['addOrgMember.orgRef', `mutation { addOrgMember(orgRef: "", userRef: "x", role: CONTRIBUTOR) { id } }`, 'orgRef is required.'],
+    ['ensureAppMember.appRef', `mutation { ensureAppMember(appRef: "", userRef: "x", role: "member") { userId } }`, 'appRef is required.'],
+    ['revokeAgentSubscription.agentRef', `mutation { revokeAgentSubscription(userRef: "x", agentRef: " ") { revokedAt } }`, 'agentRef is required.'],
   ])('%s: a blank ref refuses BAD_USER_INPUT before any gate', async (_label, query, message) => {
     const a = await ask(adminCtx(), query, { m: publicMemory.id });
     expect(a.error?.extensions.code).toBe('BAD_USER_INPUT');
@@ -910,7 +915,7 @@ describe('#4142 S6 chunk F — required survivor refs', () => {
     // Subscription family: a non-ADMIN caller on a PUBLIC memory — the gate
     // is requireOrgRole, whose text names no input.
     ['createMemorySubscription (org gate)', `mutation($m: ID!, $o: ID!) { createMemorySubscription(memoryRef: $m, orgRef: $o, role: READER) { role } }`,
-      () => ({ ctx: { db, userId: readerUser.id, roles: [] } as Context, pk: { m: publicMemory.id, o: subscriberOrg.id }, urn: { m: publicMemory.urn, o: subscriberOrg.id } })],
+      () => ({ ctx: { db, userId: readerUser.id, roles: [] } as Context, pk: { m: publicMemory.id, o: subscriberOrg.id }, urn: { m: publicMemory.urn, o: subscriberOrg.urn } })],
     // App-member family: an unrelated caller removing someone else (self-removal
     // is legitimately allowed, so the caller must differ from the target).
     ['removeAppMember (app gate)', `mutation($a: ID!, $u: ID!) { removeAppMember(appRef: $a, userRef: $u) }`,
@@ -924,6 +929,29 @@ describe('#4142 S6 chunk F — required survivor refs', () => {
     const byUrn = await refusal(ask(ctx, query, urn));
     expect(byUrn).toEqual(byPk);
     expect(byPk.code).toBe('FORBIDDEN');
+  });
+
+  // -- #4357 N1: the role gate runs BEFORE the target user is resolved (cor:api:140:02) --
+  // The order is pinned as built: a non-admin names an EXISTING user and a MISSING one and gets the same refusal,
+  // so a NOT_FOUND for the missing target would show that user resolution ran before the gate.
+  it.each([
+    ['addOrgMember', `mutation($o: ID!, $u: ID!) { addOrgMember(orgRef: $o, userRef: $u, role: CONTRIBUTOR) { id } }`],
+    ['updateOrgMember', `mutation($o: ID!, $u: ID!) { updateOrgMember(orgRef: $o, userRef: $u, role: CONTRIBUTOR) { id } }`],
+    ['removeOrgMember', `mutation($o: ID!, $u: ID!) { removeOrgMember(orgRef: $o, userRef: $u) }`],
+  ])('%s: a non-admin gets one FORBIDDEN for an existing and a missing user', async (_label, query) => {
+    const existing = await refusal(ask(readerCtx(), query, { o: org.id, u: targetUser }));
+    const missing = await refusal(ask(readerCtx(), query, { o: org.id, u: `ghost-${generateId()}` }));
+    expect(existing.code).toBe('FORBIDDEN');
+    expect(missing).toEqual(existing);
+  });
+
+  it('removeAppMember: an unrelated caller gets one FORBIDDEN for an existing and a missing target (self-only miss-to-Forbidden)', async () => {
+    const query = `mutation($a: ID!, $u: ID!) { removeAppMember(appRef: $a, userRef: $u) }`;
+    const unrelated = (): Context => ({ db, userId: readerUser.id, roles: [] });
+    const existing = await refusal(ask(unrelated(), query, { a: app.id, u: targetUser }));
+    const missing = await refusal(ask(unrelated(), query, { a: app.id, u: `ghost-${generateId()}` }));
+    expect(existing.code).toBe('FORBIDDEN');
+    expect(missing).toEqual(existing);
   });
 });
 

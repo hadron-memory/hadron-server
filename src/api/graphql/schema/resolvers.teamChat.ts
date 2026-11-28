@@ -86,11 +86,12 @@ import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { recordMentionsWorker } from '../../../lib/mentionsReadResolution.js';
 import {
   maybeAdvanceOwnChannelRead,
-  lapsedResumeVerdict,
-  resumeOwnLapsedSessionInTx,
+  lapsedResumeDecision,
+  tryResumeOwnLapsedSessionInTx,
+  type ResumeRefusalReason,
   mayStillDriveWorkerApp,
   channelIncarnationChanged,
-} from '../../../lib/teamAttention.js';
+} from '../../../lib/ownWorkerSessions.js';
 
 // The team-chat locs moved to src/lib/teamChatLoc.ts (#1030): the agent-chat
 // listing and the shared chat-loc gate both have to exclude `chats:team`, and
@@ -271,6 +272,18 @@ export async function locateTeamChatChannel(
     select: { id: true, lastSeq: true },
   });
   return channel ? { rootId: root.id, channelId: channel.id, lastSeq: channel.lastSeq } : null;
+}
+
+/**
+ * {@link locateTeamChatChannel} for a caller with no request: the platform's own evaluator and read (#4531). The locator
+ * reads only `ctx.db` and `ctx.impersonation`, so the one place a context is faked is here, with `impersonation` absent
+ * (never impersonating), and a caller outside the resolvers has a typed entry instead of building a `Context` itself.
+ */
+export async function locateTeamChatChannelOfApp(
+  db: Context['db'],
+  appId: string,
+): Promise<{ rootId: string; channelId: string; lastSeq: number } | null> {
+  return locateTeamChatChannel({ db } as Context, appId);
 }
 
 /**
@@ -477,7 +490,7 @@ async function resolveSessionAuthor(
     select: { id: true, appId: true, userId: true, workerId: true, agentId: true, endedAt: true, expiresAt: true, type: true, startedAt: true, updatedAt: true, autoExpiredAt: true, launchOperationId: true, memoryId: true },
   });
   if (!session) {
-    throw new GraphQLError(`Session "${sessionRef}" not found.`, {
+    throw new GraphQLError('Session not found.', {
       extensions: { code: 'SESSION_NOT_FOUND' },
     });
   }
@@ -601,8 +614,8 @@ async function resolveSessionAuthor(
     // #1617 B — this only decides that the post MAY resume the session; the
     // resume itself happens inside the append transaction (#1625 review,
     // Baloo P2-1), so a post refused anywhere after this point resumes nothing.
-    const verdict = await lapsedResumeVerdict(ctx, session.id);
-    if (verdict !== 'OK') throw sessionNotLiveError(sessionRef, verdict === 'DORMANT');
+    const decision = await lapsedResumeDecision(ctx, session.id);
+    if (decision.verdict !== 'OK') throw sessionNotLiveError(sessionRef, decision.reason);
   } else if (await mayStillDriveWorkerApp(ctx, worker.appId)) {
     await touchLiveSession(ctx.db, session.id);
   }
@@ -615,8 +628,8 @@ async function resolveSessionAuthor(
  * already rebind on SESSION_NOT_LIVE keep working, and says why in
  * `extensions.reason`: only an explicit rebind by its holder brings it back.
  */
-function sessionNotLiveError(sessionRef: string, dormant = false): GraphQLError {
-  if (dormant) {
+function sessionNotLiveError(sessionRef: string, reason?: ResumeRefusalReason): GraphQLError {
+  if (reason === 'DORMANT') {
     return new GraphQLError(
       `Session "${sessionRef}" is DORMANT — nothing has driven it for longer than its App's dormancy threshold, ` +
         'so no agent act resumes it. Its holder must start a new session for this worker ' +
@@ -630,7 +643,8 @@ function sessionNotLiveError(sessionRef: string, dormant = false): GraphQLError 
       'through it, and only while no other session on that worker is live. Otherwise start a new session for this worker ' +
       '(CLI: `hadron team session start --as <worker>`; MCP: `hadron_start_session`). While a session is live, ' +
       'posting, reading and marking read through it keep it live.',
-    { extensions: { code: 'SESSION_NOT_LIVE' } },
+    // #5000: the failed condition as a code, never another worker or session (cor:agt:020:09).
+    { extensions: { code: 'SESSION_NOT_LIVE', ...(reason ? { reason } : {}) } },
   );
 }
 
@@ -720,7 +734,7 @@ async function resolveMentionTokens(
 type ChannelTarget = { channelId: string; lastSeq: number; app: AppRow | null; root: ChatRootRow; incarnation: ChannelIncarnation };
 
 const channelNotFound = (ref: string): GraphQLError =>
-  new GraphQLError(`No match for channelRef "${ref}".`, { extensions: { code: 'CHANNEL_NOT_FOUND', channelRef: ref } });
+  new GraphQLError('No match for channelRef.', { extensions: { code: 'CHANNEL_NOT_FOUND' } }); // #5168: the ref is not quoted back
 
 /**
  * May this caller READ the Channel's host memory? Since #1196 this is the whole
@@ -1167,8 +1181,9 @@ async function postToChannelRoot(
     // #1617 B — resume the author's lapsed session in THIS transaction, so it
     // commits with the message or not at all (#1625 review, Baloo P2-1). Every
     // condition is re-decided under the App and Worker locks.
-    if (resumeSessionId && !(await resumeOwnLapsedSessionInTx(ctx, tx, resumeSessionId))) {
-      throw sessionNotLiveError(sessionRef!);
+    if (resumeSessionId) {
+      const refused = await tryResumeOwnLapsedSessionInTx(ctx, tx, resumeSessionId);
+      if (refused) throw sessionNotLiveError(sessionRef!, refused);
     }
     if (stampAuthority) {
       Object.assign(envelope, await wakeStampsFor(ctx, tx, app, typeof envelope.authorWorkerId === 'string' ? envelope.authorWorkerId : null, useTeamTags ? mentions.filter(token => token !== 'team') : mentions, stampAuthority));
@@ -1219,6 +1234,7 @@ async function postToChannelRoot(
           sourceId: messageId,
           targetId: replyTarget.id,
           loc: deriveEdgeLoc(loc, 'replies-to', replyTarget.loc),
+          locAuthored: false, // #2947: derived
           name: 'replies-to',
           createdBy,
         },

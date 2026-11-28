@@ -28,18 +28,18 @@ const activeGrant = (over: Record<string, unknown> = {}) => insertGrantUnguarded
 
 type Row = {
   id: string; app_id: string; user_id: string | null; agent_id: string | null; worker_id: string | null; grantee_app_id: string | null;
-  issuer_user_id: string | null; reason: string; holder_departed_at: string | null; revoked_at: Date | null; live: boolean;
+  issuer_user_id: string | null; reason: string; holder_departed_at: string | null; revoked_at: Date | null; live: boolean; cause: string | null;
 };
 const read = async (id: string): Promise<Row | undefined> => (await db.$queryRaw<Row[]>(Prisma.sql`
-  SELECT g.id, g.app_id, g.user_id, g.agent_id, g.worker_id, g.grantee_app_id, g.issuer_user_id, g.reason, (to_jsonb(g)->>'holder_departed_at') AS holder_departed_at,
+  SELECT g.id, g.app_id, g.user_id, g.agent_id, g.worker_id, g.grantee_app_id, g.issuer_user_id, g.reason, (to_jsonb(g)->>'holder_departed_at') AS holder_departed_at, (to_jsonb(g)->>'holder_departure_reason') AS cause,
     g.revoked_at, ${grantLiveSql('g')} AS live FROM grants g WHERE g.id = ${id}`))[0];
 
 /** The four holder kinds, each with how to hard-delete the holder and which column keeps its sealed id. */
-const KINDS: Array<{ kind: string; col: 'user_id' | 'agent_id' | 'worker_id' | 'grantee_app_id'; id: () => string; del: () => Promise<unknown> }> = [
-  { kind: 'person', col: 'user_id', id: () => w.user2Id, del: () => db.user.delete({ where: { id: w.user2Id } }) },
-  { kind: 'agent', col: 'agent_id', id: () => w.agentId, del: async () => { await db.worker.deleteMany({ where: { agentId: w.agentId } }); await db.agent.delete({ where: { id: w.agentId } }); } },
-  { kind: 'worker', col: 'worker_id', id: () => w.workerId, del: () => db.worker.delete({ where: { id: w.workerId } }) },
-  { kind: 'App', col: 'grantee_app_id', id: () => w.app2Id, del: () => db.app.delete({ where: { id: w.app2Id } }) },
+const KINDS: Array<{ kind: string; col: 'user_id' | 'agent_id' | 'worker_id' | 'grantee_app_id'; cause: string; id: () => string; del: () => Promise<unknown> }> = [
+  { kind: 'person', col: 'user_id', cause: 'USER_ERASED', id: () => w.user2Id, del: () => db.user.delete({ where: { id: w.user2Id } }) },
+  { kind: 'agent', col: 'agent_id', cause: 'AGENT_DELETED', id: () => w.agentId, del: async () => { await db.worker.deleteMany({ where: { agentId: w.agentId } }); await db.agent.delete({ where: { id: w.agentId } }); } },
+  { kind: 'worker', col: 'worker_id', cause: 'WORKER_DELETED', id: () => w.workerId, del: () => db.worker.delete({ where: { id: w.workerId } }) },
+  { kind: 'App', col: 'grantee_app_id', cause: 'APP_DELETED', id: () => w.app2Id, del: () => db.app.delete({ where: { id: w.app2Id } }) },
 ];
 
 describe('1/8: a holder that goes ends its grant; the record stays and keeps the kind of holder', () => {
@@ -52,6 +52,7 @@ describe('1/8: a holder that goes ends its grant; the record stays and keeps the
       expect(row).toBeTruthy();
       expect(row!.live).toBe(false);
       expect(row!.holder_departed_at).not.toBeNull();
+      expect(row!.cause).toBe(k.cause); // #4180: the delete trigger records the holder kind's cause
       // The kind is kept: exactly one holder column is set, and it is the one the grant had.
       const held = (['user_id', 'agent_id', 'worker_id', 'grantee_app_id'] as const).filter((c) => row![c] !== null);
       expect(held).toEqual([k.col]);
@@ -152,7 +153,7 @@ describe('2/10: person erasure ends what the person HOLDS and leaves what the pe
     const held = await activeGrant({ user_id: w.user2Id, issuer_user_id: w.userId });
     const issued = await activeGrant({ user_id: null, agent_id: w.agentId, issuer_user_id: w.user2Id, reason: 'kept words' });
     await deleteUserAccount(db, { targetUserId: w.user2Id, actorUserId: w.user2Id });
-    expect(await read(held)).toMatchObject({ live: false, user_id: w.user2Id, issuer_user_id: w.userId });
+    expect(await read(held)).toMatchObject({ live: false, user_id: w.user2Id, issuer_user_id: w.userId, cause: 'USER_ERASED' });
     expect((await read(held))!.holder_departed_at).not.toBeNull();
     expect(await read(issued)).toMatchObject({ live: true, issuer_user_id: null, reason: 'kept words', holder_departed_at: null });
   });
@@ -170,13 +171,15 @@ describe('2/10: person erasure ends what the person HOLDS and leaves what the pe
       await activeGrant({ user_id: null, grantee_app_id: app.id }),
       await activeGrant({ user_id: w.user2Id }),
     ];
+    const causes = ['AGENT_DELETED', 'APP_DELETED', 'USER_ERASED']; // #4180: each holder's own cause, not the erasure's
     await deleteUserAccount(db, { targetUserId: w.user2Id, actorUserId: w.user2Id });
     expect((await db.user.findUniqueOrThrow({ where: { id: w.user2Id } })).deletedAt).not.toBeNull();
-    for (const id of ids) {
+    for (const [i, id] of ids.entries()) {
       const row = await read(id);
       expect(row).toBeTruthy();
       expect(row!.live).toBe(false);
       expect(row!.holder_departed_at).not.toBeNull();
+      expect(row!.cause).toBe(causes[i]);
     }
   });
   it('a grant that never involved the erased person is untouched', async () => {

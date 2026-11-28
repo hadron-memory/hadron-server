@@ -18,6 +18,7 @@ import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { HOST_REPORT_TIMEOUT_DEFAULT_MINUTES, sweepUnreportedHostOperations } from './settle.js';
 import { taskStallTick } from '../../jobs/taskStallEvaluator.js';
 import { lockAppHostLapse } from '../agentTasks/hosts.js';
+import { joinHostForKey } from '../../test/agentTeamHost.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -88,6 +89,7 @@ beforeEach(async () => {
   kit = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Kit', slug: 'kit', heldByUserId: holder.id, heldAt: new Date() }, select: { id: true } });
   orca1 = await mkKey('orca1');
   plainKey = await mkKey('plain');
+  await joinHostForKey(db, orca1.id, 'orca1');
   await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager.id));
   await M.registerHost({}, {
     input: { appRef: app.id, label: 'Orca', pollIntervalSeconds: 600, workers: [{ worker: kit.id, family: 'claude', worktrees: ['hadron-server/kit'] }] },
@@ -194,7 +196,7 @@ describe('an operation never collected is settled when its host lapses or its re
     const t = await db.agentTask.create({ data: { appId: app.id, title: 'T', ownerUserId: manager.id, assigneeWorkerId: kit.id, assignedAt: new Date(), closeSessionWhenDone: false }, select: { id: true } });
     const op = await issue('worker.start', { ...START, taskId: t.id });
     expect(await sweepUnreportedHostOperations(db)).toBe(0);
-    await M.cancelAgentTask({}, { taskId: t.id }, ctx(manager.id));
+    await M.cancelAgentTask({}, { taskRef: t.id }, ctx(manager.id));
     expect(await sweepUnreportedHostOperations(db)).toBe(1);
     expect(await opOf(op.id)).toMatchObject({ status: 'failed', collectedAt: null, failureReason: "The task this start was for is no longer the worker's open task." });
   });

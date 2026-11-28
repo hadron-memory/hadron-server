@@ -18,7 +18,7 @@ import { captureSetupConsent } from '../../lib/automation/pins.js';
  *          miss→NoAiConfigAvailableError).
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { waitForLockWaiters } from '../lockWait.js';
 
@@ -361,9 +361,10 @@ describe('resolveAIConfig user-owned App decrypt gate (#1487)', () => {
     await db.agentSubscription.create({ data: { agentId: agent.id, userId: owner.id, activatedAt: new Date() } });
     await createConfig({ organizationId: org.id }, 'default', { apiKey: 'sk-org-private' });
 
-    expect(await resolvers.Query.resolveAIConfig(
+    // #5075: the publisher organization's configuration does not answer in a person's App (cor:dmo:050:10).
+    await expect(resolvers.Query.resolveAIConfig(
       {}, { appRef: ownApp.id, agentRef: agent.id }, ctxFor(owner.id),
-    )).toMatchObject({ apiKey: null });
+    )).rejects.toMatchObject({ extensions: { code: 'NoAiConfigAvailableError' } });
     await expect(resolvers.Query.resolveAIConfig(
       {}, { appRef: ownApp.id, agentRef: agent.id }, ctxFor(admin.id),
     )).rejects.toThrow(/Forbidden/);
@@ -748,7 +749,7 @@ describe('resolveAiServiceConfigs (masked picker)', () => {
 
 describe('#1417 — known provider ranges bind what a write sets, never a stored row', () => {
   it('create refuses an anthropic temperature above 1; 1 is fine', async () => {
-    const base = { ownerType: 'AGENT', ownerId: agent.id, provider: 'anthropic', model: 'claude-haiku-4-5-20251001', apiKey: 'sk-ant-x-1234' };
+    const base = { ownerType: 'AGENT', ownerRef: agent.id, provider: 'anthropic', model: 'claude-haiku-4-5-20251001', apiKey: 'sk-ant-x-1234' };
     await expect(resolvers.Mutation.createAiServiceConfig({}, { ...base, name: 'hot', params: { temperature: 1.5 } } as never, ctxFor(admin.id)))
       .rejects.toThrow(/at most 1/);
     await expect(resolvers.Mutation.createAiServiceConfig({}, { ...base, name: 'ok', params: { temperature: 1 } } as never, ctxFor(admin.id)))
@@ -776,7 +777,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
       {},
       {
         ownerType: 'AGENT',
-        ownerId: agent.id,
+        ownerRef: agent.id,
         name: 'fast',
         provider: 'anthropic',
         model: 'claude-haiku-4-5-20251001',
@@ -797,7 +798,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
 
     const listedPage = await resolvers.Query.aiServiceConfigs(
       {},
-      { filter: { ownerType: 'AGENT', ownerId: agent.id } },
+      { filter: { ownerType: 'AGENT', ownerRef: agent.id } },
       ctxFor(admin.id),
     );
     const listed = listedPage!.items;
@@ -827,7 +828,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
     // Org owner — org admin OK.
     const orgCfg = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'ORGANIZATION', ownerId: org.id, name: 'default', provider: 'openai', model: 'gpt-4o', apiKey: 'sk-org' },
+      { ownerType: 'ORGANIZATION', ownerRef: org.id, name: 'default', provider: 'openai', model: 'gpt-4o', apiKey: 'sk-org' },
       ctxFor(admin.id),
     );
     expect(orgCfg.ownerType).toBe('ORGANIZATION');
@@ -836,7 +837,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
     await expect(
       resolvers.Mutation.createAiServiceConfig(
         {},
-        { ownerType: 'APP', ownerId: app.id, name: 'default', provider: 'glm', model: 'glm-4' },
+        { ownerType: 'APP', ownerRef: app.id, name: 'default', provider: 'glm', model: 'glm-4' },
         ctxFor(outsider.id),
       ),
     ).rejects.toThrow(/Forbidden/);
@@ -845,13 +846,13 @@ describe('AiServiceConfig CRUD (US2)', () => {
     await expect(
       resolvers.Mutation.createAiServiceConfig(
         {},
-        { ownerType: 'HADRON_SERVER', ownerId: server.id, name: 'default', provider: 'bedrock', model: 'claude-3' },
+        { ownerType: 'HADRON_SERVER', ownerRef: server.id, name: 'default', provider: 'bedrock', model: 'claude-3' },
         ctxFor(admin.id),
       ),
     ).rejects.toThrow(/Forbidden/);
     const hostCfg = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'HADRON_SERVER', ownerId: server.id, name: 'default', provider: 'bedrock', model: 'claude-3' },
+      { ownerType: 'HADRON_SERVER', ownerRef: server.id, name: 'default', provider: 'bedrock', model: 'claude-3' },
       platformAdminCtx(),
     );
     expect(hostCfg.ownerType).toBe('HADRON_SERVER');
@@ -860,7 +861,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
     await expect(
       resolvers.Query.aiServiceConfigs(
         {},
-        { filter: { ownerType: 'ORGANIZATION', ownerId: org.id } },
+        { filter: { ownerType: 'ORGANIZATION', ownerRef: org.id } },
         ctxFor(outsider.id),
       ),
     ).rejects.toThrow(/Forbidden/);
@@ -869,13 +870,13 @@ describe('AiServiceConfig CRUD (US2)', () => {
   it('rejects duplicate names per owner with the typed error', async () => {
     await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'AGENT', ownerId: agent.id, name: 'fast', provider: 'anthropic', model: 'm', apiKey: 'sk-a' },
+      { ownerType: 'AGENT', ownerRef: agent.id, name: 'fast', provider: 'anthropic', model: 'm', apiKey: 'sk-a' },
       ctxFor(admin.id),
     );
     await expect(
       resolvers.Mutation.createAiServiceConfig(
         {},
-        { ownerType: 'AGENT', ownerId: agent.id, name: 'fast', provider: 'openai', model: 'x', apiKey: 'sk-b' },
+        { ownerType: 'AGENT', ownerRef: agent.id, name: 'fast', provider: 'openai', model: 'x', apiKey: 'sk-b' },
         ctxFor(admin.id),
       ),
     ).rejects.toMatchObject({ extensions: { code: 'DuplicateAiServiceConfigNameError' } });
@@ -885,7 +886,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
     await expect(
       resolvers.Mutation.createAiServiceConfig(
         {},
-        { ownerType: 'AGENT', ownerId: agent.id, name: 'bad', provider: 'grok', model: 'm' },
+        { ownerType: 'AGENT', ownerRef: agent.id, name: 'bad', provider: 'grok', model: 'm' },
         ctxFor(admin.id),
       ),
     ).rejects.toMatchObject({ extensions: { code: 'UnknownAiProviderError' } });
@@ -894,7 +895,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
         {},
         {
           ownerType: 'AGENT',
-          ownerId: agent.id,
+          ownerRef: agent.id,
           name: 'bad',
           provider: 'anthropic',
           model: 'm',
@@ -906,7 +907,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
     await expect(
       resolvers.Mutation.createAiServiceConfig(
         {},
-        { ownerType: 'AGENT', ownerId: agent.id, name: 'Not Valid', provider: 'anthropic', model: 'm' },
+        { ownerType: 'AGENT', ownerRef: agent.id, name: 'Not Valid', provider: 'anthropic', model: 'm' },
         ctxFor(admin.id),
       ),
     ).rejects.toMatchObject({ extensions: { code: 'AiConfigValidationError' } });
@@ -915,7 +916,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
   it('apiKey update semantics: value replaces; empty string clears, only where a keyless config may run (#1390)', async () => {
     const created = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'AGENT', ownerId: agent.id, name: 'fast', provider: 'anthropic', model: 'm', apiKey: 'sk-one' },
+      { ownerType: 'AGENT', ownerRef: agent.id, name: 'fast', provider: 'anthropic', model: 'm', apiKey: 'sk-one' },
       ctxFor(admin.id),
     );
     const replaced = await resolvers.Mutation.updateAiServiceConfig(
@@ -935,7 +936,7 @@ describe('AiServiceConfig CRUD (US2)', () => {
     // The platform's own anthropic config may run on the server credential, so it may clear.
     const host = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'HADRON_SERVER', ownerId: server.id, name: 'hosted', provider: 'anthropic', model: 'm', apiKey: 'sk-host' },
+      { ownerType: 'HADRON_SERVER', ownerRef: server.id, name: 'hosted', provider: 'anthropic', model: 'm', apiKey: 'sk-host' },
       platformAdminCtx(),
     );
     const cleared = await resolvers.Mutation.updateAiServiceConfig({}, { id: host.id, apiKey: '' }, platformAdminCtx());
@@ -1034,7 +1035,7 @@ describe('legacy surface shims (US3)', () => {
     );
     await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'APP', ownerId: app.id, name: 'default', provider: 'anthropic', model: 'claude-opus-4-6', apiKey: 'sk-app-override' },
+      { ownerType: 'APP', ownerRef: app.id, name: 'default', provider: 'anthropic', model: 'claude-opus-4-6', apiKey: 'sk-app-override' },
       ctxFor(admin.id),
     );
     const resolved = await resolvers.Query.resolveAIConfig(
@@ -1108,7 +1109,7 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
   const mk = (extra: Record<string, unknown>) =>
     resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'ORGANIZATION', ownerId: org.id, name: 'zai', provider: 'glm', model: 'GLM-5.3', apiKey: 'k-1234', ...extra },
+      { ownerType: 'ORGANIZATION', ownerRef: org.id, name: 'zai', provider: 'glm', model: 'GLM-5.3', apiKey: 'k-1234', ...extra },
       ctxFor(admin.id),
     );
 
@@ -1271,7 +1272,7 @@ describe('AiServiceConfig.endpoint (#1373)', () => {
       await code(
         resolvers.Mutation.createAiServiceConfig(
           {},
-          { ownerType: 'HADRON_SERVER', ownerId: server.id, name: 'keyless-host', provider: 'openai', model: 'm' },
+          { ownerType: 'HADRON_SERVER', ownerRef: server.id, name: 'keyless-host', provider: 'openai', model: 'm' },
           platformAdminCtx(),
         ),
       ),
@@ -1333,7 +1334,7 @@ describe('write-time invariants hold against a concurrent edit (#1389 review)', 
   it('updateAgentAIConfig: a provider switch that cleared the endpoint in between is refused, not restored without one', async () => {
     const c = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'AGENT', ownerId: agent.id, name: 'default', provider: 'openai-compatible', model: 'm', apiKey: 'k-1', endpoint: 'https://api.together.xyz/v1' },
+      { ownerType: 'AGENT', ownerRef: agent.id, name: 'default', provider: 'openai-compatible', model: 'm', apiKey: 'k-1', endpoint: 'https://api.together.xyz/v1' },
       ctxFor(admin.id),
     );
     const err = await race(c.id, { provider: 'openai', endpoint: null }, () =>
@@ -1346,7 +1347,7 @@ describe('write-time invariants hold against a concurrent edit (#1389 review)', 
   it('updateAiServiceConfig: a key cleared in between is judged on the locked row', async () => {
     const c = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'ORGANIZATION', ownerId: org.id, name: 'compat', provider: 'openai-compatible', model: 'm', apiKey: 'k-1', endpoint: 'https://api.together.xyz/v1' },
+      { ownerType: 'ORGANIZATION', ownerRef: org.id, name: 'compat', provider: 'openai-compatible', model: 'm', apiKey: 'k-1', endpoint: 'https://api.together.xyz/v1' },
       ctxFor(admin.id),
     );
     const err = await race(c.id, { apiKeyEncrypted: null, apiKeyPreview: null }, () =>
@@ -1359,7 +1360,7 @@ describe('write-time invariants hold against a concurrent edit (#1389 review)', 
   it('updateApp (legacy aiProvider): the same re-judgement on the locked row', async () => {
     const c = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'APP', ownerId: app.id, name: 'default', provider: 'openai-compatible', model: 'm', apiKey: 'k-1', endpoint: 'https://api.together.xyz/v1' },
+      { ownerType: 'APP', ownerRef: app.id, name: 'default', provider: 'openai-compatible', model: 'm', apiKey: 'k-1', endpoint: 'https://api.together.xyz/v1' },
       ctxFor(admin.id),
     );
     const err = await race(c.id, { provider: 'openai', endpoint: null }, () =>
@@ -1374,7 +1375,7 @@ describe('updateAiServiceConfig judges the provider/style pair on the locked row
   it('a concurrent provider switch between the read and the write refuses a style the new provider has no use for', async () => {
     const c = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'ORGANIZATION', ownerId: org.id, name: 'oa', provider: 'openai', model: 'gpt', apiKey: 'k-1' },
+      { ownerType: 'ORGANIZATION', ownerRef: org.id, name: 'oa', provider: 'openai', model: 'gpt', apiKey: 'k-1' },
       ctxFor(admin.id),
     );
     let locked!: () => void;
@@ -1434,7 +1435,7 @@ describe('the legacy writers clear a stale endpoint/style against the LOCKED row
   it('updateAgentAIConfig switching back to openai clears the GLM endpoint and style', async () => {
     const c = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'AGENT', ownerId: agent.id, name: 'default', provider: 'openai', model: 'gpt', apiKey: 'k-1' },
+      { ownerType: 'AGENT', ownerRef: agent.id, name: 'default', provider: 'openai', model: 'gpt', apiKey: 'k-1' },
       ctxFor(admin.id),
     );
     await holdAndSwitch(c.id, () =>
@@ -1446,7 +1447,7 @@ describe('the legacy writers clear a stale endpoint/style against the LOCKED row
   it('updateApp (legacy aiProvider) switching back to openai clears them too', async () => {
     const c = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'APP', ownerId: app.id, name: 'default', provider: 'openai', model: 'gpt', apiKey: 'k-1' },
+      { ownerType: 'APP', ownerRef: app.id, name: 'default', provider: 'openai', model: 'gpt', apiKey: 'k-1' },
       ctxFor(admin.id),
     );
     await holdAndSwitch(c.id, () =>
@@ -1460,7 +1461,7 @@ describe('updateApp legacy: omitted provider/model come from the LOCKED row (#13
   it('a concurrent model change is not overwritten by the value read before the lock', async () => {
     const c = await resolvers.Mutation.createAiServiceConfig(
       {},
-      { ownerType: 'APP', ownerId: app.id, name: 'default', provider: 'openai', model: 'gpt-old', apiKey: 'k-1' },
+      { ownerType: 'APP', ownerRef: app.id, name: 'default', provider: 'openai', model: 'gpt-old', apiKey: 'k-1' },
       ctxFor(admin.id),
     );
     let locked!: () => void;
@@ -1558,7 +1559,7 @@ describe('#1482 — an org-less personal Agent never falls back to the host conf
     // Every AppRun has an organization today (NOT NULL; mintAppRun requires the
     // App's org), so this context can't be minted yet. Pinned so the day
     // user-owned Apps get runs, the rule already holds on the run path.
-    const run = { appId: personalApp.id, agentId: personalAgent.id, organizationId: null, eventData: null } as unknown as AppRun;
+    const run = { appId: personalApp.id, agentId: personalAgent.id, organizationId: null, ownerUserId: owner.id, eventData: null } as unknown as AppRun;
     await expect(makeProdRunDeps(db).resolveConfig(run)).rejects.toBeInstanceOf(NoAiConfigAvailableError);
   });
 
@@ -1572,10 +1573,338 @@ describe('#1482 — an org-less personal Agent never falls back to the host conf
     // This config-path control now carries real adopted execution identity.
     const flow = await db.memory.create({ data: { name: 'Run config control', urn: 'acme-036:run-config-control', class: 'app', organizationId: org.id, appId: orgApp.id } });
     await db.node.create({ data: { memoryId: flow.id, loc: 'entry', name: 'Entry', content: 'Host fallback', isRunnable: true } });
-    const automationPin = await captureSetupConsent(db, orgApp.id, null, 'hrn:node:acme-036:run-config-control:entry', org.id, { appId: orgApp.id, organizationId: org.id }, { agentId: personalAgent.id });
+    const automationPin = await captureSetupConsent(db, orgApp.id, null, 'hrn:node:acme-036:run-config-control:entry', { organizationId: org.id }, { appId: orgApp.id, organizationId: org.id }, { agentId: personalAgent.id });
     const run = { appId: orgApp.id, agentId: personalAgent.id, organizationId: org.id, eventData: null, automationPin } as unknown as AppRun;
     expect((await makeProdRunDeps(db).resolveConfig(run)).ownerType).toBe('HADRON_SERVER');
     // An org Agent with no org config still falls back to the host, as before.
     expect((await resolveAiConfig(db, 'default', { agentId: agent.id }))?.ownerType).toBe('HADRON_SERVER');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// #5075 (Billing F2a) — cor:dmo:050:10, cor:dmo:170:05: ONE tenant rule. The owner of the App decides the tenant;
+// a person's App consults its own configurations and the named Agent's own, and nothing else (no organization level,
+// no platform level). Every organization context is unchanged, query for query.
+// ─────────────────────────────────────────────────────────────────────────
+
+describe('#5075 — a person\'s App never borrows an organization\'s or the platform\'s configuration', () => {
+  let owner: { id: string };
+  let member2: { id: string };
+  let personApp: { id: string };
+  let orgAgent: { id: string };
+  let personAgent: { id: string };
+
+  beforeEach(async () => {
+    owner = await db.user.create({ data: { id: generateId(), handle: 'tenant-5075', githubId: 5075001, name: 'Owner' } });
+    member2 = owner;
+    personApp = await db.app.create({ data: { id: generateId(), name: 'Mine', urn: 'tenant-5075:app', ownerUserId: owner.id } });
+    await db.appMember.create({ data: { appId: personApp.id, userId: owner.id, role: 'owner' } });
+    personAgent = await db.agent.create({ data: { id: generateId(), name: 'Personal', urn: 'tenant-5075:agent', ownerUserId: owner.id } });
+    await db.appAgent.create({ data: { appId: personApp.id, agentId: personAgent.id } });
+    // `agent` (beforeEach above) is an organization's Agent published by `org`.
+    orgAgent = agent;
+    await db.agent.update({ where: { id: orgAgent.id }, data: { visibility: 'ORGANIZATION' } });
+    await db.appAgent.create({ data: { appId: personApp.id, agentId: orgAgent.id } });
+    await db.orgMember.create({ data: { organizationId: org.id, userId: owner.id, role: 'READER' } });
+    await db.agentSubscription.create({ data: { agentId: orgAgent.id, userId: owner.id, activatedAt: new Date() } });
+  });
+
+  it('P1: a person\'s App with no Agent: only the platform `default` exists -> null / []', async () => {
+    await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-host-5075' });
+    expect(await resolveAiConfig(db, 'default', { appId: personApp.id })).toBeNull();
+    expect(await resolveAiConfigs(db, { appId: personApp.id })).toEqual([]);
+  });
+
+  it('P3: an organization Agent in a person\'s App: neither the publisher\'s organization nor the platform answers', async () => {
+    await createConfig({ organizationId: org.id }, 'default', { apiKey: 'sk-org-5075' });
+    expect(await resolveAiConfig(db, 'default', { appId: personApp.id, agentId: orgAgent.id })).toBeNull();
+    expect(await resolveAiConfigs(db, { appId: personApp.id, agentId: orgAgent.id })).toEqual([]);
+    await db.aiServiceConfig.deleteMany({ where: { organizationId: org.id } });
+    await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-host-5075' });
+    expect(await resolveAiConfig(db, 'default', { appId: personApp.id, agentId: orgAgent.id })).toBeNull();
+    expect(await resolveAiConfigs(db, { appId: personApp.id, agentId: orgAgent.id })).toEqual([]);
+  });
+
+  it('step 1 of the tenant rule: an explicit organization never overrides a person\'s App', async () => {
+    await createConfig({ organizationId: org.id }, 'default', { apiKey: 'sk-org-5075' });
+    await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-host-5075' });
+    expect(await resolveAiConfig(db, 'default', { appId: personApp.id, organizationId: org.id })).toBeNull();
+    expect(await resolveAiConfigs(db, { appId: personApp.id, organizationId: org.id })).toEqual([]);
+    // Control: the same explicit organization with no App is the organization's tenant, as before.
+    expect((await resolveAiConfig(db, 'default', { organizationId: org.id }))?.ownerType).toBe('ORGANIZATION');
+  });
+
+  it('a missing App id is no App (as before): the platform level stays open; an ownerless Agent row closes it', async () => {
+    await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-host-5075' });
+    expect((await resolveAiConfig(db, 'default', { appId: generateId() }))?.ownerType).toBe('HADRON_SERVER');
+    // An Agent row that names no owner cannot be written (owner XOR), so the unowned arm is pinned in owner5075.test.ts.
+  });
+
+  it('P3 on the run path: the same answers through makeProdRunDeps(db).resolveConfig', async () => {
+    await createConfig({ organizationId: org.id }, 'default', { apiKey: 'sk-org-5075' });
+    await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-host-5075' });
+    const run = { appId: personApp.id, agentId: orgAgent.id, organizationId: null, ownerUserId: owner.id, eventData: null } as unknown as AppRun;
+    await expect(makeProdRunDeps(db).resolveConfig(run)).rejects.toBeInstanceOf(NoAiConfigAvailableError);
+  });
+
+  it('P3, the ruled pin: a `default` on the Agent itself answers AGENT, in the walk, the list walk, the picker and the run path', async () => {
+    await createConfig({ organizationId: org.id }, 'default', { apiKey: 'sk-org-5075' });
+    await createConfig({ agentId: orgAgent.id }, 'default', { apiKey: 'sk-agent-5075' });
+    expect((await resolveAiConfig(db, 'default', { appId: personApp.id, agentId: orgAgent.id }))?.ownerType).toBe('AGENT');
+    expect((await resolveAiConfigs(db, { appId: personApp.id, agentId: orgAgent.id })).map((r) => `${r.ownerType}:${r.config.name}`)).toEqual(['AGENT:default']);
+    const picked = await resolvers.Query.resolveAiServiceConfigs({}, { appRef: personApp.id, agentRef: orgAgent.id }, ctxFor(owner.id));
+    expect(picked.map((c: { name: string; ownerType: string }) => `${c.ownerType}:${c.name}`)).toEqual(['AGENT:default']);
+    const run = { appId: personApp.id, agentId: orgAgent.id, organizationId: null, ownerUserId: owner.id, eventData: null } as unknown as AppRun;
+    // The walk answered the Agent's configuration: the run then stops at the automation pin's identity check
+    // (this fixture adopts no automation), never at NoAiConfigAvailableError.
+    const reached = await makeProdRunDeps(db).resolveConfig(run).catch((e: unknown) => e);
+    expect(reached).not.toBeInstanceOf(NoAiConfigAvailableError);
+    expect((reached as Error).message).toMatch(/no valid setup pin/);
+  });
+
+  it('the picker as the owner of P1 lists no HADRON_SERVER row', async () => {
+    await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-host-5075' });
+    const picked = await resolvers.Query.resolveAiServiceConfigs({}, { appRef: personApp.id }, ctxFor(owner.id));
+    expect(picked).toEqual([]);
+  });
+
+  it('P3 decrypt query with an organization `default`: NoAiConfigAvailableError naming neither the publisher\'s organization id nor its URN', async () => {
+    await createConfig({ organizationId: org.id }, 'default', { apiKey: 'sk-org-5075' });
+    const err = await resolvers.Query.resolveAIConfig({}, { appRef: personApp.id, agentRef: orgAgent.id }, ctxFor(owner.id)).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GraphQLError);
+    expect((err as GraphQLError).extensions.code).toBe('NoAiConfigAvailableError');
+    const text = JSON.stringify(err) + (err as Error).message;
+    expect(text).not.toContain(org.id);
+    expect(text).not.toContain('acme-036');
+  });
+
+  it('P2 and P4 answer as before (the personal Agent alone, and with the person\'s App, never reach the platform)', async () => {
+    await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-host-5075' });
+    expect(await resolveAiConfig(db, 'default', { appId: personApp.id, agentId: personAgent.id })).toBeNull();
+    expect(await resolveAiConfig(db, 'default', { agentId: personAgent.id })).toBeNull();
+    await expect(resolvers.Query.resolveAIConfig({}, { agentRef: personAgent.id }, ctxFor(owner.id)))
+      .rejects.toMatchObject({ extensions: { code: 'NoAiConfigAvailableError' } });
+  });
+
+  it('access unchanged: the person\'s App key is refused FORBIDDEN to a platform admin, an impersonated session and an App key; the owner gets it', async () => {
+    await createConfig({ appId: personApp.id }, 'default', { apiKey: 'sk-app-5075' });
+    await expect(resolvers.Query.resolveAIConfig({}, { appRef: personApp.id }, platformAdminCtx())).rejects.toThrow(/Forbidden/);
+    const impersonated = ctxFor(owner.id, {
+      impersonation: { sessionId: 'synthetic', actorUserId: admin.id, orgId: org.id, expiresAt: new Date(Date.now() + 60_000) },
+    });
+    await expect(resolvers.Query.resolveAIConfig({}, { appRef: personApp.id }, impersonated)).rejects.toThrow(/Forbidden/);
+    await expect(resolvers.Query.resolveAIConfig({}, { appRef: personApp.id }, { db, roles: [], appId: personApp.id, appKeyId: 'k-5075' } as Context))
+      .rejects.toThrow(/Forbidden/);
+    expect((await resolvers.Query.resolveAIConfig({}, { appRef: personApp.id }, ctxFor(owner.id))).apiKey).toBe('sk-app-5075');
+  });
+
+  describe('byte-identical for organization contexts', () => {
+    // The walk's answer (level + configuration id) and the list walk's names for six contexts, plus the queries
+    // issued, in order. Recorded on main before the change; the organization contexts must not move.
+    it('freezes the answers and the query order of the organization contexts', async () => {
+      const host = await createConfig({ hadronServerId: server.id }, 'default', { apiKey: 'sk-host' });
+      await createConfig({ hadronServerId: server.id }, 'hostonly', { apiKey: 'sk-hostonly' });
+      const orgCfg = await createConfig({ organizationId: org.id }, 'default', { apiKey: 'sk-org' });
+      await createConfig({ organizationId: org.id }, 'orgonly', { apiKey: 'sk-orgonly' });
+      const orgApp = await db.app.create({ data: { id: generateId(), name: 'Org App', urn: 'acme-036:app-5075', organizationId: org.id } });
+      const otherAgent = await db.agent.create({ data: { id: generateId(), name: 'Other', urn: 'other-036:agent-5075', organizationId: otherOrg.id } });
+      const ctxs: Array<[string, { appId?: string; agentId?: string }]> = [
+        ['org App alone', { appId: orgApp.id }],
+        ['org App + its own Agent', { appId: orgApp.id, agentId: agent.id }],
+        ['org App + another organization\'s Agent', { appId: orgApp.id, agentId: otherAgent.id }],
+        ['org App + a person\'s Agent', { appId: orgApp.id, agentId: personAgent.id }],
+        ['org Agent alone', { agentId: agent.id }],
+        ['server context', {}],
+      ];
+      const calls: string[] = [];
+      const wrap = <T extends object>(d: T, key: keyof T & string, tag: string) => {
+        const real = (d as any)[key].bind(d);
+        return vi.spyOn(d as any, key).mockImplementation(((...a: unknown[]) => { calls.push(tag); return real(...a); }) as never);
+      };
+      const spies = [wrap(db.app, 'findUnique', 'app'), wrap(db.agent, 'findUnique', 'agent'), wrap(db.aiServiceConfig, 'findFirst', 'cfg1'), wrap(db.aiServiceConfig, 'findMany', 'cfgN')];
+      const out: Record<string, unknown> = {};
+      try {
+        for (const [label, c] of ctxs) {
+          calls.length = 0;
+          const one = await resolveAiConfig(db, 'default', c);
+          const single = [...calls];
+          // #5075 (SEC10 P3-1): a platform-only name falls through the organization level to the platform level.
+          calls.length = 0;
+          const fall = await resolveAiConfig(db, 'hostonly', c);
+          const fallThrough = { level: fall?.ownerType ?? null, calls: [...calls] };
+          calls.length = 0;
+          const many = await resolveAiConfigs(db, c);
+          out[label] = {
+            level: one?.ownerType ?? null,
+            configId: one ? (one.config.id === orgCfg.id ? 'org' : one.config.id === host.id ? 'host' : 'other') : null,
+            names: many.map((r) => `${r.ownerType}:${r.config.name}`),
+            single,
+            fallThrough,
+            list: [...calls],
+          };
+        }
+      } finally { spies.forEach((sp) => sp.mockRestore()); }
+            expect(out).toEqual({
+        'org App alone': {
+          'level': 'ORGANIZATION',
+          'configId': 'org',
+          'names': [
+            'ORGANIZATION:default',
+            'HADRON_SERVER:hostonly',
+            'ORGANIZATION:orgonly'
+          ],
+          'single': [
+            'app',
+            'cfg1'
+          ],
+          'fallThrough': {
+            'level': 'HADRON_SERVER',
+            'calls': [
+              'app',
+              'cfg1',
+              'cfg1'
+            ]
+          },
+          'list': [
+            'app',
+            'cfgN',
+            'cfgN'
+          ]
+        },
+        'org App + its own Agent': {
+          'level': 'ORGANIZATION',
+          'configId': 'org',
+          'names': [
+            'ORGANIZATION:default',
+            'HADRON_SERVER:hostonly',
+            'ORGANIZATION:orgonly'
+          ],
+          'single': [
+            'app',
+            'agent',
+            'cfg1'
+          ],
+          'fallThrough': {
+            'level': 'HADRON_SERVER',
+            'calls': [
+              'app',
+              'agent',
+              'cfg1',
+              'cfg1'
+            ]
+          },
+          'list': [
+            'app',
+            'agent',
+            'cfgN',
+            'cfgN'
+          ]
+        },
+        "org App + another organization's Agent": {
+          'level': 'ORGANIZATION',
+          'configId': 'org',
+          'names': [
+            'ORGANIZATION:default',
+            'HADRON_SERVER:hostonly',
+            'ORGANIZATION:orgonly'
+          ],
+          'single': [
+            'app',
+            'agent',
+            'cfg1'
+          ],
+          'fallThrough': {
+            'level': 'HADRON_SERVER',
+            'calls': [
+              'app',
+              'agent',
+              'cfg1',
+              'cfg1'
+            ]
+          },
+          'list': [
+            'app',
+            'agent',
+            'cfgN',
+            'cfgN'
+          ]
+        },
+        "org App + a person's Agent": {
+          'level': 'ORGANIZATION',
+          'configId': 'org',
+          'names': [
+            'ORGANIZATION:default',
+            'HADRON_SERVER:hostonly',
+            'ORGANIZATION:orgonly'
+          ],
+          'single': [
+            'app',
+            'agent',
+            'cfg1'
+          ],
+          'fallThrough': {
+            'level': 'HADRON_SERVER',
+            'calls': [
+              'app',
+              'agent',
+              'cfg1',
+              'cfg1'
+            ]
+          },
+          'list': [
+            'app',
+            'agent',
+            'cfgN',
+            'cfgN'
+          ]
+        },
+        'org Agent alone': {
+          'level': 'ORGANIZATION',
+          'configId': 'org',
+          'names': [
+            'ORGANIZATION:default',
+            'HADRON_SERVER:hostonly',
+            'ORGANIZATION:orgonly'
+          ],
+          'single': [
+            'agent',
+            'cfg1'
+          ],
+          'fallThrough': {
+            'level': 'HADRON_SERVER',
+            'calls': [
+              'agent',
+              'cfg1',
+              'cfg1'
+            ]
+          },
+          'list': [
+            'agent',
+            'cfgN',
+            'cfgN'
+          ]
+        },
+        'server context': {
+          'level': 'HADRON_SERVER',
+          'configId': 'host',
+          'names': [
+            'HADRON_SERVER:default',
+            'HADRON_SERVER:hostonly'
+          ],
+          'single': [
+            'cfg1'
+          ],
+          'fallThrough': {
+            'level': 'HADRON_SERVER',
+            'calls': [
+              'cfg1'
+            ]
+          },
+          'list': [
+            'cfgN'
+          ]
+        }
+      });
+    });
   });
 });

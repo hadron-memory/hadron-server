@@ -247,6 +247,6 @@ describe('dispatchRunCallback — the first ticketed action (cor:acl:050:04)', (
 
   it('an expired ticket never gets consumed', async () => {
     await makeTicket({ expiresAt: new Date(Date.now() - 1000) });
-    expect(await consumeActionTicket(db, orgId, appId, 'comm.outbound', generateId())).toBe(false);
+    expect(await consumeActionTicket(db, { organizationId: orgId }, appId, 'comm.outbound', generateId())).toBe(false);
   });
 });

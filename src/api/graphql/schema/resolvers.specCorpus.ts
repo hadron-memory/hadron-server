@@ -14,6 +14,7 @@ import { mirrorNodeMoveToGit, type MovedNodeRef } from '../../../integrations/gi
 import type { Context } from './resolvers.js';
 import { nodeMoveOps, writeNodeCore } from './resolvers.mutation.node.js';
 import {
+  requireCallerIdentity,
   concealUnreadableDenial,
   isMemoryReadableCached,
   pageArgs,
@@ -54,7 +55,7 @@ import { NOT_QUESTION_FAMILY_WHERE } from '../../../lib/questions/index.js';
 import { unresolvedFeedbackOf, type UnresolvedFeedbackRow } from '../../../lib/comments/summary.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { SubtreeMoveMintedError } from '../../../lib/nodeSubtreeMove.js';
-import { InvalidLocError, validateLoc } from '../../../lib/validateLoc.js';
+import { validateLocOrThrow } from '../../../lib/validateLocOrThrow.js';
 import {
   SCANNED_FIELDS,
   corpusReferencePattern,
@@ -93,6 +94,7 @@ export const specCorpusMutations = {
     { memoryRef, loc, name }: { memoryRef: string; loc: string; name?: string | null },
     ctx: Context,
   ) => {
+    requireCallerIdentity(ctx);
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
     // (@codex P2, PR #1452) Authorize BEFORE taking any lock or touching the
     // tombstone, with the same concealment writeNodeCore applies later: an
@@ -167,6 +169,8 @@ export const specCorpusMutations = {
             txCtx,
             'create',
             {
+              ownerLimit: 'refuse',
+              sizeCeiling: 'skip',
               authoring: { kind: 'platform', record: 'spec-reservation' },
               ownsKind: 'spec',
               governedContext: 'node-write',
@@ -236,6 +240,7 @@ export const specCorpusMutations = {
     { memoryRef, parentLoc, after, name }: { memoryRef: string; parentLoc: string; after?: number | null; name?: string | null },
     ctx: Context,
   ) => {
+    requireCallerIdentity(ctx);
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
     await concealUnreadableDenial(ctx, memoryId, memoryRef, () => requireMemoryWriteAccess(ctx, memoryId));
     const kind = childKindOf(parentLoc);
@@ -335,6 +340,8 @@ export const specCorpusMutations = {
         txCtx,
         'create',
         {
+          ownerLimit: 'refuse',
+          sizeCeiling: 'skip',
           authoring: { kind: 'platform', record: 'spec-reservation' },
           ownsKind: 'spec',
           governedContext: 'node-write',
@@ -1137,8 +1144,15 @@ export const specCorpusRenumberMutations = {
     { memoryRef, fromLoc, toLoc, dryRun }: { memoryRef: string; fromLoc: string; toLoc: string; dryRun?: boolean | null },
     ctx: Context,
   ): Promise<SpecRenumberResultOut> => {
+    requireCallerIdentity(ctx);
     const corpus = await loadScannableCorpus(ctx, memoryRef);
-    for (const loc of [fromLoc, toLoc]) validateLocOrThrow(loc);
+    // #4461: `fromLoc` names an EXISTING node (looked up below, a miss is NODE_NOT_FOUND), so it is not capped: an
+    // existing over-cap spec must still be renumberable. Only `toLoc`, what the caller writes, is held to the
+    // contract; descendants are not re-capped (the gate is the contract unification, not a new subtree cap).
+    validateLocOrThrow(toLoc, 'toLoc');
+    // Not capped (an existing over-cap spec still renumbers), but charset and atoms are checked at any length, so a
+    // malformed `fromLoc` is refused without echo rather than reaching the NODE_NOT_FOUND message below.
+    validateLocOrThrow(fromLoc, 'fromLoc', { uncapped: true });
     if (fromLoc === toLoc || toLoc.startsWith(`${fromLoc}:`)) {
       throw new GraphQLError(`Cannot renumber "${fromLoc}" to "${toLoc}": the target is the spec itself or inside its subtree.`, {
         extensions: { code: 'BAD_USER_INPUT' },
@@ -1332,24 +1346,13 @@ async function rewriteWithRetry(
         { memoryId: corpus.id, loc: node.loc, ...plan.patch, reason: `renumber ${fromLoc} → ${toLoc}` },
         ctx,
         'update',
-        { authoring: { kind: 'platform', record: 'spec-renumber' }, targetNodeId: node.id, guardRevSeq: node.revSeq, ownsKind: 'spec', governedContext: 'node-write' },
+        { ownerLimit: 'count-only', sizeCeiling: 'skip', authoring: { kind: 'platform', record: 'spec-renumber' }, targetNodeId: node.id, guardRevSeq: node.revSeq, ownsKind: 'spec', governedContext: 'node-write' },
       );
       return { fields: Object.keys(plan.patch), count: plan.count, loc: node.loc };
     } catch (e) {
       const conflict = e instanceof GraphQLError && e.extensions?.code === 'NODE_WRITE_CONFLICT';
       if (!conflict || attempt >= REWRITE_ATTEMPTS) throw e;
     }
-  }
-}
-
-function validateLocOrThrow(loc: string): void {
-  try {
-    validateLoc(loc);
-  } catch (err) {
-    if (err instanceof InvalidLocError) {
-      throw new GraphQLError(err.message, { extensions: { code: err.name, loc: err.loc, segment: err.segment } });
-    }
-    throw err;
   }
 }
 
@@ -1468,6 +1471,7 @@ async function mintMemoryNodes(
   memoryRef: string,
   dryRun: boolean,
 ): Promise<MintReport> {
+  requireCallerIdentity(ctx);
   const { id } = await resolveMemoryRef(ctx.db, memoryRef);
   await concealUnreadableDenial(ctx, id, memoryRef, () => mayMintNodes(ctx, id));
 
@@ -1723,12 +1727,10 @@ async function mintMemoryNodes(
       // Unreachable under the fence; refuse rather than mint a partial set.
       throw new Error(`Mint stamped ${mintedCount} of ${ids.length} nodes; the memory changed under the fence`);
     }
-    // The legacy corpus stamp (#1448), kept for one release as the record of
-    // the latest mint; corpus state itself is derived from the nodes.
-    await tx.memory.update({
-      where: { id },
-      data: { corpusDraft: false, corpusMintedAt: now, corpusMintedBy: ctx.userId ?? ctx.clientId ?? null },
-    });
+    // #5063 (Xan R4a): the legacy corpus stamp is no longer written — the
+    // `minted_at` stamped on the nodes above IS the record. The memory row
+    // still bumps so change feeds see the mint.
+    await tx.memory.update({ where: { id }, data: { updatedAt: now } });
     return { ...report, minted: true, mintedCount, remintedCount: remintLocs.length };
   }, { timeout: 120_000 });
 }

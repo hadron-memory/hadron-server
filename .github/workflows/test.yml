@@ -18,9 +18,11 @@ name: Unit Tests
 
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
 
+# A queue entry (merge_group) has no PR number, so it gets its own group and is never cancelled; see CLAUDE.md, Merge notes (#4819).
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -159,10 +161,26 @@ jobs:
         # - the fork count pinned at 3, vitest's default on these 4-vCPU runners (CPUs - 1), so a changed runner size
         #   can't silently change it. A trial of 2 (Hugo's rule: pin 3 if any shard's median grew more than 30%) grew
         #   shard 4's median by 39%, while healthy shards peaked at 3.7 GB used of 16 GB at 2 forks.
+        # #4646: the 45 min step timeout never fired on the lost runners (they were gone 48-53 min in), and GitHub
+        # keeps no log for a lost job. So a watchdog (scripts/ci/vitest-watchdog.sh) ends the run itself at
+        # WATCHDOG_MINUTES while the VM is alive: a process list and a final [sampler] block to stdout, then the
+        # suite stopped and killed through its own process group and its PID tree (never by name), a check that
+        # no member of that group and no walked PID still runs ("killed", or "kill NOT verified" with the reason), then exit 124, so the
+        # step fails with its log kept. Inside the
+        # budget it returns vitest's own exit code. LIMIT: if the VM freezes outright before the budget, no dump
+        # appears, which is itself the finding (#4278 stays open). WATCHDOG_STEP_TIMEOUT_MINUTES must equal
+        # timeout-minutes below; vitest-watchdog.test.mjs pins that, and that the budget is under it. The budget
+        # counts from the step's first lines (WATCHDOG_STEP_STARTED_AT, whole seconds since boot: the monotonic clock
+        # the watchdog reads too; a failed read fails the step), so the sampler setup and the psql probe come out of
+        # it, and the probe is bounded to 130 s at most (TERM at 120 s, KILL 10 s later) so it cannot hold the watchdog back (#4647 BLIND P2).
         timeout-minutes: 45
         env:
           HADRON_TEST_MAX_WORKERS: '3'
+          WATCHDOG_MINUTES: '40'
+          WATCHDOG_STEP_TIMEOUT_MINUTES: '45'
         run: |
+          read -r up _ < /proc/uptime
+          export WATCHDOG_STEP_STARTED_AT=${up%.*}
           echo "[sampler] nproc=$(nproc)"
           (
             set +e
@@ -174,8 +192,8 @@ jobs:
           ) &
           sampler=$!
           trap 'kill "$sampler" 2>/dev/null || true' EXIT
-          psql "$DATABASE_URL" -Atc "SELECT 'cluster: ' || version()"
-          pnpm test --shard=${{ matrix.shard }}/${{ env.SHARD_TOTAL }}
+          timeout -k 10 120 psql "$DATABASE_URL" -Atc "SELECT 'cluster: ' || version()"
+          scripts/ci/vitest-watchdog.sh -- pnpm test --shard=${{ matrix.shard }}/${{ env.SHARD_TOTAL }}
 
       # #4487: the pg16 floor lane also runs the file holding #4476's version-dependent pins, whichever shard owns it:
       # here the PG17-only pins skip and the no-GUC guard path is the live executor (the PG17 lanes run the rest).

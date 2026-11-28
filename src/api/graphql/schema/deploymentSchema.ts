@@ -4,10 +4,13 @@ import { resolvers } from './resolvers.js';
 import { SERVER_INFO_SWITCH_FIELDS, serverInfoFieldPresence, signingSurfacePolicy } from '../../../lib/signing/surface.js';
 
 const signingTypes = new Set([
+  'SecretChangeRequest',
   'SigningRequestState', 'SignatureState', 'SigningRequester',
   'SigningRequest', 'SigningRequestsPage', 'NodeSignature', 'NodeSignatureStatus',
   // #3649 slice B: grant signing rides the same switch (ruling 0255, item 17).
   'GrantSigningRequestState', 'GrantSigningRequest',
+  // #5001: a selection of grants signed with one touch rides the same switch.
+  'GrantSigningSelectionState', 'GrantSigningSelection',
   // #3690 PR 2: creating a grant rides the same switch, so none can be made where it could not be signed.
   'CreateGrantInput', 'IssueSecretReadClientInput', 'SecretReadClientIssued', 'SecretRevealed',
   // #3649 slice D: Grant.signatureStatus goes with them (its type is in this set).
@@ -20,7 +23,7 @@ const registrationTypes = new Set(['PasskeyCredential', 'PasskeyWindow', 'Passke
 /** #1918: public-reference generators consume the same per-flag field data. */
 export const capabilityFields: Readonly<Record<string, Readonly<Record<string, 'signing' | 'registration'>>>> = {
   ServerInfo: SERVER_INFO_SWITCH_FIELDS,
-  Mutation: { createGrant: 'signing', issueSecretReadClient: 'signing', revealSecret: 'signing' },
+  Mutation: { createGrant: 'signing', setSecretProtected: 'signing', withdrawSecretChangeRequest: 'signing', issueSecretReadClient: 'signing', revealSecret: 'signing' },
 };
 
 /** #1895: Apollo execution, introspection and SDL discovery share this schema.

@@ -10,12 +10,14 @@ import { GraphQLError } from 'graphql';
 // Spec 049 Phase 3b — a trigger's scopeRef, gated and resolved in the App's context.
 import { resolveScopeForTrigger } from '../../../lib/scopes.js';
 import { generateId } from '../../../lib/id.js';
+import { bootPromptRefusal } from '../../../lib/bootPrompt/refusal.js';
 import {
   mintAppRun,
   handleSpawnCompletion,
   RunLaunchDeniedError,
   setQuotaLimit as setQuotaLimitKernel,
   ensureQuotaRowsForScope,
+  type QuotaScopeKind,
 } from '../../../jobs/appRuns.js';
 import { mintWebhookPlatformToken, generateWebhookSecret } from '../../webhooks.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
@@ -29,21 +31,28 @@ import {
   legacyMemoryUrnToCanonical,
 } from '../../../lib/urn.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { resolveAppRunRef, composeAppRunUrn } from '../../../lib/entityRef/appRunRef.js';
 import { AppRunNotFoundError } from '../../../lib/entityRef/errors.js';
 import { isId } from '../../../lib/entityRef/shape.js';
+import { assertAppRunRefShape } from '../../../lib/entityRef/appRunRefShape.js';
+import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { type Context, requireOrgRole, requireOwnerOrOrgRole, isPlatformAdmin } from './resolvers.helpers.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { admitWorkerTrigger, workerBoundActor, workerTriggerGrantEnforced, workerTriggerWouldBeAdmitted } from '../../../lib/grants/triggerGrant.js';
 import { requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
-import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
+import { authorizationDenied, AUTHORIZATION_DENIED_CODE } from '../../../lib/auth/authorizationDenied.js';
 import { hasAppRelationship } from '../../../lib/auth/appRelationship.js';
+import { refHasUnstorableChars } from '../../../lib/entityRef/refNamesNothing.js';
+import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
+import { managesApp } from '../../../lib/auth/appManagement.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
+import { type OwnerRef, isOwnedBy, personalAppRunsEnabled } from '../../../lib/owner.js';
 
 /** Orderable columns on the appRuns list (#833). Mirrors the SDL enum. */
-export type AppRunSortField = 'createdAt' | 'startedAt' | 'finishedAt' | 'status';
+export type AppRunSortField = 'createdAt' | 'startedAt' | 'finishedAt' | 'status' | 'duration';
 
 /**
  * #836 — the status filter, widened from one value to a disjunction.
@@ -103,6 +112,10 @@ export function buildAppRunOrderBy(
       return [{ finishedAt: { sort: dir, nulls: 'last' } }, tiebreak];
     case 'status':
       return [{ status: dir }, tiebreak];
+    case 'duration':
+      // #855: the stored generated app_runs.duration_ms (finished_at - started_at). NULL (unstarted or unfinished) last
+      // in both directions, like the timestamps; negative (clock skew) as stored.
+      return [{ durationMs: { sort: dir, nulls: 'last' } }, tiebreak];
     case 'createdAt':
     default:
       return [{ createdAt: dir }, tiebreak];
@@ -132,6 +145,108 @@ export interface CreateAgentScheduleInput extends TriggerRunBudgets {
   /** Spec 049 Phase 3b — the trigger's scope (id, or a name in the App's context); update: '' clears. */
   scopeRef?: string | null;
   enabled?: boolean | null;
+}
+
+/**
+ * #4893: resolve an App ref on an org-scoped door, or answer the door's bare unknown-App
+ * NOT_FOUND — missing, malformed and ambiguous all answer the same bytes (the door's stated
+ * non-disclosure posture, cor:api:120:01). A database fault propagates.
+ */
+async function resolveAppRefOrNotFound(ctx: Context, ref: string): Promise<string> {
+  try {
+    return (await resolveAppRef(ctx.db, ref)).id;
+  } catch (e) {
+    if (isAppRefResolutionFailure(e)) throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
+    throw e;
+  }
+}
+
+type QuotaScopeRef = { scopeKind: QuotaScopeKind; scopeId: string };
+
+/**
+ * #5074: the counter scopes a quota door reads or sets, after its access gate (cor:acl:050:04, cor:dmo:050:12).
+ *  - `orgRef` (with or without `appRef`): the organization's ADMIN gate, unchanged.
+ *  - `appRef` alone: an organization's App takes the same callers as the `orgRef` form; a person's App takes the owner,
+ *    owner-role members and a platform admin. Every denial (and a refused principal on a person's App) answers the
+ *    bytes of an unknown ref, so the door does not tell a caller which Apps exist (cor:api:120:01).
+ *  - `userRef` alone: that person as themself, or a platform admin; a refused principal is FORBIDDEN.
+ * `target` is the one scope a limit is set for; `scopes` is every scope a read shows.
+ */
+async function resolveQuotaScopes(
+  ctx: Context,
+  refs: { orgRef?: string | null; appRef?: string | null; userRef?: string | null },
+): Promise<{ scopes: QuotaScopeRef[]; target: QuotaScopeRef }> {
+  const has = (v?: string | null) => v != null && v.trim() !== '';
+  const orgRef = has(refs.orgRef) ? refs.orgRef! : null;
+  const appRef = has(refs.appRef) ? refs.appRef! : null;
+  const userRef = has(refs.userRef) ? refs.userRef! : null;
+  if ((!orgRef && !appRef && !userRef) || (userRef && (orgRef || appRef))) {
+    throw new GraphQLError('Give orgRef, orgRef with appRef, appRef alone, or userRef alone.', {
+      extensions: { code: 'BAD_USER_INPUT' },
+    });
+  }
+  const notFound = () => new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
+
+  if (userRef) {
+    if (isRefusedPrincipal(ctx)) throw authorizationDenied();
+    const self = ctx.userId === userRef;
+    if (!self && !isPlatformAdmin(ctx)) throw authorizationDenied();
+    if (!self) {
+      // A ref no row can hold names nothing (a NUL or lone surrogate would fail in the driver, not as NOT_FOUND).
+      if (refHasUnstorableChars(userRef)) throw new GraphQLError('User not found.', { extensions: { code: 'NOT_FOUND' } });
+      const live = await ctx.db.user.findFirst({ where: { id: userRef, deletedAt: null }, select: { id: true } });
+      if (!live) throw new GraphQLError('User not found.', { extensions: { code: 'NOT_FOUND' } });
+    }
+    const t: QuotaScopeRef = { scopeKind: 'user', scopeId: userRef };
+    return { scopes: [t], target: t };
+  }
+
+  if (orgRef) {
+    const { id: organizationId } = await resolveOrgRef(ctx.db, orgRef);
+    await requireOrgRole(ctx, organizationId, 'ADMIN');
+    const org: QuotaScopeRef = { scopeKind: 'org', scopeId: organizationId };
+    if (!appRef) return { scopes: [org], target: org };
+    const id = await resolveAppRefOrNotFound(ctx, appRef);
+    const app = await ctx.db.app.findFirst({ where: { id, organizationId, deletedAt: null }, select: { id: true } });
+    if (!app) throw notFound();
+    const a: QuotaScopeRef = { scopeKind: 'app', scopeId: app.id };
+    return { scopes: [org, a], target: a };
+  }
+
+  // appRef alone.
+  const id = await resolveAppRefOrNotFound(ctx, appRef!);
+  const app = await ctx.db.app.findFirst({
+    where: { id, deletedAt: null },
+    select: { id: true, organizationId: true, ownerUserId: true },
+  });
+  if (!app) throw notFound();
+  const a: QuotaScopeRef = { scopeKind: 'app', scopeId: app.id };
+  if (app.ownerUserId === null && app.organizationId !== null) {
+    try {
+      await requireOwnerOrOrgRole(ctx, app, 'ADMIN');
+    } catch (e) {
+      // Only the gate's ACCESS refusal folds into the unknown-ref answer (cor:api:120:01); any other error is a fault and
+      // propagates.
+      if (e instanceof GraphQLError && e.extensions?.code === AUTHORIZATION_DENIED_CODE) throw notFound();
+      throw e;
+    }
+    // An App of a deleted organization answers as the orgRef form does not (it refuses the organization): not found.
+    const liveOrg = await ctx.db.organization.findFirst({ where: { id: app.organizationId, deletedAt: null }, select: { id: true } });
+    if (!liveOrg) throw notFound();
+    const org: QuotaScopeRef = { scopeKind: 'org', scopeId: app.organizationId };
+    return { scopes: [org, a], target: a };
+  }
+  if (app.ownerUserId === null) throw notFound();
+  // A person's App: never an App key, an impersonated session or a run.
+  if (isRefusedPrincipal(ctx)) throw notFound();
+  const admin = isPlatformAdmin(ctx);
+  if (!admin && !(await managesApp(ctx, app))) throw notFound();
+  // The owner's own account counters are the owner's (or a platform admin's), not the App manager's.
+  const ownerRows = admin || ctx.userId === app.ownerUserId;
+  return {
+    scopes: ownerRows ? [a, { scopeKind: 'user', scopeId: app.ownerUserId }] : [a],
+    target: a,
+  };
 }
 
 /** Resolve the App ref (PK or URN), require it live, and require org-ADMIN on its org. */
@@ -259,8 +374,18 @@ async function requireRunIdentityRelationship(ctx: Context, appId: string, userI
  */
 export async function mayReadAppRunWithoutOrgRole(
   ctx: Context,
-  run: { appId: string; userId: string | null; createdBy: string | null; triggerKind: string },
+  run: { appId: string; organizationId: string | null; userId: string | null; createdBy: string | null; triggerKind: string },
 ): Promise<boolean> {
+  // #5077 (F3a-2; cor:dmo:050:12): a run of an App a person owns (no organization) is read by the App's own key and by a
+  // user for their own run (the arms below), never by a platform admin and never by an impersonated session, a run
+  // principal or an ambiguous actor. The person-run branch comes first, so no organization arm sees a null id.
+  if (run.organizationId === null) {
+    if (!ctx.userId) return !!ctx.appId && ctx.appId === run.appId;
+    if (isRefusedPrincipal(ctx)) return false;
+    const own = run.userId === ctx.userId || (run.triggerKind === 'MANUAL' && run.createdBy === ctx.userId);
+    return own && (await hasAppRelationship(ctx.db, run.appId, ctx.userId));
+  }
+  // #5077 (decision d; cor:dmo:050:12): the platform-admin arm reads an organization's run only, never a person's (above).
   if (isPlatformAdmin(ctx)) return true;
   if (!ctx.userId) return !!ctx.appId && ctx.appId === run.appId;
   if (ctx.impersonation) return false;
@@ -275,14 +400,76 @@ export async function mayReadAppRunWithoutOrgRole(
  */
 export async function canReadAppRun(
   ctx: Context,
-  run: { appId: string; organizationId: string; userId: string | null; createdBy: string | null; triggerKind: string },
+  run: { appId: string; organizationId: string | null; userId: string | null; createdBy: string | null; triggerKind: string },
 ): Promise<boolean> {
   if (await mayReadAppRunWithoutOrgRole(ctx, run)) return true;
+  // #5077 (F3a-2): a run of an App a person owns has no organization READER to fall back to; whoever manages that App (its
+  // owner, an owner-role member) reads every run of it. Never `requireOrgRole` with a null id.
+  if (run.organizationId === null) return managesPersonalAppOf(ctx, run.appId);
   try {
     await requireOrgRole(ctx, run.organizationId, 'READER');
     return true;
   } catch (err) {
     if (err instanceof GraphQLError && err.extensions?.code === 'FORBIDDEN') return false;
+    throw err;
+  }
+}
+
+/**
+ * #5077 (F3a-2; cor:dmo:050:12): does this caller manage the App a person owns, as themself? The owner and an owner-role
+ * member (`managesApp`), never an App key, an impersonated session, a run principal or an ambiguous actor
+ * (`isRefusedPrincipal`), and never a platform admin (`managesApp` stops at a person's App). False for an organization's
+ * App and for an App that is gone, so it can only widen a person's-run gate.
+ */
+export async function managesPersonalAppOf(ctx: Context, appId: string): Promise<boolean> {
+  if (isRefusedPrincipal(ctx)) return false;
+  const app = await ctx.db.app.findFirst({ where: { id: appId, deletedAt: null }, select: { id: true, organizationId: true, ownerUserId: true } });
+  if (!app || app.organizationId !== null || app.ownerUserId === null) return false;
+  return managesApp(ctx, app);
+}
+
+/**
+ * #5077 (F3a-2, Q4, Petra; cor:dmo:050:12): the AppRun columns a platform admin who cancels a run of an App a person owns
+ * gets back: its identity, owner, status, timestamps, budgets and spend. An ALLOWLIST: every other column, including one
+ * added later, is withheld (`withheldRunContent`). `ADMIN_CANCEL_WITHHELD_RUN_FIELDS` names today's withheld columns, so
+ * the classification pin can fail on a column that is in neither list.
+ */
+export const ADMIN_CANCEL_KEPT_RUN_FIELDS: ReadonlySet<string> = new Set([
+  'id', 'organizationId', 'ownerUserId', 'appId', 'agentId', 'userId', 'triggerKind', 'triggerId', 'parentRunId', 'createdBy',
+  'status', 'attempts', 'timeoutMs', 'publishedAt', 'startedAt', 'finishedAt', 'durationMs', 'createdAt',
+  'budgetTokens', 'budgetActions', 'budgetTokensInitial', 'budgetActionsInitial', 'tokensSpent', 'actionsSpent', 'costMicroCents',
+]);
+export const ADMIN_CANCEL_WITHHELD_RUN_FIELDS: ReadonlySet<string> = new Set([
+  'automationPin', 'entryNodeUrn', 'entryNodeId', 'eventData', 'data', 'hops', 'derivedLog', 'spawn', 'policy', 'curNodeUrn',
+  'scopeSnapshot', 'registerSnapshot', 'failure',
+]);
+
+/**
+ * The run with every column outside `ADMIN_CANCEL_KEPT_RUN_FIELDS` withheld: null, and `entryNodeUrn` '' (it is `String!`
+ * in the SDL). The nested field resolvers gate themselves (`servedPrompt` on `canReadAppRun`, which refuses a platform
+ * admin a person's run), so they disclose nothing either.
+ */
+function withheldRunContent<T extends Record<string, unknown>>(run: T): T {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(run)) out[key] = ADMIN_CANCEL_KEPT_RUN_FIELDS.has(key) ? value : null;
+  out.entryNodeUrn = '';
+  return out as T;
+}
+
+/**
+ * #5037: a caller with no standing over a schedule or webhook (not even an org READER) is answered exactly as for an id that
+ * names nothing, so the door is not an existence oracle for another org's id (the run-door concealment convention, #1577).
+ * A caller who can read it keeps the door's own FORBIDDEN. Only the FORBIDDEN code is folded: any other error propagates.
+ */
+async function concealUnlessOrgReader(ctx: Context, entity: { organizationId: string; appId: string }, notFound: string): Promise<void> {
+  // An App key of the entity's own App has standing over it (it is the entity's own principal): its refusal stays the door's.
+  if (ctx.appId && ctx.appId === entity.appId) return;
+  try {
+    await requireOrgRole(ctx, entity.organizationId, 'READER');
+  } catch (err) {
+    if (err instanceof GraphQLError && err.extensions?.code === 'FORBIDDEN') {
+      throw new GraphQLError(notFound, { extensions: { code: 'NOT_FOUND' } });
+    }
     throw err;
   }
 }
@@ -309,6 +496,15 @@ async function requireManualRunAccess(ctx: Context, appRef: string) {
   if (!app) {
     throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
   }
+  // #5077 (F3a-2; cor:dmo:050:12): an App a person owns, with the switch on, launches for its own key (no user) or for
+  // whoever manages it as themself (the owner, an owner-role member). Nobody else: not an ordinary member or subscriber,
+  // not a platform admin, not an impersonated session, a run principal or a user who only selected the App. With the
+  // switch off, the gate below runs as on main and ends in main's refusal.
+  if (app.organizationId === null && app.ownerUserId !== null && personalAppRunsEnabled()) {
+    const pureAppKey = !ctx.userId && !!ctx.appId && ctx.appId === app.id;
+    if (!pureAppKey && (isRefusedPrincipal(ctx) || !(await managesApp(ctx, app)))) throw authorizationDenied();
+    return { id: app.id, owner: { userId: app.ownerUserId } as OwnerRef };
+  }
   // Platform admin, or the App triggering under its own key.
   if (isPlatformAdmin(ctx) || ctx.appId === app.id) {
     // authorized — fall through to the shared organizationId guard below
@@ -327,7 +523,7 @@ async function requireManualRunAccess(ctx: Context, appRef: string) {
       extensions: { code: 'BAD_USER_INPUT' },
     });
   }
-  return { id: app.id, organizationId: app.organizationId };
+  return { id: app.id, owner: { organizationId: app.organizationId } as OwnerRef };
 }
 
 /**
@@ -342,7 +538,7 @@ async function requireManualRunAccess(ctx: Context, appRef: string) {
 export async function assertManualRunAllowed(
   ctx: Context,
   input: { appRef: string; entryNodeUrn: string; runAsSelf?: boolean | null; agentRef?: string | null },
-): Promise<{ id: string; organizationId: string; agentId: string | null }> {
+): Promise<{ id: string; owner: OwnerRef; agentId: string | null }> {
   const app = await requireManualRunAccess(ctx, input.appRef);
   assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
   // runAsSelf REQUIRES an authenticated user — surface it here (pre-write) too.
@@ -368,9 +564,15 @@ export async function assertManualRunAllowed(
   const normalized = normalizeUrnForLookup(memoryUrn);
   const entryMem = await ctx.db.memory.findFirst({
     where: { OR: [{ urn: normalized }, { urn: legacyMemoryUrnToCanonical(normalized) }] },
-    select: { organizationId: true },
+    select: { organizationId: true, ownerUserId: true },
   });
-  if (entryMem && entryMem.organizationId !== app.organizationId) {
+  // #5077 (F3a-2): a person's App takes its entry from a memory that person owns (`isOwnedBy`: two persons' memories both
+  // have a null organization, so never `!==` on it), refused with mint's own ENTRY_NOT_IN_ORG before any write. An
+  // organization's App keeps main's comparison and refusal.
+  if (entryMem && 'userId' in app.owner && !isOwnedBy(entryMem, app.owner)) {
+    throw new GraphQLError('The entry node is not in a memory this App\'s owner owns.', { extensions: { code: 'ENTRY_NOT_IN_ORG' } });
+  }
+  if (entryMem && 'organizationId' in app.owner && entryMem.organizationId !== app.owner.organizationId) {
     throw new GraphQLError(
       'The entry node must belong to the same organization as the App.',
       { extensions: { code: 'BAD_USER_INPUT' } },
@@ -404,6 +606,21 @@ async function resolveManualRunAgent(
 }
 
 /**
+ * #3911 (V70, cor:agt:040:10): the Agent a schedule or webhook is created with, chosen exactly as a manual run chooses
+ * it, but with no fall-through: an App with no installed Agent is refused here (`BOOT_PROMPT_NOT_SET`, the refusal a
+ * run of it gets at mint) instead of storing a trigger that names none. Every refusal lands before any write.
+ */
+async function resolveTriggerAgent(
+  ctx: Context,
+  appId: string,
+  agentRef: string | null | undefined,
+): Promise<string> {
+  const agentId = await resolveManualRunAgent(ctx, appId, agentRef);
+  if (!agentId) throw bootPromptRefusal('BOOT_PROMPT_NOT_SET', { surface: 'run', agentName: '' });
+  return agentId;
+}
+
+/**
  * Mint a MANUAL AppRun for an entry (task) node under an App — the shared
  * execute path behind the `triggerAppRun` mutation, `runTask(appRef:)` (#529),
  * and `importNode(taskRef:)` (#528). Authorized by the interactive gate (#530).
@@ -418,7 +635,7 @@ async function resolveManualRunAgent(
  */
 export async function mintManualRun(
   ctx: Context,
-  app: { id: string; organizationId: string; agentId?: string | null },
+  app: { id: string; owner: OwnerRef; agentId?: string | null },
   input: {
     entryNodeUrn: string;
     eventData?: Record<string, unknown> | null;
@@ -433,7 +650,8 @@ export async function mintManualRun(
     return await mintAppRun(ctx.db, {
       // #2737: a composed import publishes only after its outer transaction commits.
       publish: options.publish,
-      organizationId: app.organizationId,
+      // #5077: the App's owner as the manual gate resolved it, an organization or a person; never taken from the caller.
+      owner: app.owner,
       appId: app.id,
       // #3689: passed through as resolved (no `?? null` default). None reaches mint's one typed refusal,
       // BOOT_PROMPT_NOT_SET (cor:agt:040:07); a stored run always names its Agent (cor:agt:010:01 rev 45).
@@ -516,7 +734,7 @@ export const appRunMutations = {
     const app = await requireScheduleAdmin(ctx, input.appRef);
     const budgets = triggerBudgetPatch(input);
     assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
-    const agentId = await resolveInstalledAgent(ctx, app.id, input.agentRef);
+    const agentId = await resolveTriggerAgent(ctx, app.id, input.agentRef);
     const timezone = input.timezone?.trim() || 'UTC';
     // Exactly one of cron (recurring) / runAt (one-shot) — mirrors
     // chk_agent_schedule_cron_xor_run_at so the constraint never surfaces
@@ -577,24 +795,26 @@ export const appRunMutations = {
       return withAuthorizedTx(
         ctx,
         [{ kind: 'org', id: app.organizationId }, { kind: 'app', id: app.id },
-          ...(agentId ? [{ kind: 'agent' as const, id: agentId }] : [])],
+          { kind: 'agent' as const, id: agentId }],
         async (txCtx) => {
           const currentApp = await requireScheduleAdmin(txCtx, input.appRef);
           if (currentApp.id !== app.id || currentApp.organizationId !== app.organizationId) {
             throw new Error('App scope changed; retry schedule creation');
           }
-          if (agentId) await resolveInstalledAgent(txCtx, app.id, input.agentRef);
+          if (await resolveTriggerAgent(txCtx, app.id, input.agentRef) !== agentId) {
+            throw new Error('Agent changed; retry schedule creation');
+          }
           if (input.scopeRef?.trim()) await resolveScopeForTrigger(txCtx, app.id, input.scopeRef);
         },
         async (tx, txCtx) => {
-          const automationPin = await captureSetupConsent(tx as never, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, txCtx, configSelection({ ...input, agentId }));
+          const automationPin = await captureSetupConsent(tx as never, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, { organizationId: app.organizationId }, txCtx, configSelection({ ...input, agentId }));
           const entryNodeId = entryIdOf(automationPin);
           await admitWorkerTrigger(tx, txCtx, { appId: app.id, action: 'schedule.create', entryNodeId });
           return create(tx, automationPin, entryNodeId);
         },
       );
     }
-    const automationPin = await captureSetupConsent(ctx.db, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId }));
+    const automationPin = await captureSetupConsent(ctx.db, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, { organizationId: app.organizationId }, ctx, configSelection({ ...input, agentId }));
     return create(ctx.db, automationPin, entryIdOf(automationPin));
   },
 
@@ -608,6 +828,7 @@ export const appRunMutations = {
       where: { id, deletedAt: null },
     });
     if (!observed) throw new GraphQLError('Schedule not found.', { extensions: { code: 'NOT_FOUND' } });
+    await concealUnlessOrgReader(ctx, observed, 'Schedule not found.');
     await requireOrgRole(ctx, observed.organizationId, 'ADMIN');
     // The adjudicated stop-only exception cannot carry any authority-changing field.
     const disableOnly = input.enabled === false && Object.keys(input).every(key => key === 'enabled');
@@ -650,10 +871,22 @@ export const appRunMutations = {
         if (input.entryNodeUrn != null) assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
         // agentRef semantics on update: undefined/'' = no change (''≡absent),
         // null = clear the agent, string = set (validated as installed).
-        const agentId =
+        let agentId =
           input.agentRef !== undefined && input.agentRef !== ''
             ? await resolveInstalledAgent(txCtx, existing.appId, input.agentRef)
             : undefined;
+        // #3911 (V71): a row the migration disabled for want of an Agent cannot be re-enabled until one is named. The
+        // edit is judged as a creation is (V70): the App's single installed Agent is recorded, else RUN_AGENT_REQUIRED
+        // (several) or BOOT_PROMPT_NOT_SET (none), before any write. A row that already names an Agent is untouched.
+        // The guard judges the row AS IT WILL BE: an edit that leaves an enabled schedule with no Agent is refused the
+        // same way, so `agentRef: null` (clear) on an enabled row, alone or with `enabled: true`, cannot recreate the state.
+        // Clearing the Agent together with `enabled: false` stays allowed (a disabled null-agent row is the V71 state).
+        // Only the two edits that can PRODUCE the state are judged (turning it on, or clearing the Agent); an unrelated edit
+        // (a rename) of a row already in that state is not refused.
+        if ((input.enabled ?? existing.enabled) && (input.enabled === true || input.agentRef === null)
+          && (agentId === undefined ? existing.agentId : agentId) == null) {
+          agentId = await resolveTriggerAgent(txCtx, existing.appId, null);
+        }
         if (input.policy != null && parsePolicyLink(input.policy) == null) {
           throw new GraphQLError('policy must be { allow: string[] }.', {
             extensions: { code: 'BAD_USER_INPUT' },
@@ -673,7 +906,7 @@ export const appRunMutations = {
             // #2438 BLIND P2 (Andi): with no new entry supplied, capture by
             // the stamped id — after a rename the stored URN is stale, and
             // re-capturing it would break a working schedule's consent.
-            input.entryNodeUrn ?? existing.entryNodeId ?? existing.entryNodeUrn, existing.organizationId, txCtx, configSelection({ ...existing, ...input, agentId: agentId === undefined ? existing.agentId : agentId })).then(consent => ({
+            input.entryNodeUrn ?? existing.entryNodeId ?? existing.entryNodeUrn, { organizationId: existing.organizationId }, txCtx, configSelection({ ...existing, ...input, agentId: agentId === undefined ? existing.agentId : agentId })).then(consent => ({
             // #2438: a re-captured setup pin re-stamps the entry id with
             // it (the marker's absent entryId clears to null only when the
             // entry itself no longer resolves — the URN path takes over).
@@ -715,6 +948,7 @@ export const appRunMutations = {
   deleteAgentSchedule: async (_: unknown, { id }: { id: string }, ctx: Context) => {
     const existing = await ctx.db.agentSchedule.findFirst({ where: { id, deletedAt: null } });
     if (!existing) throw new GraphQLError('Schedule not found.', { extensions: { code: 'NOT_FOUND' } });
+    await concealUnlessOrgReader(ctx, existing, 'Schedule not found.');
     await requireOrgRole(ctx, existing.organizationId, 'ADMIN');
     await ctx.db.agentSchedule.update({
       where: { id },
@@ -744,10 +978,37 @@ export const appRunMutations = {
   ) => triggerManualRun(ctx, input),
 
   /** The kill switch's manual handle (cor:agt:010:02). */
-  cancelAppRun: async (_: unknown, { id }: { id: string }, ctx: Context) => {
+  cancelAppRun: async (_: unknown, { ref }: { ref: string }, ctx: Context) => {
+    // #4141: PK or URN. The shape check is local to this door (a ref that cannot name a run is a caller error); a
+    // well-shaped miss, an ambiguous legacy ref and a run that does not exist all answer today's NOT_FOUND. Only a
+    // resolver miss is folded: a database fault propagates. The RESOLVED id feeds every statement below.
+    assertAppRunRefShape(ref);
+    let id: string;
+    try {
+      ({ id } = await resolveAppRunRef(ctx.db, ref));
+    } catch (error) {
+      if (!refNamesNothing(error, { ambiguousNamesNothing: true })) throw error;
+      throw new GraphQLError('Run not found.', { extensions: { code: 'NOT_FOUND' } });
+    }
     const run = await ctx.db.appRun.findUnique({ where: { id } });
     if (!run) throw new GraphQLError('Run not found.', { extensions: { code: 'NOT_FOUND' } });
-    await requireOrgRole(ctx, run.organizationId, 'ADMIN');
+    // #5077 (F3a-2; cor:dmo:050:12): a run of an App a person owns is cancelled by whoever manages that App as themself
+    // (the owner, an owner-role member), who gets the full run back, and by a platform admin as themself (the kill switch,
+    // cor:agt:010:02), who gets the run with its content withheld (Q4), since a platform admin never reads a person's run.
+    // A caller who may read the run but not cancel it (the App's own key, a member's own run) is FORBIDDEN; anyone else is
+    // answered as for a run that does not exist.
+    let masked = false;
+    if (run.organizationId === null) {
+      if (!(await managesPersonalAppOf(ctx, run.appId))) {
+        if (isPlatformAdmin(ctx) && !isRefusedPrincipal(ctx)) masked = true;
+        else if (await canReadAppRun(ctx, run)) throw authorizationDenied();
+        else throw new GraphQLError('Run not found.', { extensions: { code: 'NOT_FOUND' } });
+      }
+    } else {
+      // #5037: a caller who cannot read the run is answered as for a run that does not exist.
+      if (!(await canReadAppRun(ctx, run))) throw new GraphQLError('Run not found.', { extensions: { code: 'NOT_FOUND' } });
+      await requireOrgRole(ctx, run.organizationId, 'ADMIN');
+    }
     const cancelled = await ctx.db.appRun.updateMany({
       where: { id, status: { in: ['PENDING', 'RUNNING'] } },
       data: { status: 'CANCELLED', finishedAt: new Date(), failure: { code: 'CANCELLED' } },
@@ -759,7 +1020,8 @@ export const appRunMutations = {
         console.error(`[spawn] completion handling failed for cancelled ${id}:`, err),
       );
     }
-    return ctx.db.appRun.findUniqueOrThrow({ where: { id } });
+    const after = await ctx.db.appRun.findUniqueOrThrow({ where: { id } });
+    return masked ? withheldRunContent(after) : after;
   },
 
   /**
@@ -792,7 +1054,7 @@ export const appRunMutations = {
     const app = await requireScheduleAdmin(ctx, input.appRef);
     const budgets = triggerBudgetPatch(input);
     assertFullyQualifiedUrn(input.entryNodeUrn, 'node');
-    const agentId = await resolveInstalledAgent(ctx, app.id, input.agentRef);
+    const agentId = await resolveTriggerAgent(ctx, app.id, input.agentRef);
     const scopeId = input.scopeRef?.trim() ? await resolveScopeForTrigger(ctx, app.id, input.scopeRef) : null;
     if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(input.name)) {
       throw new GraphQLError('Webhook name must be lowercase alphanumeric/dash, 1-64 chars.', {
@@ -807,20 +1069,22 @@ export const appRunMutations = {
     const webhook = await withAuthorizedTx(
       ctx,
       [{ kind: 'org', id: app.organizationId }, { kind: 'app', id: app.id },
-        ...(agentId ? [{ kind: 'agent' as const, id: agentId }] : [])],
+        { kind: 'agent' as const, id: agentId }],
       async (txCtx) => {
         const currentApp = await requireScheduleAdmin(txCtx, input.appRef);
         if (currentApp.id !== app.id || currentApp.organizationId !== app.organizationId) {
           throw new Error('App scope changed; retry webhook creation');
         }
-        if (agentId) await resolveInstalledAgent(txCtx, app.id, input.agentRef);
+        if (await resolveTriggerAgent(txCtx, app.id, input.agentRef) !== agentId) {
+          throw new Error('Agent changed; retry webhook creation');
+        }
         if (input.scopeRef?.trim()) await resolveScopeForTrigger(txCtx, app.id, input.scopeRef);
       },
       async (tx) => {
         // #2438: stamp the entry's stable id from the setup pin's own
         // resolution (same as createAgentSchedule); null on the unadopted
         // marker — that row keeps the URN path.
-        const consent = await captureSetupConsent(tx as never, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId }));
+        const consent = await captureSetupConsent(tx as never, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, { organizationId: app.organizationId }, ctx, configSelection({ ...input, agentId }));
         // #3483: a worker-bound caller spends a live, signed `webhook.create` grant for this entry node here, the last lock.
         await admitWorkerTrigger(tx, ctx, {
           appId: app.id, action: 'webhook.create',
@@ -862,6 +1126,8 @@ export const appRunMutations = {
   rotateAgentWebhook: async (_: unknown, { id }: { id: string }, ctx: Context) => {
     const existing = await ctx.db.agentWebhook.findFirst({ where: { id, deletedAt: null } });
     if (!existing) throw new GraphQLError('Webhook not found.', { extensions: { code: 'NOT_FOUND' } });
+    // #5037: before the person-only refusal below, so no caller class tells a foreign id from a missing one.
+    await concealUnlessOrgReader(ctx, existing, 'Webhook not found.');
     // #3511 (ruling 0177, cor:dmo:050:12 r40): person-only, decided before any secret or token is minted, with the
     // door's existing non-admin refusal.
     await requirePersonOnlyAct(ctx, 'agent-webhook.rotate', authorizationDenied);
@@ -895,6 +1161,7 @@ export const appRunMutations = {
   deleteAgentWebhook: async (_: unknown, { id }: { id: string }, ctx: Context) => {
     const existing = await ctx.db.agentWebhook.findFirst({ where: { id, deletedAt: null } });
     if (!existing) throw new GraphQLError('Webhook not found.', { extensions: { code: 'NOT_FOUND' } });
+    await concealUnlessOrgReader(ctx, existing, 'Webhook not found.');
     await requireOrgRole(ctx, existing.organizationId, 'ADMIN');
     await withAuthorizedTx(
       ctx,
@@ -914,7 +1181,7 @@ export const appRunMutations = {
   },
 
   /**
-   * Mint comm.outbound tickets into the org ledger (cor:acl:050:04 tier 2).
+   * Mint tickets into the org ledger (hrn:node:hadronmemory.com:specs:cor:acl:050:04).
    * Org-ADMIN only; `note` keeps the ledger legible ("where did they go?").
    */
   mintActionTickets: async (
@@ -934,7 +1201,7 @@ export const appRunMutations = {
     // Gemini high + Copilot). ''≡absent per the platform convention.
     let appId: string | null = null;
     if (input.appRef && input.appRef.trim() !== '') {
-      const { id } = await resolveAppRef(ctx.db, input.appRef);
+      const id = await resolveAppRefOrNotFound(ctx, input.appRef);
       const app = await ctx.db.app.findFirst({
         where: { id, organizationId, deletedAt: null },
         select: { id: true },
@@ -945,8 +1212,8 @@ export const appRunMutations = {
       }
       appId = app.id;
     }
-    if (input.action !== 'comm.outbound') {
-      throw new GraphQLError('v1 tickets exist for the comm.outbound action class only (cor:acl:050:04).', {
+    if (input.action !== 'comm.outbound' && input.action !== 'secret.use') {
+      throw new GraphQLError('Unknown ticket action class.', {
         extensions: { code: 'BAD_USER_INPUT' },
       });
     }
@@ -985,12 +1252,11 @@ export const appRunMutations = {
     {
       input,
     }: {
-      input: { orgRef: string; appRef?: string | null; action: string; limit: number };
+      input: { orgRef?: string | null; appRef?: string | null; userRef?: string | null; action: string; limit: number };
     },
     ctx: Context,
   ) => {
-    const { id: organizationId } = await resolveOrgRef(ctx.db, input.orgRef);
-    await requireOrgRole(ctx, organizationId, 'ADMIN');
+    const { target } = await resolveQuotaScopes(ctx, input);
     if (
       input.action !== 'run.execute' &&
       input.action !== 'llm.tokens' &&
@@ -1008,19 +1274,24 @@ export const appRunMutations = {
         extensions: { code: 'BAD_USER_INPUT' },
       });
     }
-    let scopeKind: 'app' | 'org' = 'org';
-    let scopeId = organizationId;
-    if (input.appRef && input.appRef.trim() !== '') {
-      const { id } = await resolveAppRef(ctx.db, input.appRef);
-      const app = await ctx.db.app.findFirst({
-        where: { id, organizationId, deletedAt: null },
-        select: { id: true },
-      });
-      if (!app) throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
-      scopeKind = 'app';
-      scopeId = app.id;
-    }
+    const { scopeKind, scopeId } = target;
+    const before = await ctx.db.quotaCounter.findFirst({
+      where: { scopeKind, scopeId, action: input.action, window: 'day' },
+      select: { limit: true },
+    });
     await setQuotaLimitKernel(ctx.db, scopeKind, scopeId, input.action, input.limit);
+    // Ids and numbers only.
+    console.info(
+      JSON.stringify({
+        event: 'quota.limit.changed',
+        actor: ctx.userId ?? null,
+        scopeKind,
+        scopeId,
+        action: input.action,
+        oldLimit: before?.limit ?? null,
+        newLimit: input.limit,
+      }),
+    );
     return ctx.db.quotaCounter.findFirstOrThrow({
       where: { scopeKind, scopeId, action: input.action, window: 'day' },
     });
@@ -1075,7 +1346,7 @@ export const appRunQueries = {
     }
     if (input.cron != null) validatedCronNext(input.cron, timezone);
     const runAt = input.runAt != null ? validatedRunAt(input.runAt) : null;
-    const outcome = await captureSetupOutcome(ctx.db, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, app.organizationId, ctx, configSelection({ ...input, agentId }));
+    const outcome = await captureSetupOutcome(ctx.db, app.id, resolveRunAsSelf(ctx, input.runAsSelf), input.entryNodeUrn, { organizationId: app.organizationId }, ctx, configSelection({ ...input, agentId }));
     // #3483 row 10: a worker-bound caller whose create would be refused for want of a grant is told so, with no hash. No
     // lock, no spend. Off (the default), or for a person, this reads nothing.
     if (!await workerTriggerWouldBeAdmitted(ctx, { appId: app.id, action: 'schedule.create', entryNodeId: outcome.adoptable ? outcome.pin.entryId : null })) {
@@ -1116,7 +1387,7 @@ export const appRunQueries = {
       orgRef,
       status,
       statuses,
-      parentRunId,
+      parentRunRef,
       sortBy,
       sortDir,
       limit,
@@ -1127,7 +1398,7 @@ export const appRunQueries = {
       /** @deprecated #836 — superseded by `statuses`; still accepted for one release. */
       status?: string | null;
       statuses?: string[] | null;
-      parentRunId?: string | null;
+      parentRunRef?: string | null;
       sortBy?: AppRunSortField | null;
       sortDir?: 'asc' | 'desc' | null;
       limit?: number | null;
@@ -1140,7 +1411,7 @@ export const appRunQueries = {
     if (orgRef) ({ id: organizationId } = await resolveOrgRef(ctx.db, orgRef));
     if (appRef) {
       // ref dispatch (was raw-PK-only — the refactor also makes URNs work here)
-      ({ id: appId } = await resolveAppRef(ctx.db, appRef));
+      appId = await resolveAppRefOrNotFound(ctx, appRef);
       const app = await ctx.db.app.findFirst({
         // When orgRef was ALSO given, scope the app to that org — a mismatch
         // is NOT_FOUND rather than orgRef being silently overridden by the
@@ -1162,14 +1433,27 @@ export const appRunQueries = {
         throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
       }
     }
+    // #4141: `parentRunRef` is a run PK or an hrn:apprun URN, resolved AFTER the org READER gate. Tri-state kept:
+    // omitted = no filter, null = top-level runs only, a ref = that run's children. A ref that cannot name a run is a
+    // shape error (BAD_USER_INPUT, pure and local: no run is looked up); a well-shaped ref that names no run, an
+    // ambiguous legacy ref and a run outside this scope all answer the SAME exactly-empty page. Only a resolver miss
+    // folds: a database fault propagates. The RESOLVED id feeds the filter, never the URN.
+    let parentRunId = parentRunRef; // undefined and null pass through; a ref is replaced by the id it resolves to
+    if (parentRunRef !== undefined && parentRunRef !== null) {
+      assertAppRunRefShape(parentRunRef);
+      try {
+        parentRunId = (await resolveAppRunRef(ctx.db, parentRunRef)).id;
+      } catch (error) {
+        if (!refNamesNothing(error, { ambiguousNamesNothing: true })) throw error;
+        return { items: [], total: 0 };
+      }
+    }
     const where = {
       organizationId,
       ...(appId ? { appId } : {}),
       ...buildStatusFilter(status, statuses),
       // Fan-out children of one parent (#548; index from PR-547). Rides the
       // same org/app authorization — the org scope already applies above.
-      // Explicit null = top-level runs only; omitted = no filter (PR-550
-      // review, Gemini).
       ...(parentRunId !== undefined ? { parentRunId } : {}),
     };
     const take = Math.min(Math.max(limit ?? 20, 1), 200);
@@ -1254,10 +1538,17 @@ export const appRunQueries = {
     { appRef, previous }: { appRef: string; previous?: boolean | null },
     ctx: Context,
   ) => {
-    const { id: appId } = await resolveAppRef(ctx.db, appRef);
+    const appId = await resolveAppRefOrNotFound(ctx, appRef);
     const app = await ctx.db.app.findFirst({ where: { id: appId, deletedAt: null } });
     if (!app) throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
-    if (!isPlatformAdmin(ctx)) {
+    // #5077 (F3a-2; cor:dmo:050:12): the latest run of an App a person owns is anyone's run, so only whoever manages that
+    // App as themself reads it (the owner, an owner-role member). Not a platform admin, an ordinary member, the impersonated
+    // owner or another person: each is answered as for a missing App.
+    if (app.organizationId === null) {
+      if (!(await managesPersonalAppOf(ctx, app.id))) {
+        throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
+      }
+    } else if (!isPlatformAdmin(ctx)) {
       try {
         // Owner-or-org READER — App may be org-owned or user-owned (spec 047).
         await requireOwnerOrOrgRole(ctx, app, 'READER');
@@ -1283,23 +1574,10 @@ export const appRunQueries = {
    */
   quotaCounters: async (
     _: unknown,
-    { orgRef, appRef }: { orgRef: string; appRef?: string | null },
+    { orgRef, appRef, userRef }: { orgRef?: string | null; appRef?: string | null; userRef?: string | null },
     ctx: Context,
   ) => {
-    const { id: organizationId } = await resolveOrgRef(ctx.db, orgRef);
-    await requireOrgRole(ctx, organizationId, 'ADMIN');
-    const scopes: Array<{ scopeKind: 'app' | 'org'; scopeId: string }> = [
-      { scopeKind: 'org', scopeId: organizationId },
-    ];
-    if (appRef && appRef.trim() !== '') {
-      const { id } = await resolveAppRef(ctx.db, appRef);
-      const app = await ctx.db.app.findFirst({
-        where: { id, organizationId, deletedAt: null },
-        select: { id: true },
-      });
-      if (!app) throw new GraphQLError('App not found.', { extensions: { code: 'NOT_FOUND' } });
-      scopes.push({ scopeKind: 'app', scopeId: app.id });
-    }
+    const { scopes } = await resolveQuotaScopes(ctx, { orgRef, appRef, userRef });
     await Promise.all(scopes.map((s) => ensureQuotaRowsForScope(ctx.db, s.scopeKind, s.scopeId)));
     return ctx.db.quotaCounter.findMany({
       where: { OR: scopes.map((s) => ({ scopeKind: s.scopeKind, scopeId: s.scopeId })) },

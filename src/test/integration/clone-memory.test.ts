@@ -68,6 +68,32 @@ describe('rewriteMemoryUrnRefs', () => {
     );
   });
 
+  // #3767: an asset URN's memory segment is part of the ASSET's name; the
+  // clone holds no copy of the asset, so its text keeps the source's URN
+  // (cor:api:150:01 "Deliberately not copied").
+  it('leaves hrn:asset URNs alone while rewriting memory and node URNs in the same text (#3767)', () => {
+    const ASSET = 'hrn:asset:acme.com:dev:assets:01abc';
+    const text = [
+      `img ${ASSET}`,
+      'mem urn:memory:acme.com::dev',
+      'node acme.com::dev::topics:setup',
+      'legacy acme.com:dev:topics:setup',
+    ].join('\n');
+    expect(rewriteMemoryUrnRefs(text, OLD, NEW)).toBe(
+      [
+        `img ${ASSET}`,
+        'mem urn:memory:acme.com::dev-clone',
+        'node acme.com::dev-clone::topics:setup',
+        'legacy acme.com:dev-clone:topics:setup',
+      ].join('\n'),
+    );
+  });
+
+  it('leaves a canonical-spelled asset URN alone too (#3767)', () => {
+    const t = 'x hrn:asset:acme.com::dev::assets:01abc y';
+    expect(rewriteMemoryUrnRefs(t, OLD, NEW)).toBe(t);
+  });
+
   it('passes null/empty through', () => {
     expect(rewriteMemoryUrnRefs(null, OLD, NEW)).toBeNull();
     expect(rewriteMemoryUrnRefs('', OLD, NEW)).toBe('');
@@ -322,6 +348,43 @@ describe('cloneMemory', () => {
     expect(srcGuide.content).toBe(REF_CONTENT);
   });
 
+  it('keeps hrn:asset URNs in content, abstract, pending-edge targets and data.asset.urn; still rewrites memory URNs (#3767)', async () => {
+    const source = await createSourceMemory();
+    const ASSET = 'hrn:asset:org-a:src-mem:assets:01abc';
+    const content = `pic ${ASSET} in org-a::src-mem::topics:setup`;
+    const node = await db.node.create({
+      data: {
+        id: generateId(),
+        memoryId: source.id,
+        loc: 'img',
+        name: 'Img',
+        content,
+        abstract: `abs ${ASSET} and org-a::src-mem`,
+        abstractOriginHash: computeContentHash(content),
+        data: { asset: { urn: ASSET } },
+      },
+    });
+    await db.pendingEdge.create({
+      data: { sourceId: node.id, targetId: ASSET, name: 'asset-target' },
+    });
+    await db.pendingEdge.create({
+      data: { sourceId: node.id, targetId: 'org-a::src-mem::missing:loc', name: 'mem-target' },
+    });
+
+    const clone = await resolvers.Mutation.cloneMemory(
+      {},
+      { ref: 'urn:memory:org-a::src-mem', targetUrn: 'org-a::clone-mem' },
+      adminCtx(),
+    );
+    const n = await db.node.findFirstOrThrow({ where: { memoryId: clone.id, loc: 'img' } });
+    expect(n.content).toBe(`pic ${ASSET} in org-a::clone-mem::topics:setup`);
+    expect(n.abstract).toBe(`abs ${ASSET} and org-a::clone-mem`);
+    expect(n.data).toEqual({ asset: { urn: ASSET } });
+    const pend = await db.pendingEdge.findMany({ where: { sourceId: n.id } });
+    expect(pend.find((p) => p.name === 'asset-target')?.targetId).toBe(ASSET);
+    expect(pend.find((p) => p.name === 'mem-target')?.targetId).toBe('org-a::clone-mem::missing:loc');
+  });
+
   it('requires org ADMIN for a knowledge-class source', async () => {
     await createSourceMemory();
     const member = await db.user.create({
@@ -343,8 +406,9 @@ describe('cloneMemory', () => {
     const owner = await db.user.create({
       data: { githubId: 9003, githubUsername: 'owner-user' },
     });
+    // hadron-internal#78: a same-org clone needs a non-reader membership, like the cross-org arm.
     await db.orgMember.create({
-      data: { organizationId: org.id, userId: owner.id, role: 'READER' },
+      data: { organizationId: org.id, userId: owner.id, role: 'CONTRIBUTOR' },
     });
     const personal = await db.memory.create({
       data: {
@@ -366,7 +430,7 @@ describe('cloneMemory', () => {
     // Forbidden that would confirm the memory exists.
     await expect(
       resolvers.Mutation.cloneMemory({}, { ref: personal.id, targetUrn: 'org-a::notes-2' }, adminCtx()),
-    ).rejects.toThrow(`MEMORY_NOT_FOUND: ${personal.id}`);
+    ).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
 
     const clone = await resolvers.Mutation.cloneMemory(
       {},

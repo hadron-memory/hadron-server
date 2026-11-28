@@ -23,7 +23,7 @@ export interface ActionParameter { name: string; type: string; refusesWildcard: 
  *  - `NO_WORKER`: a person-held grant, which reaches no agent or worker, even one the person drives (cor:acl:140:06 R5, Decided).
  */
 /** #4162: the parameter types whose value is a reference to something with an id; only these can name a subject, take a list or be covered. */
-export const REFERENCE_PARAMETER_TYPES: ReadonlySet<string> = new Set(['node-ref', 'secret-ref']);
+export const REFERENCE_PARAMETER_TYPES: ReadonlySet<string> = new Set(['node-ref', 'secret-ref', 'worker-ref', 'memory-ref']);
 
 export type GrantReach = 'WORKER' | 'WORKER_OR_ROLE_AGENT' | 'NO_WORKER';
 
@@ -33,7 +33,7 @@ export type GrantReach = 'WORKER' | 'WORKER_OR_ROLE_AGENT' | 'NO_WORKER';
  * definition that names a key the registry does not provide is a compile error, and re-checked at validation because the
  * registry is code and definitions may arrive from anywhere a list can.
  */
-export const ISSUER_RULE_KEYS = ['APP_SCHEDULE_ADMIN', 'APP_WEBHOOK_ADMIN', 'APP_MANAGER', 'SECRET_READ_CLIENT'] as const;
+export const ISSUER_RULE_KEYS = ['APP_SCHEDULE_ADMIN', 'APP_WEBHOOK_ADMIN', 'APP_MANAGER', 'SECRET_READ_CLIENT', 'MEMORY_READ_APPROVER'] as const;
 export type IssuerRuleKey = (typeof ISSUER_RULE_KEYS)[number];
 
 export interface ActionDefinition {
@@ -110,10 +110,49 @@ export const PLATFORM_ACTIONS: readonly ActionDefinition[] = [
       { name: 'auto-delete', type: 'secret-mark', refusesWildcard: true },
     ],
     summaryTemplate: 'Read the value of the secret {secret} of {app}, and {auto-delete}',
-    // #4162: the read is the holder's own session presenting its own client (readClientReveal.ts judges grant.workerId === the bound worker);
-    // an agent holder is refused when the client is requested (S3 does not build it; hadron-server#4434 will, as WORKER_OR_ROLE_AGENT), so the
-    // narrowest reach is the true one. A person holder reads on the passkey page, not as a worker.
-    reach: 'WORKER',
+    // #4434 (cor:sec:060:02 R5, cor:acl:140:06): a worker holder reads through its bound worker session, and an agent holder through its
+    // role agent's live workers in the client's App (readClientReveal.ts judges the reach with the shared helpers). A person holder
+    // reads on the passkey page and reaches no worker; an App holder has no reveal path (S5, #4000).
+    reach: 'WORKER_OR_ROLE_AGENT',
+  },
+  // #4855 (cor:acl:140:02, cor:agt:070:08 S4a; Holger 2026-11-22: a person-signed grant action, no wildcard): the worker dedicated to
+  // manage agents ends a DARK open session of a named worker and starts that worker again, with no person in the loop. The grant names
+  // the workers it covers (one `worker` parameter that takes a list, never the wildcard); a person who manages the App signs it; it
+  // repeats (no count). No role is named anywhere: the holder is whichever worker the person gave the grant to, and only that worker
+  // (never its role agent) may use it.
+  {
+    name: 'worker.session.restart', source: 'PLATFORM', tool: null, enforcement: 'SERVER', issuerRule: 'APP_MANAGER',
+    parameters: [{ name: 'worker', type: 'worker-ref', refusesWildcard: true }],
+    summaryTemplate: 'End a dark open session of any worker among {worker} in {app} and start that worker again',
+    reach: 'WORKER', listParameters: ['worker'],
+  },
+  // #4000: complete signed terms, including the HTTPS path and header the signer approves.
+  {
+    name: 'secret.use', source: 'PLATFORM', tool: 'web_request', enforcement: 'SERVER', issuerRule: 'SECRET_READ_CLIENT',
+    parameters: [
+      { name: 'secret', type: 'secret-ref', refusesWildcard: true },
+      { name: 'auto-delete', type: 'secret-mark', refusesWildcard: true },
+      { name: 'binding-prefix', type: 'https-prefix', refusesWildcard: true },
+      { name: 'binding-header', type: 'header-name', refusesWildcard: true },
+    ],
+    summaryTemplate: 'Use the secret {secret} of {app} at {binding-prefix} with header {binding-header}, and {auto-delete}',
+    reach: 'NO_WORKER',
+  },
+  // #5321 (hrn:node:hadronmemory.com:specs:cor:acl:140:02, D-2026-11-26-003; Holger 2026-11-27, both answers): read memories outside the
+  // App, read only, as the App acting with no person behind it (its userless runs, and a pure key holding the grant:read scope). The one
+  // `memory` parameter takes either form Holger ruled ("The grant may be for all org memories (org ADMIN and OWNER approve, create/issue
+  // anyone) or the grant names one or more memories. Then owner of that memory approves."):
+  //  (a) the App's OWN organization's id, a single value: its ORGANIZATION knowledge, reaching userless runs only, never a key
+  //      (cor:acl:010:04); signed by an ADMIN or OWNER of that organization;
+  //  (b) one or more memory ids (a single id or a list, never the wildcard): signed by whoever manages every named memory, so a grant
+  //      naming memories of different managers cannot be signed by one person (one grant per manager).
+  // Judged at every read, the giver's own read included (src/lib/grants/readGrant.ts). There is no `knowledge.read` (Holger: "is to
+  // unspecific"). The optional branch and one-automation parameters and `memory.write` come in S2 (#5404).
+  {
+    name: 'memory.read', source: 'PLATFORM', tool: null, enforcement: 'SERVER', issuerRule: 'MEMORY_READ_APPROVER',
+    parameters: [{ name: 'memory', type: 'memory-ref', refusesWildcard: true }],
+    summaryTemplate: 'Let {app}, acting with no person behind it, read {memory}, read only',
+    reach: 'NO_WORKER', listParameters: ['memory'],
   },
 ];
 

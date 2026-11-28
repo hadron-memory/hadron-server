@@ -172,6 +172,15 @@ ALTER TABLE memories
 CREATE UNIQUE INDEX IF NOT EXISTS slack_connections_org_team_active_uniq
   ON slack_connections (organization_id, team_id) WHERE deleted_at IS NULL;
 
+-- ─── #597 telegram-connection ────────────────────────────────────────────
+-- One ACTIVE Telegram connection per App: PARTIAL unique so a soft-deleted row never blocks a new one (Prisma can't
+-- model the WHERE clause). Synced with the 20261122000000_telegram_connection migration.
+CREATE UNIQUE INDEX IF NOT EXISTS telegram_connections_app_active_uniq
+  ON telegram_connections (app_id) WHERE deleted_at IS NULL;
+-- One ACTIVE connection per bot (Telegram allows one update consumer per bot).
+CREATE UNIQUE INDEX IF NOT EXISTS telegram_connections_bot_active_uniq
+  ON telegram_connections (bot_id) WHERE deleted_at IS NULL;
+
 -- ─── 036-ai-service-config ──────────────────────────────────────────────
 -- A config belongs to exactly one owner (HadronServer / Organization /
 -- App / Agent). Synced with the 036 migration and src/test/globalSetup.ts.
@@ -204,6 +213,13 @@ ALTER TABLE apps
   DROP CONSTRAINT IF EXISTS chk_app_owner_xor;
 ALTER TABLE apps
   ADD CONSTRAINT chk_app_owner_xor
+  CHECK ((organization_id IS NULL) <> (owner_user_id IS NULL));
+-- #5077 (Billing F3a): a run states exactly one owner, copied from its App. Synced with
+-- the 20261127160000 and 20261127160200 migrations.
+ALTER TABLE app_runs
+  DROP CONSTRAINT IF EXISTS chk_app_run_owner_xor;
+ALTER TABLE app_runs
+  ADD CONSTRAINT chk_app_run_owner_xor
   CHECK ((organization_id IS NULL) <> (owner_user_id IS NULL));
 -- Ruling DY-5: a dormancy threshold is a positive number of days. Synced with
 -- the 20261005010000 migration + src/test/globalSetup.ts.
@@ -443,7 +459,7 @@ BEGIN
                   THEN ', shares its root with another row' ELSE '' END), ', ' ORDER BY p.name)
       INTO offending_rows_summary
       FROM (SELECT id, name, kind, status FROM principals WHERE name <> lower(name) ORDER BY name LIMIT 20) p;
-    RAISE EXCEPTION 'principals.name: % principal row(s) are not lower case, so chk_principals_name_lower cannot be added (hadron-server#4400; this guard: #4411). For a row that shares its root with no other row, lower-case it and the owning users.handle / organizations.urn; for rows that share a root, decide which owner keeps it and rename or delete the others. Then re-run pnpm db:dev-setup. Rows (first 20): %', offending_count, offending_rows_summary
+    RAISE EXCEPTION 'principals.name: % principal row(s) are not lower case, so chk_principals_name_lower cannot be added (hadron-server#4400; this guard: #4411). For a row that shares its root with no other row, lower-case it and the owning users.handle / organizations.urn; for rows that share a root, decide which owner keeps it and rename or delete the others, then lower-case the kept row (if it is still mixed case) together with its owning users.handle / organizations.urn, or the next run refuses again. Then re-run pnpm db:dev-setup. Rows (first 20): %', offending_count, offending_rows_summary
       USING ERRCODE = 'HDPRF';
   END IF;
 END $$;
@@ -463,15 +479,32 @@ ALTER TABLE principals
 -- which a generated column rejects; the wrapper is the standard workaround.
 -- IF NOT EXISTS (structural, like the HNSW index); changing the expression or
 -- weights needs a dedicated DROP+ADD migration — this won't update it in place.
+-- #5137: an unclosed `<!--` makes the default parser quadratic (every opener rescans to the end of the text for a `-->`
+-- that is not there: 16 KB of `<!--` is about 200 ms, 49 KB over a second, and it keeps burning after the client gives up).
+-- An opener with no `-->` after it is not a comment to the parser: it indexes exactly like `<! -` (verified over 400000
+-- random strings drawn from `<!--`, `-->`, `<!-`, `<!---`, `-5`, `<a `, `&amp;` and words: identical tsvectors). The
+-- replacement keeps the length and cannot re-form an opener with a following `-` (`<!-` would: `<!---` -> `<!--`, still quadratic, #5140
+-- local P1). So every `<!--` after the LAST `-->` is rewritten to `<! -` before parsing; a `<!--` before the last `-->` finds its closer at once and stays.
+-- Same tokens, weights and positions, so the search signal does not change; no refusal; no row is rewritten.
+CREATE OR REPLACE FUNCTION hadron_tsv_unclosed_comment(t text)
+RETURNS text LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path = public, pg_temp AS $$
+  SELECT CASE
+    WHEN position('<!--' in t) = 0 THEN t
+    WHEN position('-->' in t) = 0 THEN replace(t, '<!--', '<! -')
+    ELSE left(t, length(t) - position('>--' in reverse(t)) - 1)
+      || replace(right(t, position('>--' in reverse(t)) + 1), '<!--', '<! -')
+  END
+$$;
+
 CREATE OR REPLACE FUNCTION hadron_nodes_tsv(
   p_name text, p_alias text, p_loc text, p_tags text[],
   p_description text, p_abstract text, p_content text, p_properties text, p_data text
-) RETURNS tsvector LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+) RETURNS tsvector LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path = public, pg_temp AS $$
   SELECT
-    setweight(to_tsvector('english', coalesce(p_name, '') || ' ' || coalesce(p_alias, '')), 'A') ||
-    setweight(to_tsvector('english', coalesce(p_loc, '') || ' ' || array_to_string(coalesce(p_tags, ARRAY[]::text[]), ' ')), 'B') ||
-    setweight(to_tsvector('english', coalesce(p_description, '') || ' ' || coalesce(p_abstract, '')), 'C') ||
-    setweight(to_tsvector('english', left(coalesce(p_content, '') || ' ' || coalesce(p_properties, '') || ' ' || coalesce(p_data, ''), 1000000)), 'D')
+    setweight(to_tsvector('english', hadron_tsv_unclosed_comment(coalesce(p_name, '') || ' ' || coalesce(p_alias, ''))), 'A') ||
+    setweight(to_tsvector('english', hadron_tsv_unclosed_comment(coalesce(p_loc, '') || ' ' || array_to_string(coalesce(p_tags, ARRAY[]::text[]), ' '))), 'B') ||
+    setweight(to_tsvector('english', hadron_tsv_unclosed_comment(coalesce(p_description, '') || ' ' || coalesce(p_abstract, ''))), 'C') ||
+    setweight(to_tsvector('english', hadron_tsv_unclosed_comment(left(coalesce(p_content, '') || ' ' || coalesce(p_properties, '') || ' ' || coalesce(p_data, ''), 1000000))), 'D')
 $$;
 
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS tsv tsvector GENERATED ALWAYS AS (
@@ -479,6 +512,18 @@ ALTER TABLE nodes ADD COLUMN IF NOT EXISTS tsv tsvector GENERATED ALWAYS AS (
 ) STORED;
 
 CREATE INDEX IF NOT EXISTS nodes_tsv_gin ON nodes USING gin (tsv);
+
+-- #855: app_runs.duration_ms (appRuns sortBy duration). schema.prisma models it as a plain nullable BigInt (Prisma cannot
+-- express GENERATED), so `db push` leaves a PLAIN column and this makes it the STORED GENERATED one that the migration
+-- prisma/migrations/20261124020000_app_runs_duration_ms creates (keep the two expressions in lockstep). The plain column
+-- holds nothing (the database refuses a write to the generated one, and nothing writes the plain one), and dropping it
+-- drops its index, so both are re-created. Unconditional, because a conditional here would need a DO block the
+-- inventory refuses; prisma/app-run-duration-pre-push.sql drops a GENERATED column before the push so the push never
+-- sees one (it cannot ALTER it).
+ALTER TABLE app_runs DROP COLUMN IF EXISTS duration_ms;
+ALTER TABLE app_runs ADD COLUMN duration_ms BIGINT
+  GENERATED ALWAYS AS ((round(EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000))::bigint) STORED;
+CREATE INDEX IF NOT EXISTS app_runs_organization_id_duration_ms_idx ON app_runs (organization_id, duration_ms);
 
 -- #2832: direct-children read (NodeFilter.childrenOf). Mirrors prisma/migrations/20261030100000_nodes_parent_loc_index
 -- (keep in lockstep). The expression is PARENT_LOC_SQL in src/lib/childLoc.ts; a filter must compare it unchanged.
@@ -744,6 +789,18 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #2659: the append-only record of a deleted user API key.
 \ir user-api-key-deletion-invariants.sql
 
+-- #5010: the credit ledger is append-only. One source, shared verbatim with migration
+-- 20261125130000_credit_ledger_append_only (pinned by src/test/migrations/creditLedgerAppendOnly5010.test.ts).
+\ir credit-ledger-invariants.sql
+
+-- #5021: price rows are kept (no DELETE, no content UPDATE; audit ids follow a recorded merge). One source, shared
+-- verbatim with migration 20261126080400_ai_model_prices_kept (pinned by src/test/migrations/priceRowKept5021.test.ts).
+\ir ai-model-price-invariants.sql
+
+-- #5212: the one writer of user_merges. One source, shared verbatim with migration 20261126070000_user_merge_record_function
+-- (pinned by src/test/migrations/userMergeRecord5212.test.ts). After the tables it reads: users, user_merges, user_merge_consents.
+\ir user-merge-record-invariants.sql
+
 -- #430: the Git-mirror obligation's shape (closed error classes) and its attempt sequence.
 \ir git-mirror-obligation-invariants.sql
 
@@ -758,6 +815,10 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- shared verbatim with migration 20261027100000_agent_task_number (pinned by src/lib/agentTasks/taskNumber2553.test.ts).
 \ir agent-task-number-backfill.sql
 \ir agent-task-number-invariants.sql
+
+-- #4997: the project marker is permanent and AT0 is never marked. One source, shared verbatim with migration
+-- 20261124150000_agent_task_is_project (pinned by src/lib/agentTasks/invariants.test.ts).
+\ir agent-task-project-marker-invariants.sql
 
 -- #2651: a task's latest hand-back (code, optional text, time). One source, shared verbatim with migration
 -- 20261101090000_agent_task_hand_back (pinned by src/lib/agentTasks/invariants.test.ts).
@@ -845,6 +906,9 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #1632: signing requests, append-only signature records, the content-change
 -- marker. One source, shared verbatim with migration 20261013160000_signing_requests.
 \ir signing-invariants.sql
+-- #4337 (#434 Slice C): stamp_signing_keys.id as the migration's identity (db push builds a sequence default; pinned by
+-- src/test/migrations/stampKeyIdentity4337.test.ts and scripts/db/migration-replay.ts).
+\ir stamp-key-identity-invariants.sql
 
 -- #3996 (S1 of #3991): per-App data keys. One source, shared verbatim with migration 20261112150000_secret_app_keys.
 \ir secret-app-keys-invariants.sql
@@ -852,6 +916,18 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #4003 (S8 of #3991): the secrets root's key-check value. One source, shared verbatim with migration
 -- 20261120090000_secret_root_check.
 \ir secret-rotation-invariants.sql
+
+-- #4332 (#434 Slice C): the rate-limit CHECKs migration 20261031220000_shared_rate_limiter declares inline (pinned by
+-- src/lib/rateLimit/rateLimitChecks4332.test.ts and scripts/db/migration-replay.ts).
+\ir rate-limit-invariants.sql
+
+-- #4333 (#434 Slice C): the six UNIQUE constraints the migrations create, promoted from the same-name unique indexes
+-- db push leaves (pinned by src/test/migrations/uniqueConstraints4333.test.ts and scripts/db/migration-replay.ts).
+\ir unique-constraint-invariants.sql
+
+-- #4335 (#434 Slice C): the two indexes migration 20260519180903_baseline_init builds partial, which db push builds full
+-- (pinned by src/test/migrations/partialIndexes4335.test.ts and scripts/db/migration-replay.ts).
+\ir partial-index-invariants.sql
 
 -- #1885: an Agent extends at most one base Agent; no cycles, at most 4 in a
 -- chain. One source, shared verbatim with migration 20261014120000_agent_base
@@ -873,6 +949,16 @@ CREATE INDEX IF NOT EXISTS usage_events_session_activity_idx
 -- 20261115280000_agent_team_events_person_activity_idx, which builds it CONCURRENTLY for production.
 CREATE INDEX IF NOT EXISTS agent_team_events_person_activity_idx
   ON agent_team_events (actor_user_id, app_id, created_at) WHERE actor_worker_id IS NULL AND task_id IS NOT NULL;
+
+-- #5011 (Billing A4): expiring grants by organization, for the settlement probe and the hourly expiry job. Partial, so
+-- Prisma's schema language can't model it. Same definition as migration
+-- 20261125140000_credit_ledger_expiring_grants_idx, which builds it CONCURRENTLY for production.
+CREATE INDEX IF NOT EXISTS credit_ledger_entries_expiring_grants_idx
+  ON credit_ledger_entries (organization_id, expires_at) WHERE expires_at IS NOT NULL;
+-- #5014 (Billing A6): its owner_user_id twin, for a person's ledger. Same definition as migration
+-- 20261125170000_credit_ledger_person_expiring_grants_idx (CONCURRENTLY there).
+CREATE INDEX IF NOT EXISTS credit_ledger_entries_person_expiring_grants_idx
+  ON credit_ledger_entries (owner_user_id, expires_at) WHERE expires_at IS NOT NULL;
 
 -- #4273: the worker-liveness read (workerActivitySql) keeps a worker's open sessions and the ended ones that end at or after
 -- its latest start; these two partial indexes serve those ranges. Same definitions as migrations
@@ -920,6 +1006,10 @@ CREATE TRIGGER agent_clone_audits_immutable
 -- worker-reference-invariants.sql, whose fence function its trigger uses.
 \ir host-assignment-invariants.sql
 
+-- #5259: the hosts of a team App and their settings. One source, shared verbatim with migration
+-- 20261126160000_agent_team_hosts (pinned by src/api/graphql/schema/resolvers.agentTeamHost5259.test.ts).
+\ir agent-team-host-invariants.sql
+
 -- S12 explicit reporting choice (legacy UNSET retained).
 \ir worker-team-choice-invariants.sql
 -- #4224: the leave-alone marker's shape (same rule as migration 20261115160000_desired_state).
@@ -934,8 +1024,8 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 -- #2755: the dark-worker alarm's window, episodes and their worker fence (the fence function is #1162's, above).
 \ir dark-alarm-invariants.sql
 
--- #2763: the coordinator-cadence alarm's episodes and first-observed clocks (after the #1162 fence function).
-\ir coordinator-cadence-invariants.sql
+-- #2763, #4375: the lead-cadence alarm's episodes and first-observed clocks (after the #1162 fence function).
+\ir lead-cadence-invariants.sql
 
 -- #3934: the recorded end of an alarm's escalation is written once.
 \ir alarm-escalation-end-invariants.sql
@@ -947,6 +1037,12 @@ CREATE INDEX IF NOT EXISTS "edges_source_id_idx" ON "edges"("source_id");
 
 -- #4233: the sweep run record and the stale-sweep episodes.
 \ir host-sweep-invariants.sql
+
+-- #3819 slice 1: the saturation episodes.
+\ir saturation-invariants.sql
+
+-- #4531: the dark-team episodes.
+\ir team-dark-invariants.sql
 
 -- #3997 (S2 of #3991): App-owned secrets, versions, events, tombstones. One source, shared verbatim with migration
 -- 20261114120000_app_secret_versions. After worker-reference-invariants.sql: it puts the #1162 fence on its three tables.
@@ -964,6 +1060,11 @@ ON CONFLICT (id) DO NOTHING;
 
 -- #451: delete-path FK columns need a leading index (the same statements as the four 20261031110x migrations).
 CREATE INDEX IF NOT EXISTS "usage_events_node_id_idx" ON "usage_events"("node_id");
+
+-- #5020 (Billing A13, cor:dmo:170:05): a usage event names at most one billable account. The migration
+-- 20261126090000_usage_events_billable_user adds the same constraint NOT VALID and 20261126090200 validates it.
+ALTER TABLE "usage_events" DROP CONSTRAINT IF EXISTS "chk_usage_event_one_billable";
+ALTER TABLE "usage_events" ADD CONSTRAINT "chk_usage_event_one_billable" CHECK (num_nonnulls("organization_id", "billable_user_id") <= 1);
 CREATE INDEX IF NOT EXISTS "sessions_agent_id_idx" ON "sessions"("agent_id");
 CREATE INDEX IF NOT EXISTS "sessions_memory_id_idx" ON "sessions"("memory_id");
 CREATE INDEX IF NOT EXISTS "agents_organization_id_idx" ON "agents"("organization_id");
@@ -983,6 +1084,18 @@ CREATE INDEX IF NOT EXISTS "agent_team_events_pr_frozen_head_idx"
 -- verbatim with migration 20261109200000_grant_signing (after grant-invariants.sql: the tables it guards reference grants).
 \ir grant-signing-invariants.sql
 
+-- #5001: the selection tables' guards and the selection-version widening of the signing CHECKs; after grant-signing-invariants.sql.
+\ir grant-selection-signing-invariants.sql
+
+-- #3999: secret change requests. Verbatim with migration 20261120180000_secret_change_requests.
+\ir secret-change-requests-invariants.sql
+
+-- Any committed secret mutation invalidates earlier proposals, including same-millisecond changes.
+ALTER TABLE secrets ADD COLUMN IF NOT EXISTS change_revision integer NOT NULL DEFAULT 0;
+CREATE OR REPLACE FUNCTION hadron_secret_change_revision() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN NEW.change_revision := OLD.change_revision + 1; RETURN NEW; END $$;
+DROP TRIGGER IF EXISTS secret_change_revision ON secrets;
+CREATE TRIGGER secret_change_revision BEFORE UPDATE ON secrets FOR EACH ROW EXECUTE FUNCTION hadron_secret_change_revision();
 -- #3689 (#3910 F1): app_runs.agent_id is NOT NULL in the database but optional in schema.prisma, so a build serving the
 -- old nullable column after an HDPRF-refused migration (#3770) can still read the retained agentless runs. `db push`
 -- therefore leaves it nullable; this restores the guarantee the 20261117500000_app_run_agent_required migration states.
@@ -1035,3 +1148,35 @@ ALTER TABLE mcp_servers ALTER COLUMN tool_allowlist SET NOT NULL;
 ALTER TABLE rate_limit_manifests ALTER COLUMN key_ids SET NOT NULL;
 ALTER TABLE tickers ALTER COLUMN reasons SET NOT NULL;
 ALTER TABLE user_api_keys ALTER COLUMN oauth_scopes SET NOT NULL;
+
+-- S4 R22, after S3 client guards.
+\ir secret-read-client-own-worker.sql
+-- #4001: finite auto-delete terms, after the grants and read-client invariants.
+\ir secret-auto-delete-invariants.sql
+
+-- #4945 (cor:int:030:03 clause 4): a chat tool teardown intent's state is one of the three the code writes
+-- (Prisma cannot model the CHECK; the migration carries the same statements, behind an HDPRF preflight).
+ALTER TABLE chat_tool_teardown_intents DROP CONSTRAINT IF EXISTS chk_chat_tool_teardown_state;
+ALTER TABLE chat_tool_teardown_intents ADD CONSTRAINT chk_chat_tool_teardown_state
+  CHECK (state IN ('PENDING', 'CONFIRMED', 'CAPPED'));
+
+-- #5009 (Billing A7a): the owner-limit rows.
+\ir owner-limit-invariants.sql
+
+-- #5018 (Billing A14): a node's recorded size, kept by triggers on nodes and node_revisions.
+\ir node-bytes-invariants.sql
+
+-- #5078 (Billing A7d): per-memory live node totals: the triggers, then a refill no node write can fall into.
+\ir memory-node-total-invariants.sql
+BEGIN;
+LOCK TABLE nodes IN SHARE ROW EXCLUSIVE MODE;
+DELETE FROM memory_node_pending;
+INSERT INTO memory_node_totals (memory_id, live_nodes)
+  SELECT memory_id, count(*) FILTER (WHERE deleted_at IS NULL) FROM nodes GROUP BY memory_id
+  ON CONFLICT (memory_id) DO UPDATE SET live_nodes = EXCLUDED.live_nodes;
+UPDATE memory_node_totals t SET live_nodes = 0
+  WHERE t.live_nodes <> 0 AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.memory_id = t.memory_id);
+COMMIT;
+
+-- #5096: pin every guard function's search path; LAST, after every file above that (re)creates a function.
+\ir guard-search-path-invariants.sql

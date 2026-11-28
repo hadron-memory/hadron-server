@@ -1,7 +1,7 @@
 /** #3494: the same open-root state set must be filtered before candidate caps and counted once. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb, createDbAppWithKey } from '../../../test/helpers.js';
+import { seedRootNode, cleanDb, createDbAppWithKey } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { postgresRetrievalProvider as provider } from '../../../lib/retrieval/postgres.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -24,6 +24,7 @@ beforeEach(async () => {
   [userId, otherId] = await Promise.all([0, 1].map(async i => (await db.user.create({ data: { handle: `groom-${i}-${generateId()}` } })).id));
   await db.orgMember.createMany({ data: [userId, otherId].map(id => ({ organizationId: org.id, userId: id, role: 'ADMIN' as const })) });
   const mem = await M.createMemory(null, { orgRef: org.id, name: 'groom' }, ctx()); memoryId = mem.id;
+  await seedRootNode(db, mem.id, 'groom');
   nodes = Object.fromEntries(await Promise.all(['A','B','B2','C','D','E','F'].map(async k => [k, await create(`case:${k}`)])));
   await comment(nodes.A.id); await comment(nodes.A.id, otherId);
   for (const k of ['B','B2','F']) {
@@ -60,7 +61,7 @@ describe('open root state parity', () => {
     expect(locs(out)).toEqual(['F']); expect(out.total).toBe(2);
   });
   it('Comments scope true has no hits, false retains every live comment; ALL combines', async () => {
-    const read = (value: boolean, scope: string) => Q.findNodes(null, {filter:{memoryIds:[memoryId],hasOpenThreads:value,contentScope:scope},limit:200},ctx());
+    const read = (value: boolean, scope: string) => Q.findNodes(null, {filter:{memoryRefs:[memoryId],hasOpenThreads:value,contentScope:scope},limit:200},ctx());
     expect((await read(true,'COMMENTS')).hits).toHaveLength(0);
     const comments = await read(false,'COMMENTS'); expect(comments.hits.length).toBeGreaterThan(0);
     expect((await read(false,'ALL')).hits.length).toBe(comments.hits.length + 6); // five case nodes + memory root
@@ -122,7 +123,7 @@ it('outsider, App key and a real persisted run never discover or count another t
   await M.createComment(null,{targetRef:ownNode.id,body:'own open thread'},ctx(out.id));
   const run=await db.appRun.create({data:{id:generateId(),organizationId:org.id,appId:app.id, agentId: await testRunAgentId(db, org.id, app.id),triggerKind:'SCHEDULE',triggerId:generateId(),entryNodeUrn:'hrn:node:elsewhere.test:missing:entry',status:'RUNNING'}});
   for(const principal of [ctx(out.id),{db,appId:app.id,appKeyId:appKey.id,roles:[],organizationId:org.id}, {...runContext(db,run),db}]) {
-    const own=await Q.findNodes(null,{filter:{memoryIds:[ownMemory.id],hasOpenThreads:true},includeTotal:true},principal);
+    const own=await Q.findNodes(null,{filter:{memoryRefs:[ownMemory.id],hasOpenThreads:true},includeTotal:true},principal);
     expect(own.hits.map((h:any)=>h.node.id)).toEqual([ownNode.id]);expect(own.total).toBe(1);
     const result=await Q.findNodes(null,{filter:filter(true),includeTotal:true},principal);
     expect(result.hits).toEqual([]);expect(result.total).toBe(0);

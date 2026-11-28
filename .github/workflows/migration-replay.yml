@@ -170,15 +170,27 @@ jobs:
           expect_red 'stale IF NOT EXISTS redefinition' 'NEW DRIFT (not in the baseline): changed idx:nodes_embedding_pending_idx'
           rm -rf "$probe"
 
-          needs_object 'a baselined object changed again' memories_user_id_idx
+          # #4337: memories_user_id_idx is no longer baselined (#4335 carries it in post-push); a migration that changes
+          # it again must still surface as new drift.
+          needs_object 'a post-push-carried object changed again' memories_user_id_idx
           mkdir -p "$probe"; printf 'DROP INDEX IF EXISTS memories_user_id_idx;\nCREATE INDEX memories_user_id_idx ON "memories" ("user_id", "id") WHERE "user_id" IS NOT NULL;\n' > "$probe/migration.sql"
-          expect_red 'a baselined object changed again' 'NEW DRIFT (not in the baseline): changed idx:memories_user_id_idx'
+          expect_red 'a post-push-carried object changed again' 'NEW DRIFT (not in the baseline): changed idx:memories_user_id_idx'
           rm -rf "$probe"
 
-          needs_line 'removed baseline line' 'changed col:stamp_signing_keys.id '
-          grep -v '^changed col:stamp_signing_keys.id ' baseline.bak > scripts/db/migration-replay-baseline.txt
-          expect_red 'removed baseline line' 'NEW DRIFT (not in the baseline): changed col:stamp_signing_keys.id'
+          # #4337: #434 Slice C's drift is all fixed, so the baseline lists nothing to remove or grow. These controls make
+          # their own baselined difference instead: the seeded probe index, and its entry exactly as --print reports it.
+          needs_object 'removed baseline line' '"nodes"'
+          mkdir -p "$probe"; printf 'CREATE INDEX replay_probe_idx ON "nodes" ("created_at");\n' > "$probe/migration.sql"
+          probe_line=$(pnpm -s tsx scripts/db/migration-replay.ts --print | grep '^added idx:replay_probe_idx ' || true)
+          [ -n "$probe_line" ] || { echo "::error::--print did not list the seeded probe index"; exit 1; }
+          { cat baseline.bak; echo "$probe_line"; } > scripts/db/migration-replay-baseline.txt
+          # Control 'a listed difference passes' (#4714 F13): the baseline lists the probe's difference, so the check must pass.
+          pnpm -s tsx scripts/db/migration-replay.ts > out.txt 2>&1 || { echo "::error::control 'a listed difference passes': a difference the baseline lists failed the check"; cat out.txt; exit 1; }
+          echo "control 'a listed difference passes': exit 0 as expected"
+          rm -f out.txt
           cp baseline.bak scripts/db/migration-replay-baseline.txt
+          expect_red 'removed baseline line' 'NEW DRIFT (not in the baseline): added idx:replay_probe_idx'
+          rm -rf "$probe"
 
           { cat baseline.bak; echo 'added idx:no_such_index_anywhere 0000000000000000'; } > scripts/db/migration-replay-baseline.txt
           expect_red 'stale baseline line' 'STALE BASELINE LINE (no longer differs, or duplicated; delete it): added idx:no_such_index_anywhere 0000000000000000'
@@ -194,7 +206,13 @@ jobs:
           cp baseline.bak "$RUNNER_TEMP/growth-base.txt"
           MIGRATION_REPLAY_BASE_BASELINE="$RUNNER_TEMP/growth-base.txt" MIGRATION_REPLAY_ALLOW_GROWTH=false \
             pnpm -s tsx scripts/db/migration-replay.ts > /dev/null 2>&1 || { echo "::error::the unaltered baseline is growth against itself"; exit 1; }
-          grep -v '^changed col:stamp_signing_keys.id ' baseline.bak > "$RUNNER_TEMP/growth-base.txt"
+          # The probe's entry on the PR's baseline and not the base's is growth (the probe migration back in place).
+          mkdir -p "$probe"; printf 'CREATE INDEX replay_probe_idx ON "nodes" ("created_at");\n' > "$probe/migration.sql"
+          { cat baseline.bak; echo "$probe_line"; } > scripts/db/migration-replay-baseline.txt
           export MIGRATION_REPLAY_BASE_BASELINE="$RUNNER_TEMP/growth-base.txt" MIGRATION_REPLAY_ALLOW_GROWTH=false
-          expect_red 'baseline growth over the base' 'BASELINE GROWTH (not on the base branch; needs the change manager'"'"'s baseline-growth-approved label): changed col:stamp_signing_keys.id'
+          expect_red 'baseline growth over the base' 'BASELINE GROWTH (not on the base branch; needs the change manager'"'"'s baseline-growth-approved label): added idx:replay_probe_idx'
           unset MIGRATION_REPLAY_BASE_BASELINE MIGRATION_REPLAY_ALLOW_GROWTH
+          cp baseline.bak scripts/db/migration-replay-baseline.txt
+          rm -rf "$probe"
+          # The controls leave no output file behind (#4714 F13).
+          rm -f out.txt

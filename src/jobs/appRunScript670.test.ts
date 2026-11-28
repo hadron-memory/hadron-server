@@ -24,6 +24,12 @@ vi.mock('../lib/resendToolClient.js', async (importOriginal) => {
   return { ...actual, sendResendEmail: vi.fn(async () => ({ id: 'email_670' })), isResendToolConfigured: vi.fn(() => true) };
 });
 
+vi.mock('../lib/webfetchClient.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../lib/webfetchClient.js')>()),
+  httpRequest: vi.fn(),
+  getWebfetchContract: vi.fn(async () => ({ contract: 'webfetch@2', capabilities: ['redirects-none'] })),
+}));
+
 // Observes the email.send counters at the moment the tool asks for its comm.outbound ticket, which is AFTER both
 // quota charges and BEFORE any refund: the one point where "charged, then refunded" is visible (#3148 item 4).
 const atTicket = vi.hoisted(() => ({ hook: null as null | (() => Promise<void>) }));
@@ -38,6 +44,9 @@ vi.mock('./appRuns.js', async (importOriginal) => {
   };
 });
 
+import { httpRequest } from '../lib/webfetchClient.js';
+import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
+import { upsertPlatformActions } from '../lib/grants/actions.js';
 import { sendResendEmail } from '../lib/resendToolClient.js';
 import { encryptResendApiKey } from '../lib/resendSenders.js';
 import { mintAppRun, executeAppRun, type RunExecutionDeps } from './appRuns.js';
@@ -94,7 +103,7 @@ function deps(opts: { noConfig?: boolean } = { noConfig: true }) {
 
 const mint = async (eventData: Record<string, unknown> = {}) =>
   mintAppRun(db, {
-    organizationId: orgId, appId, agentId, triggerKind: 'MANUAL', entryNodeUrn: ENTRY, eventData,
+    owner: { organizationId: orgId }, appId, agentId, triggerKind: 'MANUAL', entryNodeUrn: ENTRY, eventData,
     consentPrincipal: await createDbRunConsentPrincipal(db, orgId, appId),
   });
 
@@ -254,6 +263,48 @@ describe('script node (#670, cor:agt:010:04)', () => {
       expect(await quotaUsed('app')).toBe(0);
       expect((await db.actionTicket.findUniqueOrThrow({ where: { id: ticket.id } })).consumedAt).toBeNull();
     });
+  });
+
+  // #4775 acceptance 1 (cor:sec:030:01): the echo redaction, through the flow runtime rather than at the tool dispatcher.
+  it('a web_request script node whose remote echoes the injected credential leaves none of it in the run or the output node', async () => {
+    const CANARY = 'canary-4775-flow-VALUE';
+    vi.stubEnv('SECRET_ROOT_KEY', '33'.repeat(32));
+    try {
+      await upsertPlatformActions(db);
+      const { userId } = await createDbRunConsentPrincipal(db, orgId, appId);
+      await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId } }, data: { role: 'ADMIN' } });
+      const secret = await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'token', kind: 'webfetch-auth',
+        metadata: { type: 'bearer', urlPrefix: 'https://api.example.test/v1' }, value: { type: 'bearer', token: CANARY } }, { db, userId, roles: [] } as Context);
+      const grantId = generateId(); const clientId = generateId();
+      await db.$executeRaw`INSERT INTO grants (id, app_id, grantee_app_id, action, action_values, reason, max_uses, created_at, updated_at)
+        VALUES (${grantId}, ${appId}, ${appId}, 'secret.use', ${JSON.stringify({ secret: secret.id, 'auto-delete': 'keep', 'binding-prefix': 'https://api.example.test/v1', 'binding-header': 'Authorization' })}::jsonb, 'test', 5, now(), now())`;
+      await db.secretReadClient.create({ data: { id: clientId, grantId, appId, secretId: secret.id, secretName: 'token', issuerUserId: userId, selfIssued: false } });
+      await db.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
+        await tx.$executeRaw`UPDATE grants SET activated_at = now(), verification_kind = 'passkey', verified_by = ${userId}, issuer_user_id = ${userId} WHERE id = ${grantId}`;
+      });
+      await db.actionTicket.create({ data: { id: generateId(), organizationId: orgId, appId, action: 'secret.use', mintedBy: 'test' } });
+      const url = 'https://api.example.test/v1/orders';
+      vi.mocked(httpRequest).mockImplementationOnce(async (input) => {
+        const token = (input as { auth?: { token?: string } }).auth?.token; // echo what was really sent, never a fixture string
+        return { method: 'GET', finalUrl: url, status: 200, headers: { 'x-echo': `Bearer ${token}` }, contentType: 'application/json',
+          body: { echoed: `Bearer ${token}`, encoded: Buffer.from(String(token)).toString('base64'), marker: 'echo-body-4775' }, truncated: false } as never;
+      });
+      await makeNode('flow:s', script({ method: 'GET', url, secretClientId: clientId }, 'web_request'));
+      const run = await mint();
+      expect(await executeAppRun(db, run.id, deps().d)).toBe('completed');
+      expect(vi.mocked(httpRequest).mock.calls).toMatchObject([[{ method: 'GET', url, redirects: 'none', auth: { type: 'bearer', token: CANARY } }]]);
+
+      // The output node holds the echo, redacted: proof the result reached it, so the absence below is not an empty write.
+      const nodes = await db.node.findMany({ where: { memoryId } });
+      const output = nodes.filter((n) => JSON.stringify(n).includes('echo-body-4775'));
+      expect(output).toHaveLength(1);
+      expect(JSON.stringify(output[0])).toContain('[REDACTED]');
+      expect(JSON.stringify(nodes)).not.toContain(CANARY);
+      expect(JSON.stringify(nodes)).not.toContain(Buffer.from(CANARY).toString('base64'));
+      const after = await db.appRun.findUniqueOrThrow({ where: { id: run.id } });
+      expect(JSON.stringify(after, (_k, v: unknown) => (typeof v === 'bigint' ? String(v) : v))).not.toContain(CANARY);
+    } finally { vi.unstubAllEnvs(); }
   });
 
   // Gizelle P3: the loader's exclusion follows the import format: present, even empty, counts.

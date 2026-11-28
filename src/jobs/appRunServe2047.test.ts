@@ -42,7 +42,7 @@ const deps = (llm = vi.fn(async (_c: unknown, _r: { system?: string; prompt: str
   } as unknown as RunExecutionDeps,
 });
 const mint = (extra: Record<string, unknown> = {}) =>
-  mintAppRun(db, { organizationId: orgId, appId, triggerKind: 'MANUAL', entryNodeUrn: 'run-org::runmem::tasks:briefing', publish: false, ...extra } as never);
+  mintAppRun(db, { owner: { organizationId: orgId }, appId, triggerKind: 'MANUAL', entryNodeUrn: 'run-org::runmem::tasks:briefing', publish: false, ...extra } as never);
 const code = async (p: Promise<unknown>) => { try { await p; return 'RESOLVED'; } catch (e: any) { return e?.extensions?.code ?? e?.message; } };
 
 const provenance = (): CompiledProvenance => ({
@@ -81,11 +81,11 @@ describe('#2047 run', () => {
 
   it('a run minted inside the caller\'s transaction (webfetch ingress) records with the run and rolls back with it', async () => {
     const node = await compiledPointer('v1');
-    const run = await db.$transaction(async (tx) => mintAppRun(tx as never, { organizationId: orgId, appId, agentId, userId, triggerKind: 'MANUAL', entryNodeUrn: 'run-org::runmem::tasks:briefing', publish: false } as never));
+    const run = await db.$transaction(async (tx) => mintAppRun(tx as never, { owner: { organizationId: orgId }, appId, agentId, userId, triggerKind: 'MANUAL', entryNodeUrn: 'run-org::runmem::tasks:briefing', publish: false } as never));
     expect(await db.servedPrompt.count({ where: { runId: run.id, compiledNodeId: node } })).toBe(1);
     const runs = await db.appRun.count();
     await expect(db.$transaction(async (tx) => {
-      await mintAppRun(tx as never, { organizationId: orgId, appId, agentId, userId, triggerKind: 'MANUAL', entryNodeUrn: 'run-org::runmem::tasks:briefing', publish: false } as never);
+      await mintAppRun(tx as never, { owner: { organizationId: orgId }, appId, agentId, userId, triggerKind: 'MANUAL', entryNodeUrn: 'run-org::runmem::tasks:briefing', publish: false } as never);
       throw new Error('boom');
     })).rejects.toThrow('boom');
     expect(await db.appRun.count()).toBe(runs);
@@ -115,7 +115,7 @@ describe('#2047 run', () => {
         };
       },
     }) as typeof db;
-    const run = await mintAppRun(racing, { organizationId: orgId, appId, agentId, userId, triggerKind: 'MANUAL', entryNodeUrn: 'run-org::runmem::tasks:briefing', publish: false } as never);
+    const run = await mintAppRun(racing, { owner: { organizationId: orgId }, appId, agentId, userId, triggerKind: 'MANUAL', entryNodeUrn: 'run-org::runmem::tasks:briefing', publish: false } as never);
     expect((await db.servedPrompt.findFirstOrThrow({ where: { runId: run.id } })).servedRevSeq).toBe(2);
   });
 

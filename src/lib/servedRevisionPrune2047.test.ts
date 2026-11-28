@@ -24,7 +24,7 @@ const as = (): Context => ({ db, userId: admin.id, roles: [] });
 const mk = (loc: string) => db.node.create({
   data: { id: generateId(), memoryId: memory.id, loc, name: `Title ${loc}`, abstract: `Abstract ${loc}`, content: 'v1' },
 });
-const edit = (id: string, content: string) => resolvers.Mutation.updateNode(null, { input: { id, content } }, as());
+const edit = (id: string, content: string) => resolvers.Mutation.updateNode(null, { input: { ref: id, content } }, as());
 const editMany = async (id: string, n: number) => { for (let i = 0; i < n; i++) await edit(id, `more ${i}-${generateId()}`); };
 const retained = async (nodeId: string) =>
   (await db.nodeRevision.findMany({ where: { nodeId }, select: { revNo: true } })).map((r) => r.revNo as number).sort((a, b) => a - b);

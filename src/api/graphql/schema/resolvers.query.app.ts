@@ -9,6 +9,7 @@ import { getDeploymentInfo } from '../../../mcp/deploymentInfo.js';
 import { CEREMONY_NEXT_PAGES } from '../../freshSignInRoutes.js';
 import { serverInfoFieldPresence } from '../../../lib/signing/surface.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError, AmbiguousLegacyUrnError, UrnNotQualifiedError } from '../../../lib/entityRef/errors.js';
 import { readableNestedAgent } from './resolvers.types.js';
@@ -85,20 +86,20 @@ export const appQueries = {
     },
 
     // #473 — the uniform paginated app list; replaces the org-ADMIN
-    // apps(orgId!) and the member myApps. App doesn't carry a userId, so org
+    // apps(orgRef!) and the member myApps. App doesn't carry a userId, so org
     // membership is the routing; platform ADMIN/OWNER unscoped get every
-    // live App. orgId follows cor:api:100:01 (member -> scope, non-member ->
+    // live App. orgRef follows cor:api:100:01 (member -> scope, non-member ->
     // empty page, no disclosure, no admin bypass).
     apps: async (
       _: unknown,
       {
         filter,
-        orgId,
+        orgRef,
         limit,
         offset,
       }: {
-        filter?: { ownedByMe?: boolean | null; agentId?: string | null } | null;
-        orgId?: string | null;
+        filter?: { ownedByMe?: boolean | null; agentRef?: string | null } | null;
+        orgRef?: string | null;
         limit?: number | null;
         offset?: number | null;
       },
@@ -116,10 +117,10 @@ export const appQueries = {
       let agentClause: Record<string, unknown> = {};
       // Omitted and null skip the filter; an explicit value, including the empty
       // string, must resolve or answer the empty page.
-      if (f.agentId != null) {
+      if (f.agentRef != null) {
         let target: { id: string } | null = null;
         try {
-          const { id } = await resolveAgentRef(ctx.db, f.agentId);
+          const { id } = await resolveAgentRef(ctx.db, f.agentRef);
           target = await readableNestedAgent(ctx, await ctx.db.agent.findUnique({
             where: { id },
             select: { id: true, deletedAt: true, visibility: true, organizationId: true, ownerUserId: true },
@@ -135,7 +136,7 @@ export const appQueries = {
         // #782 — the caller's OWN user-owned (org-less) Apps only, for ALL
         // callers INCLUDING platform ADMIN/OWNER: owner scope is never an
         // admin-bypass surface (mirrors the owner-only personal/private
-        // memories slice). Org-less by definition, so orgId is not consulted;
+        // memories slice). Org-less by definition, so orgRef is not consulted;
         // App-key callers (no ctx.userId) get an empty page.
         // #876: identical to the agents list — user-owned Apps are
         // identity-scoped and invisible under impersonation. These carry the
@@ -144,12 +145,12 @@ export const appQueries = {
         if (!ctx.userId || ctx.impersonation) return { items: [], total: 0 };
         where = { deletedAt: null, organizationId: null, ownerUserId: ctx.userId, ...agentClause };
       } else {
-        const scope = await resolveOrgScope(ctx, orgId);
+        const scope = await resolveOrgScope(ctx, orgRef);
         if (!scope) return { items: [], total: 0 };
         const isPlatformAdmin =
           !!ctx.roles?.includes('ADMIN') || !!ctx.roles?.includes('OWNER');
         const scopedToOrg = scope.scopedOrgId != null;
-        // Admin unscoped reach applies only WITHOUT an orgId — the active-org
+        // Admin unscoped reach applies only WITHOUT an orgRef — the active-org
         // selection is a membership concept (cor:api:100:01).
         if (isPlatformAdmin && !scopedToOrg) {
           // Every live App EXCEPT another user's user-owned App — spec 047
@@ -161,10 +162,10 @@ export const appQueries = {
             { ownerUserId: null },
             { ownerUserId: ctx.userId ?? '__none__' },
           ];
-          if (ctx.userId && !ctx.impersonation && f.agentId == null) adminClauses.push(userOwnedAppOwnerMemberWhere(ctx.userId));
+          if (ctx.userId && !ctx.impersonation && f.agentRef == null) adminClauses.push(userOwnedAppOwnerMemberWhere(ctx.userId));
           where = { deletedAt: null, OR: adminClauses, ...agentClause };
         } else {
-          // Org-scoped view. In the DEFAULT (no orgId) view, also surface the
+          // Org-scoped view. In the DEFAULT (no orgRef) view, also surface the
           // caller's OWN user-owned Apps (org NULL) so a personal App the caller
           // just created is visible. A specific-org selection excludes them.
           const ownerClauses: Record<string, unknown>[] = [
@@ -178,7 +179,7 @@ export const appQueries = {
             // member. In the `where` itself, so count and paging see them.
             // Not under an agent filter: that would answer the install question
             // App.agents WITHHOLDS from this reader (Riana's P3).
-            if (f.agentId == null) ownerClauses.push(userOwnedAppOwnerMemberWhere(ctx.userId));
+            if (f.agentRef == null) ownerClauses.push(userOwnedAppOwnerMemberWhere(ctx.userId));
           }
           where = { deletedAt: null, OR: ownerClauses, ...agentClause };
         }
@@ -205,7 +206,9 @@ export const appQueries = {
       let resolvedId: string;
       try {
         ({ id: resolvedId } = await resolveAppRef(ctx.db, ref));
-      } catch {
+      } catch (e) {
+        // #4893/#2975: only a name-resolution outcome is the soft null; a database fault propagates.
+        if (!isAppRefResolutionFailure(e)) throw e;
         return null;
       }
       const app = await ctx.db.app.findUnique({ where: { id: resolvedId }, include: APP_INCLUDE });

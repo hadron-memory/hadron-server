@@ -2,7 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../integrations/db/client.js';
-import { cleanDb, tombstoneNodes } from '../test/helpers.js';
+import { cleanDb, seedRootNode, tombstoneNodes } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { computeContentHash } from './contentHash.js';
 import { computeApprovalHash } from './approvalHash.js';
@@ -85,6 +85,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: reader.id, role: 'READER' },
   ] });
   draft = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'specs-draft', draftCorpus: true }, as());
+  await seedRootNode(db, draft.id, 'specs-draft');
   await spec('pas:010', `Feature. See [Rule [pas:010:01]](https://h/app/u/hrn:node:${draft.urn}:pas:010:01).`);
   await spec('pas:010:01', 'Rule body.');
 });
@@ -108,9 +109,15 @@ describe('mintSpecCorpus: a clean corpus (#1448)', () => {
     const done = await mint();
     expect(done).toMatchObject({ dryRun: false, minted: true, blockers: [] });
     expect(await stateOf()).toBe('MINTED');
-    const row = await db.memory.findUniqueOrThrow({ where: { id: draft.id } });
-    expect(row.corpusMintedAt).toBeInstanceOf(Date);
-    expect(row.corpusMintedBy).toBe(admin.id);
+    const mintedRows = await db.node.findMany({
+      where: { memoryId: draft.id, mintedAt: { not: null } },
+      select: { mintedAt: true, mintedBy: true },
+    });
+    expect(mintedRows.length).toBeGreaterThan(0);
+    for (const r of mintedRows) {
+      expect(r.mintedAt).toBeInstanceOf(Date);
+      expect(r.mintedBy).toBe(admin.id);
+    }
 
     // #1591: per node. A second mint has nothing left to mint; a new
     // reservation is an unminted node, which the next mint must clear; and a
@@ -131,9 +138,25 @@ describe('mintSpecCorpus: a clean corpus (#1448)', () => {
   });
 });
 
+describe('a fresh memory has no root node to block its first mint (#3952, R11)', () => {
+  it('the first dry run of a new memory with one approved spec lists no blocker, and the memory has only that node', async () => {
+    const fresh = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'QA Specs', draftCorpus: true }, as());
+    const n = await db.node.create({ data: { id: generateId(), memoryId: fresh.id, loc: 'qas:010', name: 'qas:010', content: 'Rule body.', role: 'spec', nodeType: 'info', tags: ['spec'] } });
+    const [row] = await db.$queryRaw<Array<{ rev_seq: number }>>`SELECT rev_seq FROM nodes WHERE id = ${n.id}`;
+    await db.node.update({ where: { id: n.id }, data: {
+      approvedRevNo: row!.rev_seq, approvedByInfo: 'test', approvedAt: new Date(),
+      approvalHash: computeApprovalHash({ title: n.name, abstract: n.abstract, content: n.content }),
+    } });
+    expect((await db.node.findMany({ where: { memoryId: fresh.id } })).map((x) => x.loc)).toEqual(['qas:010']);
+    const dry = await specCorpusMintMutations.mintSpecCorpus(null, { memoryRef: fresh.id, dryRun: true }, as());
+    expect(dry).toMatchObject({ dryRun: true, blockers: [] });
+  });
+});
+
 describe('mintSpecCorpus lints exactly the CLI --all scope (ruling (a); @codex P2s on #1462)', () => {
   it('lints a memory root that sits at a citation-shaped name, as the CLI does', async () => {
     const pas = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'pas', draftCorpus: true }, as());
+    await seedRootNode(db, pas.id, 'pas');
     expect((await mint(true, admin.id, pas.id)).blockers.map((b) => [b.loc, b.rule])).toEqual([['pas', 'tag-spec']]);
     // Marked as the module's spec, it passes like any spec.
     await db.node.updateMany({ where: { memoryId: pas.id, loc: 'pas' }, data: { tags: ['spec'] } });
@@ -169,7 +192,7 @@ describe('mintSpecCorpus: blockers (#1448)', () => {
     try { await mint(); } catch (e) { refusal = e as GraphQLError; }
     expect(refusal?.extensions).toMatchObject({ code: 'SPEC_CORPUS_MINT_BLOCKED', blockerCount: report.blockers.length });
     expect(await stateOf()).toBe('DRAFT');
-    expect((await db.memory.findUniqueOrThrow({ where: { id: draft.id } })).corpusMintedAt).toBeNull();
+    expect(await db.node.count({ where: { memoryId: draft.id, mintedAt: { not: null } } })).toBe(0);
   });
 
   it('counts a reference to a placeholder as unresolved', async () => {
@@ -254,7 +277,7 @@ describe('mintSpecCorpus: an edge into another memory can point at a placeholder
     await db.orgMember.create({ data: { organizationId: org.id, userId: outsider.id, role: 'READER' } });
     const hidden = await db.memory.create({ data: {
       id: generateId(), urn: `${org.urn}:outsiders-draft`, name: 'outsiders-draft', class: 'private',
-      organizationId: org.id, userId: outsider.id, corpusDraft: true,
+      organizationId: org.id, userId: outsider.id,
     } });
     const placeholder = await db.node.create({ data: {
       id: generateId(), memoryId: hidden.id, loc: 'pas:900', name: 'pas:900', role: 'spec', nodeType: 'info', isPlaceholder: true,
@@ -406,7 +429,7 @@ describe('mintSpecCorpus: who may mint (#1448)', () => {
   it('lets the principal of an org-anchored private corpus mint it, and nobody else (@codex P2 on #1462)', async () => {
     const own = await db.memory.create({ data: {
       id: generateId(), urn: `${org.urn}:readers-draft`, name: 'readers-draft', class: 'private',
-      organizationId: org.id, userId: reader.id, corpusDraft: true,
+      organizationId: org.id, userId: reader.id,
     } });
     await db.node.create({ data: {
       id: generateId(), memoryId: own.id, loc: 'pas:010', name: 'pas:010', content: 'Body.', role: 'spec', nodeType: 'info', tags: ['spec'],
@@ -420,6 +443,7 @@ describe('mintSpecCorpus: who may mint (#1448)', () => {
 
   it('mints a memory that was never asked to be a draft: minting is per node (#1591)', async () => {
     const plain = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'plain' }, as());
+    await seedRootNode(db, plain.id, 'plain');
     expect(await resolvers.Memory.corpusState({ id: plain.id }, {}, as())).toBe('DRAFT');
     expect(await mint(false, admin.id, plain.id)).toMatchObject({ minted: true, mintedCount: 1 });
     expect(await resolvers.Memory.corpusState({ id: plain.id }, {}, as())).toBe('MINTED');
@@ -528,47 +552,68 @@ describe('mintSpecCorpus does not rely on writers taking its fence (@codex P2s o
 });
 
 describe('an extraction that moves specs out serializes with minting (@codex P2 on #1462)', () => {
-  it('waits while a mint holds the corpus, so it cannot delete specs between the mint\'s read and its flip', async () => {
+  // #5088 F6: this drives the PRODUCT mint (`mintSpecCorpus`), not a hand-written stand-in UPDATE, and it is ordered by
+  // queueing, not by a clock. A test transaction holds the memory row; the real mint queues on its `FOR UPDATE`
+  // (taken before its 500ms node-lock timeout starts, so nothing runs out while it waits); the extraction then takes
+  // the pas:010 subtree rows and queues on the memory `FOR SHARE` behind the mint. The mint is observed blocked by the
+  // holder's pid, then the extraction blocked too, before the holder is released. The mint then gets the memory and
+  // finds the extraction's rows already held: it must give up with the retryable SPEC_CORPUS_BUSY (the nodes-first
+  // ordering the #5063 re-key made a hazard: a bounded refusal, not a deadlock), stamp nothing, and only then does
+  // the extraction land.
+  it('queues behind a real mint that holds the corpus: the mint refuses BUSY, stamps nothing, the extraction then lands', async () => {
     let release!: () => void;
     let held!: () => void;
     const lockHeld = new Promise<void>((r) => { held = r; });
     const hold = new Promise<void>((r) => { release = r; });
-    let seenByMint = -1;
-    // What mintSpecCorpus holds from its report to its flip.
-    const minter = db.$transaction(async (tx) => {
+    let holderPid = 0;
+    const holder = db.$transaction(async (tx) => {
+      [{ pid: holderPid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
       await tx.$queryRaw`SELECT id FROM memories WHERE id = ${draft.id} FOR NO KEY UPDATE`;
       held();
       await hold;
-      seenByMint = await tx.node.count({ where: { memoryId: draft.id, deletedAt: null, loc: { startsWith: 'pas:010' } } });
-      // …and flips the corpus, as a real mint does before it commits.
-      await tx.$executeRaw`UPDATE memories SET corpus_draft = false WHERE id = ${draft.id}`;
     }, { timeout: 20_000 });
     await lockHeld;
 
-    const parent = await db.node.findFirstOrThrow({ where: { memoryId: draft.id, loc: 'pas:010' } });
-    const extracting = codeOf(resolvers.Mutation.extractParentNodeToMemory(
-      {}, { parentRef: parent.id, targetUrn: `${org.urn}::extracted-specs`, move: true } as never, as(),
-    ));
+    // Backends currently waiting on a lock, by pid (no matching of SQL text, so a reworded product query cannot
+    // silently break the observation).
+    const waiting = async () => db.$queryRaw<Array<{ pid: number; blockers: number[] }>>`
+      SELECT pid, pg_blocking_pids(pid) AS blockers FROM pg_stat_activity
+      WHERE datname = current_database() AND cardinality(pg_blocking_pids(pid)) > 0`;
+    let mintPid = 0;
+    let mintDoneAt = 0;
+    let extractDoneAt = 0;
+    let minting!: Promise<string>;
+    let extracting!: Promise<string>;
     try {
+      minting = codeOf(mint()).then((c) => { mintDoneAt = performance.now(); return c; });
+      // The mint is first in the memory row's queue: the one backend the holder blocks. The extraction is only
+      // started once it is seen waiting.
       await vi.waitFor(async () => {
-        const waiting = await db.$queryRaw<Array<{ pid: number }>>`
-          SELECT pid FROM pg_stat_activity
-          WHERE datname = current_database() AND wait_event_type = 'Lock'
-            AND query LIKE '%FROM memories WHERE id%' AND query LIKE '%FOR SHARE%'
-        `;
-        expect(waiting.length).toBeGreaterThan(0);
-      }, { timeout: 5_000, interval: 25 });
+        const w = (await waiting()).filter((r) => r.blockers.includes(holderPid));
+        expect(w).toHaveLength(1);
+        mintPid = w[0].pid;
+      }, { timeout: 5_000, interval: 10 });
+      const parent = await db.node.findFirstOrThrow({ where: { memoryId: draft.id, loc: 'pas:010' } });
+      extracting = codeOf(resolvers.Mutation.extractParentNodeToMemory(
+        {}, { parentRef: parent.id, targetUrn: `${org.urn}::extracted-specs`, move: true } as never, as(),
+      )).then((c) => { extractDoneAt = performance.now(); return c; });
+      // A second backend is now waiting on a lock too, queued behind the mint: the proof the extraction reached a
+      // lock a mint holds a place on, with the holder still not released.
+      await vi.waitFor(async () => {
+        expect((await waiting()).filter((r) => r.pid !== mintPid)).toHaveLength(1);
+      }, { timeout: 5_000, interval: 10 });
     } finally {
       release();
     }
-    await minter;
-    // The mint's snapshot still had both specs: the extraction had not landed.
-    expect(seenByMint).toBe(2);
-    // Ordered after the mint, the extraction is an ordinary edit of a MINTED
-    // corpus. Extract has no draft-only behavior, and today's rules (which
-    // apply unchanged after minting, #1447 §5) do not refuse removing a spec.
+    await holder;
+    expect(await minting).toBe('SPEC_CORPUS_BUSY');
+    expect(await db.node.count({ where: { memoryId: draft.id, mintedAt: { not: null } } })).toBe(0);
+    // Ordered after the mint's abort, the extraction is an ordinary edit of the (still unminted) corpus: extract has
+    // no draft-only behavior, and today's rules (#1447 §5) do not refuse removing a spec.
     expect(await extracting).toBe('NO_ERROR');
+    expect(extractDoneAt).toBeGreaterThan(mintDoneAt);
     expect(await db.node.count({ where: { memoryId: draft.id, deletedAt: null, loc: { startsWith: 'pas:010' } } })).toBe(0);
+    expect(await db.node.count({ where: { memoryId: draft.id, mintedAt: { not: null } } })).toBe(0);
   });
 });
 
@@ -595,7 +640,7 @@ describe('mintSpecCorpus re-authorizes under the lock (@codex P2 on #1462)', () 
     const code = await codeOf(specCorpusMintMutations.mintSpecCorpus(null, { memoryRef: draft.id }, { ...as(), db: racingDb }));
     expect(fired).toBe(true);
     expect(code).not.toBe('NO_ERROR');
-    expect((await db.memory.findUniqueOrThrow({ where: { id: draft.id } })).corpusDraft).toBe(true);
+    expect(await db.node.count({ where: { memoryId: draft.id, mintedAt: { not: null } } })).toBe(0);
   });
 });
 

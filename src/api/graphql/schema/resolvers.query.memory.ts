@@ -28,11 +28,15 @@ import {
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { validateMemoryNodes } from '../../../lib/memoryValidation.js';
 import { emitNodeUrnV2 } from '../../../lib/urnEmit.js';
+import { grantReadReachFor } from '../../../lib/grants/readGrant.js';
+import { ownAppMemoryIds } from '../../../lib/appOwnMemory.js';
 import { activeAgentInstallLicenseIds, isGrantedAgentMemoryRole } from '../../../lib/appAgent.js';
 import { findInstallMemory, resolveInstallTarget } from './installMemory.js';
 import { listableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
-import { AgentNotFoundError, AppNotFoundError } from '../../../lib/entityRef/errors.js';
+import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
+import { groupMemberMemoryWhere } from '../../../lib/auth/groupMemberMemory.js';
+import { attachableMemoriesPage } from './resolvers.mutation.appMemory.js';
 
 /** Compose a node URN, tolerating a memory urn the flat v2 shape can't express. */
 function safeCanonicalNodeUrn(memoryUrn: string, loc: string): string | null {
@@ -70,7 +74,7 @@ export const memoryQueries = {
      * reading their own activity discloses nothing. With `memoryRefs`: every
      * user's events attributed to ANY of those memories, each ref gated on
      * MEMORY READ ACCESS — the same gate `memoryUsageSummary` and
-     * `usageEvents(memoryId:)` use, so the three memory-scoped usage surfaces
+     * `usageEvents(memoryRef:)` use, so the three memory-scoped usage surfaces
      * stay in parity. That reveals other users' activity VOLUMES to any reader
      * of the memory — a deliberate call (Holger, #796), and strictly less than
      * the per-node counts `memoryUsageSummary` already exposes to the same
@@ -264,7 +268,9 @@ export const memoryQueries = {
       try {
         target = await resolveInstallTarget(ctx.db, { appRef: args.appRef, agentRef: args.agentRef });
       } catch (e) {
-        if (e instanceof AppNotFoundError || e instanceof AgentNotFoundError) return null;
+        // #2044/#4893: a name-resolution failure on either arm — typed miss, malformed or
+        // ambiguous ref — is the same null; a database fault propagates.
+        if (refNamesNothing(e, { ambiguousNamesNothing: true })) return null;
         throw e;
       }
       const row = await findInstallMemory(ctx.db, target.appId, target.agentId);
@@ -307,14 +313,21 @@ export const memoryQueries = {
       return memory;
     },
 
+    /** #5393 (cor:dmo:060:22): the attachable-memory picker's search door; judged in `attachableMemoriesPage`. */
+    attachableMemories: (
+      _: unknown,
+      args: { appRef: string; query?: string | null; limit?: number | null; offset?: number | null },
+      ctx: Context,
+    ) => attachableMemoriesPage(ctx, args),
+
     // #473 — the uniform paginated memory list. Replaces myMemories (the
     // caller's union), publicMemories (filter.visibility: PUBLIC), and
-    // orgSystemMemories (orgId + filter.memoryClasses: [system]).
+    // orgSystemMemories (orgRef + filter.memoryClasses: [system]).
     memories: async (
       _: unknown,
       {
         filter,
-        orgId,
+        orgRef,
         limit,
         offset,
       }: {
@@ -324,7 +337,7 @@ export const memoryQueries = {
           sharedWithMe?: boolean | null;
           ownedByMe?: boolean | null;
         } | null;
-        orgId?: string | null;
+        orgRef?: string | null;
         limit?: number | null;
         offset?: number | null;
       },
@@ -377,8 +390,8 @@ export const memoryQueries = {
       // this one, `chk_personal_visibility_user` for the other).
       //
       // Ahead of `resolveOrgScope` because the slice is org-less by definition,
-      // so `orgId` is not consulted — matching the sibling filters, which skip
-      // the scope resolution entirely. A foreign orgId therefore neither empties
+      // so `orgRef` is not consulted — matching the sibling filters, which skip
+      // the scope resolution entirely. A foreign orgRef therefore neither empties
       // this slice nor discloses anything: every row it returns is the caller's
       // own and belongs to no org.
       if (f.ownedByMe) {
@@ -422,12 +435,14 @@ export const memoryQueries = {
             { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
             { class: { notIn: ['personal', 'private'] as any }, ownerUserId: ctx.userId },
           ],
-          // Per-user agent holdings stay out of the regular memory list
-          // (cor:api:120:03), so the owner slice excludes them too — a filter
-          // that surfaced rows the default list hides would WIDEN rather than
-          // narrow. No live row is both today (measured: 0 of 24 user-owned
-          // rows carry `userMemoryOfAgentId`); the clause keeps it that way.
-          userMemoryOfAgentId: null,
+          // #5026: no `userMemoryOfAgentId` clause. A person's own per-user
+          // Agent memory is one of their own user-owned memories and the
+          // default list includes it for its owner
+          // (hrn:node:hadronmemory.com:specs:cor:api:120:03, amended
+          // 2026-11-24), so a slice that hid it would be narrower than the list
+          // it narrows. The arms above admit only the caller's own rows, and
+          // `organizationId: null` keeps an ORG-owned per-user memory (the
+          // common shape) out of this org-less slice.
           ...(f.visibility ? { visibility: f.visibility as any } : {}),
           ...classFilter,
           // A memory the caller owns AND was granted: narrows this slice
@@ -440,7 +455,7 @@ export const memoryQueries = {
       // #463 / cor:api:100:01 — optional single-org narrowing ("active
       // organization"): member -> scope, non-member/unresolvable -> empty
       // page with no org-existence disclosure, no platform-admin bypass.
-      const scope = await resolveOrgScope(ctx, orgId);
+      const scope = await resolveOrgScope(ctx, orgRef);
       if (!scope) return empty;
 
       // #778 — filter.sharedWithMe: the distinct set of personal memories shared
@@ -463,7 +478,8 @@ export const memoryQueries = {
         return page({
           deletedAt: null,
           class: 'personal',
-          userMemoryOfAgentId: null,
+          // #5389: App personal memories (userMemoryOfAgentId set) are listed to a grantee too, in lockstep with
+          // granteeShareAccess and getAccessibleMemoryIds.
           ...(f.visibility ? { visibility: f.visibility as any } : {}),
           // `shares` is the Prisma relation field on Memory → MemoryShare.
           shares: { some: { granteeId: ctx.userId } },
@@ -516,7 +532,6 @@ export const memoryQueries = {
           memoryItems:{where:{deletedAt:null,memory:{deletedAt:null}},include:{memory:{include:MEMORY_INCLUDE}}},
         }});
         const installedRows = installedAgents.map(agent=>({agent}));
-        if (!installedRows.length) return empty;
         // #758 — the twin of the #676 blocker-2 fix, which landed only in the
         // MCP `getAppMemoryAccess`. spec 047: a USER-owned memory is strictly
         // owner-only, so one owned by someone other than this App's owner must
@@ -548,6 +563,34 @@ export const memoryQueries = {
             memoryMap.set(item.memory.id, item.memory);
           }
         }
+        // #5272 (hrn:node:hadronmemory.com:specs:cor:api:120:03, App-key line), #5321: plus every memory the App's read grants let
+        // this key read, judged at this call by the reads' own judge (`grantReadReachFor`), so a revoked or lapsed grant leaves the
+        // list when it stops allowing, and an App with no installed Agent still lists them (as MCP's `hadron_list_memories` does).
+        // An attachment adds nothing (cor:dmo:060:22). The judge decides the reach, so the Agent-item exclusions above are not
+        // re-applied; the filters the caller chose and the record gate are, as for an Agent item. Empty for any caller but a pure key.
+        const linkedIds = [...(await grantReadReachFor(ctx.db, ctx))].filter((id) => !memoryMap.has(id));
+        if (linkedIds.length > 0) {
+          const linkedRows = await ctx.db.memory.findMany({ where: { id: { in: linkedIds }, deletedAt: null }, include: MEMORY_INCLUDE });
+          for (const memory of linkedRows) {
+            if (classSet ? !classSet.has(memory.class) : memory.class === 'system') continue;
+            if (f.visibility && memory.visibility !== f.visibility) continue;
+            if (!(await canReadMemoryRecord(ctx, memory))) continue;
+            memoryMap.set(memory.id, memory);
+          }
+        }
+        // #5398 (cor:api:120:03, App-key line): plus the App's own shared app-class memories, by the one predicate the
+        // reads use (`ownAppMemoryIds`), so the list follows the read. The caller's filters and the record gate apply, as for
+        // the links above. Empty for any caller but a pure App key.
+        const ownIds = [...(await ownAppMemoryIds(ctx.db, ctx))].filter((id) => !memoryMap.has(id));
+        if (ownIds.length > 0) {
+          const ownRows = await ctx.db.memory.findMany({ where: { id: { in: ownIds }, deletedAt: null }, include: MEMORY_INCLUDE });
+          for (const memory of ownRows) {
+            if (classSet && !classSet.has(memory.class)) continue;
+            if (f.visibility && memory.visibility !== f.visibility) continue;
+            if (!(await canReadMemoryRecord(ctx, memory))) continue;
+            memoryMap.set(memory.id, memory);
+          }
+        }
         const all = Array.from(memoryMap.values()).sort(
           (a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id),
         );
@@ -563,9 +606,18 @@ export const memoryQueries = {
       //       on the same always-visible terms as (1) — see below,
       //   (2) memories their member orgs OWN,
       //   (3) memories their member orgs SUBSCRIBE to.
-      // Per-user agent memories (userMemoryOfAgentId) are excluded — they
-      // belong to the chatbot flow, not the regular memory list. 034:
-      // owner-owned personal/private never come in via the org.
+      //   (4) their OWN per-user Agent memories (#5026), on the same
+      //       always-visible, identity-scoped terms as (1).
+      // #5026 (hrn:node:hadronmemory.com:specs:cor:api:120:03, amended
+      // 2026-11-24; per-user memory hrn:node:hadronmemory.com:specs:cor:cht:010:02):
+      // a per-user Agent memory (`userMemoryOfAgentId` set) lists to its OWNER
+      // and to nobody else. The exclusion is therefore per arm, not top-level:
+      // every shared arm (org, install, app, group, subscription) keeps
+      // `userMemoryOfAgentId: null`, because the no-App holding is class
+      // `knowledge` and org-owned and would otherwise list to every member of
+      // its org; only the identity arms (strict owner, user owner, creator of a
+      // no-App holding) drop it. 034: owner-owned personal/private never come
+      // in via the org.
       if (ctx.userId) {
         // A caller with zero memberships still gets their own personal/private
         // memories: `in: []` in the org clauses simply matches nothing.
@@ -573,8 +625,8 @@ export const memoryQueries = {
         // #3595: the group membership clause is bounded to the shared org
         // under impersonation (the session sees ONE org — the target's
         // MemoryMember rows elsewhere must not list) and to the explicitly
-        // selected org when `orgId` is supplied (a slice is a filter — an
-        // orgId=A page must not include the caller's group memory in B).
+        // selected org when `orgRef` is supplied (a slice is a filter — an
+        // orgRef=A page must not include the caller's group memory in B).
         // Ordinary unscoped calls stay unbounded: cross-org MemoryMember
         // reach, mirroring the shared read gate's restrictToOrgId posture.
         const groupOrgBound = scope.scopedOrgId ?? ctx.impersonation?.orgId ?? null;
@@ -594,20 +646,20 @@ export const memoryQueries = {
         return page({
           deletedAt: null,
           ...(f.visibility ? { visibility: f.visibility as any } : {}),
-          userMemoryOfAgentId: null,
           AND: [classFilter],
           OR: [
             // #2044: an install memory is NOT an org-wide record (its customisation is the App's):
             // the org clause skips it, and the clause below lists it to its own audience alone.
-            { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private', 'group', 'app'] as any }, isInstallMemory: false },
-            // #4181 / cor:api:100, cor:acl:010:01: with `orgId` the install clause is narrowed like its org
+            { organizationId: { in: orgIds }, class: { notIn: ['personal', 'private', 'group', 'app'] as any }, isInstallMemory: false, userMemoryOfAgentId: null },
+            // #4181 / cor:api:100, cor:acl:010:01: with `orgRef` the install clause is narrowed like its org
             // neighbour: the memory sits in its App's own org (user-owned Apps' install memories have no org
             // and reach their owner through the user-owned clause below, pinned in the #4181 test). A ternary on
             // `scopedOrgId`, not `orgIds`: unscoped, `orgIds` is the caller's MEMBER orgs, which would drop an App
             // owner's install memory outside them; scoped, `orgIds` is exactly [scopedOrgId] (resolveOrgScope).
-            { class: 'system' as any, isInstallMemory: true, id: { in: installListable }, ...(scope.scopedOrgId ? { organizationId: scope.scopedOrgId } : {}) },
+            { class: 'system' as any, isInstallMemory: true, userMemoryOfAgentId: null, id: { in: installListable }, ...(scope.scopedOrgId ? { organizationId: scope.scopedOrgId } : {}) },
             {
               class: 'app' as any,
+              userMemoryOfAgentId: null,
               id: { in: accessibleIds },
               OR: [
                 { organizationId: { in: orgIds } },
@@ -618,16 +670,17 @@ export const memoryQueries = {
             // #1208 / cor:acl:010:01 — group records list only through
             // MemoryMember (reader/writer/owner), mirroring the shared read
             // gate exactly: NOT nested under orgIds for ordinary calls (a
-            // cross-org MemoryMember lists theirs), `appId: null` so an
-            // app-scoped group row's metadata stays App-internal (#653,
+            // cross-org MemoryMember lists theirs), an App-scoped group row
+            // included since #5027 (Holger R1: its MemoryMembers read it,
             // record-side parity with the node gate), per-user holdings and
             // user-owned rows excluded (#758). MemoryMember rows hard-delete
             // (FR-038), so `some` is liveness.
-            { class: 'group' as any, appId: null, userMemoryOfAgentId: null, ownerUserId: null, ...(groupOrgBound ? { organizationId: groupOrgBound } : {}), memberships: { some: { userId: ctx.userId } } },
+            // #5027 (Holger R1): the shared group predicate; a group made in an App lists for its MemoryMembers too.
+            groupMemberMemoryWhere(ctx.userId, { restrictToOrgId: groupOrgBound }),
             // GROUP excluded (#3781): a group-subscription row is API-invalid
             // state (createMemorySubscription admits PUBLIC only; group
             // visibility is CHECK-forced to GROUP) — never a listing grant.
-            { class: { notIn: ['personal', 'private', 'group', 'app'] as any }, subscriptions: { some: { organizationId: { in: orgIds } } } },
+            { class: { notIn: ['personal', 'private', 'group', 'app'] as any }, userMemoryOfAgentId: null, subscriptions: { some: { organizationId: { in: orgIds } } } },
             // Admin impersonation: the identity-scoped clauses are dropped —
             // the shared-org session never lists the target's personal/private
             // or user-owned memories (matches getAccessibleMemoryIds).
@@ -656,7 +709,7 @@ export const memoryQueries = {
                   // above: cor:api:120:03 — "selecting an active org must not
                   // hide your own notes". This is where the memory surface
                   // deliberately differs from `agents()`, which drops its
-                  // user-owned fold under an explicit orgId; a memory the
+                  // user-owned fold under an explicit orgRef; a memory the
                   // caller owns is theirs in every org context.
                   //
                   // NON-personal classes only (@codex, PR #1215). The two owner
@@ -676,6 +729,14 @@ export const memoryQueries = {
                   // line since spec 047 ("the map is personal-free by design");
                   // this is the GraphQL side catching up, not a new rule.
                   { class: { notIn: ['personal', 'private'] as any }, ownerUserId: ctx.userId },
+                  // #5026 — the caller's own no-App holding: the class-`knowledge`, org-owned memory `startChat`
+                  // provisions when no licensed App qualifies (resolvers.mutation.chat.ts). It carries neither
+                  // `userId` nor `ownerUserId`, so neither identity arm above reaches it; its reader is its
+                  // CREATOR (hrn:node:hadronmemory.com:specs:cor:cht:010:02, #3519). The same predicate the node
+                  // gate admits (`getAccessibleMemoryIds`, the `createdBy` holding clause) and MCP's
+                  // `readsOwnNoAppHolding`, narrowed to `appId: null` like the latter. `createdBy` is compared
+                  // with the user id only: an anonymous session memory stores an App id there and is class `app`.
+                  { class: 'knowledge' as any, appId: null, userMemoryOfAgentId: { not: null }, createdBy: ctx.userId },
                 ]),
           ],
         });

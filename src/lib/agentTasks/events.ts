@@ -74,7 +74,12 @@ export const ASSIGNEE_CLEARED_EVENT_TYPES = ['task.handed-back'] as const satisf
 /** Passive history must be excluded from EVERY later-event/activity predicate when a kind is added here. */
 // #4286: a defect link (review.defect-linked) is a QA fact about the task, not its assignee acting on it, so it never
 // clears an assignment or child-end wake (taskWakes.ts).
-export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited', 'task.properties-changed', 'task.external-id-released', 'review.defect-linked'] as const;
+// #4431: an answer to a question that blocks the task, or its take-back, is a fact about the task (a decider acted on the
+// question), never its assignee acting on the task, so neither clears a wake or counts as progress (Vera's draft of
+// cor:agt:050:11).
+// #4441: a verdict's withdrawal is a fact about a FINISHED seat, recorded by its holder or the coordinator, never its
+// assignee working the task, so it never counts as activity or clears a wake.
+export const PASSIVE_EVENT_TYPES = ['task.warning', 'task.edited', 'task.properties-changed', 'task.external-id-released', 'review.defect-linked', 'question.answered', 'question.answer-retracted', 'review.verdict.withdrawn'] as const;
 /** #2609: only facts already readable by every team-event reader. Assignee state and future codes are excluded. */
 export const RECORDED_TASK_WARNING_CODES = ['task.create.no-source', 'task.finish.open-children'] as const;
 export type RecordedTaskWarningCode = (typeof RECORDED_TASK_WARNING_CODES)[number];
@@ -130,6 +135,12 @@ export type TaskEventPayload =
    */
   | { type: 'review.defect-linked'; defect: string; introducedAtHead: string | null }
   /**
+   * #4431 (Questions S7): a question that blocks this task was answered, or its answer taken back. Ids, the code,
+   * the question's revision after the write and its derived state after it: never the answer's option, text or
+   * reason (cor:agt:050:11). Only `question.answered` wakes the task's assignee.
+   */
+  | { type: 'question.answered' | 'question.answer-retracted'; questionId: string; code: string; revision: number; state: string }
+  /**
    * #4084 (cor:agt:120:02, V87 Proposed): the external id a release cleared. The id is readable to every reader of the
    * team's events already (it is on the task, under the same read gate, cor:agt:050:21), so naming it discloses nothing
    * new; the team's reconcile pass needs it, because the task no longer holds it.
@@ -166,11 +177,15 @@ function payloadJson(e: TaskEventPayload): Prisma.InputJsonObject {
     case 'review.scheduled': return { slots: e.slots };
     case 'pr.frozen': return { head: e.head, pullRequest: e.pullRequest };
     case 'review.defect-linked': return { defect: e.defect, introducedAtHead: e.introducedAtHead };
+    case 'question.answered':
+    case 'question.answer-retracted':
+      return { questionId: e.questionId, code: e.code, revision: e.revision, state: e.state };
     case 'review.seat.assigned': return { slot: e.slot, head: e.head, supersedes: e.supersedes };
     case 'review.verdict': return {
       slot: e.slot, head: e.head, verdict: e.verdict, node: e.node, receipt: e.receipt,
       reviewerFamily: e.reviewerFamily, reviewerModel: e.reviewerModel, modelReportedAt: e.modelReportedAt,
     };
+    case 'review.verdict.withdrawn': return { slot: e.slot, head: e.head, verdictEventId: e.verdictEventId, verdict: e.verdict, receipt: e.receipt };
     case 'pr.ready': return { head: e.head };
     case 'task.edited':
       if (e.fields.some(f => !(TASK_EDIT_FIELDS as readonly string[]).includes(f))) throw new Error('Unsupported task edit field');
@@ -264,6 +279,19 @@ export async function appendTaskEvent(
  * rule. `assignment.unassignable` is cor:agt:050:17's alarm; T3 writes the
  * ordinary `assignment.queued` / `.matched` events.
  */
+/**
+ * #4375 (rulings 0270, 0271): the cadence alarm's type, the only one emitted. The alarm watches every lead
+ * (src/lib/agentTasks/leads.ts), so the type names the lead.
+ */
+export const LEAD_CADENCE_EVENT_TYPE = 'alarm.lead-cadence';
+/**
+ * The type the same alarm was raised under before #4375. Those `agent_team_events` rows are history and are never
+ * rewritten, so every place that matches the type reads BOTH ({@link LEAD_CADENCE_EVENT_TYPES}); nothing emits this one.
+ */
+export const LEGACY_LEAD_CADENCE_EVENT_TYPE = 'alarm.coordinator-cadence';
+/** Both spellings of the cadence alarm's type: read both, emit only {@link LEAD_CADENCE_EVENT_TYPE}. */
+export const LEAD_CADENCE_EVENT_TYPES = [LEAD_CADENCE_EVENT_TYPE, LEGACY_LEAD_CADENCE_EVENT_TYPE] as const;
+
 export const ALARM_EVENT_TYPES = [
   'stall.not-started',
   'stall.no-progress',
@@ -273,14 +301,22 @@ export const ALARM_EVENT_TYPES = [
   'stall.finish-by',
   // #2755: a worker gone dark (cor:agt:100:06, Proposed). Task-less; its episode lives in `dark_worker_episodes`.
   'alarm.dark-worker',
-  // #2763: a coordinator that stopped assigning while a lane worker was free (cor:agt:050:31, Proposed). Task-less; its episode lives in `coordinator_cadence_episodes`.
-  'alarm.coordinator-cadence',
+  // #2763, renamed by #4375: a lead that stopped assigning while a worker under it was free (cor:agt:050:31). Task-less;
+  // its episode lives in `lead_cadence_episodes`. Only the new spelling is an emit type: the legacy one is history that
+  // is read ({@link LEAD_CADENCE_EVENT_TYPES}), never written (#4950).
+  LEAD_CADENCE_EVENT_TYPE,
   // #2014: a worker's team-chat post refused by the rate limit. Task-less; its episode lives in `post_limit_episodes`.
   'alarm.post-limit',
   // #4231: a worker whose platform starts keep failing (three in an hour). Task-less; its episode lives in `start_failing_episodes`.
   'alarm.start-failing',
   // #4233: a host whose sweep stopped reporting (S10 of #4229). Task-less and workerless; its episode lives in `host_sweep_episodes`.
   'alarm.stale-sweep',
+  // #3819 slice 1: a family/tier/role combination the platform could not give work to (cor:agt:060:14). Task-less and
+  // workerless, with an empty chain; its episode lives in `saturation_episodes`.
+  'alarm.saturation',
+  // #4531 (cor:agt:050:34, Proposed): the whole team went dark. App-owned, task-less and workerless, with an empty chain; it
+  // wakes nobody and cannot be acknowledged. Its episode lives in `team_dark_episodes`; its end is a `team.recovered` event.
+  'team.dark',
 ] as const;
 export type AlarmEventType = (typeof ALARM_EVENT_TYPES)[number];
 
@@ -298,8 +334,8 @@ export type AlarmPayload = {
 
 /**
  * Append one stall alarm, once per episode (cor:agt:050:13). The episode's key
- * is (task, type, episodeStart) under the unique index
- * agent_team_events_episode_uniq, so a second insert of the same episode —
+ * is (app, task, type, episodeStart) under the unique index
+ * agent_team_events_episode_app_uniq, so a second insert of the same episode —
  * a re-run, or a concurrent evaluator pass on another instance — does
  * nothing: `ON CONFLICT DO NOTHING`, never a read-then-write. A concurrent
  * insert of the same key waits for the first to commit and then conflicts.
@@ -337,7 +373,7 @@ export async function appendAlarmEvent(
       ${JSON.stringify(chain)}::jsonb, ${JSON.stringify(payload)}::jsonb,
       ${toNaiveUtc(args.createdAt)}::timestamp, ${toNaiveUtc(args.episodeStart)}::timestamp
     )
-    ON CONFLICT (task_id, type, episode_start) DO NOTHING
+    ON CONFLICT (app_id, task_id, type, episode_start) DO NOTHING
     RETURNING id`;
   return rows[0]?.id ?? null;
 }
@@ -434,6 +470,33 @@ export async function appendHostEvent(
       actorWorkerId: null,
       actorAgentId: null,
       payload: { registrationId: args.registrationId, hostId: args.hostId, workerCount: args.workerCount },
+      createdAt: args.createdAt,
+    },
+  });
+}
+
+// ── #5259: the hosts of a team App (hrn:node:hadronmemory.com:specs:cor:agt:070:01) ───────────────────────
+
+/** A host joined to the App, its settings changed, or its removal. */
+export const TEAM_HOST_EVENT_TYPES = ['host.joined', 'host.updated', 'host.removed'] as const;
+export type TeamHostEventType = (typeof TEAM_HOST_EVENT_TYPES)[number];
+
+/**
+ * Append a team-host event in the write's transaction. The host's token id only, and for a join whether it replaced a
+ * live key: never the label, which is free text (cor:agt:050:11), and never a key, raw or hashed.
+ */
+export async function appendTeamHostEvent(
+  tx: Prisma.TransactionClient,
+  args: { appId: string; type: TeamHostEventType; hostId: string; actorUserId: string | null; actorWorkerId?: string | null; replaced?: boolean; createdAt: Date },
+): Promise<void> {
+  await tx.agentTeamEvent.create({
+    data: {
+      appId: args.appId,
+      type: args.type,
+      actorUserId: args.actorUserId,
+      actorWorkerId: args.actorWorkerId ?? null,
+      actorAgentId: null,
+      payload: { hostId: args.hostId, ...(args.replaced === undefined ? {} : { replaced: args.replaced }) },
       createdAt: args.createdAt,
     },
   });
@@ -750,6 +813,13 @@ export type ManagerAct =
   | 'task.assign' | 'task.reassign' | 'task.cancel' | 'task.park' | 'task.ready' | 'task.update'
   | 'task.finding-dispose' | 'task.priority' | 'task.release-external-id' | 'task.blocker-add' | 'task.blocker-remove' | 'task.create'
   | 'alarm.acknowledge' | 'worker.availability' | 'model-family.availability' | 'app.stall-schedule'
+  // #4441: a coordinator's (or manager's) withdrawal of another reviewer's negative verdict.
+  | 'review.verdict-withdraw'
+  // #4777: the saturation-alarm wake-roles list (cor:agt:060:16).
+  | 'app.saturation-wake-roles'
+  | 'app.role-list'
+  // #4937: the App's report of whether external tasks exist (cor:agt:050:31).
+  | 'app.external-tasks-report'
   | 'app.model-group.set' | 'app.model-group.delete' | 'app.properties'
   // #3321 (S4b): the host-operation, stop-signal, ticker, settings, isolation and wake doors.
   | `host-operation.${'worker.start' | 'worker.end' | 'worktree.create' | 'worktree.remove'}`
@@ -760,6 +830,8 @@ export type ManagerAct =
   | 'worker.leave-alone' | 'app.sweep-mode'
   // #4222: the host-setup doors (which workers a host runs, and the App's switch for it).
   | 'host-setup.assign' | 'host-setup.unassign' | 'host-setup.source'
+  // #5259: a host's settings (joining and removing a host are person-only, so they record no instructed act).
+  | 'agent-team-host.update'
   // #4280 (S12b): linking a post-merge defect to the PR it escaped from.
   | 'review.defect-link';
 

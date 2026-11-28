@@ -33,7 +33,7 @@ const canonical = (v: unknown): string => {
 };
 const fingerprint = (v: unknown) => ({ bytes: Buffer.byteLength(canonical(v), 'utf8'), sha256: createHash('sha256').update(canonical(v)).digest('hex') });
 const setProps = (properties: unknown, userId = owner.id, taskId = task.id) =>
-  M.updateAgentTask({}, { taskId, input: { properties } }, ctx(userId));
+  M.updateAgentTask({}, { taskRef: taskId, input: { properties } }, ctx(userId));
 const stored = async (id = task.id) => (await db.agentTask.findUniqueOrThrow({ where: { id } })) as any;
 const changed = (id = task.id) => db.agentTeamEvent.findMany({ where: { taskId: id, type: 'task.properties-changed' }, orderBy: { createdAt: 'asc' } });
 const putSchema = (data: unknown, memoryId = systemMemory.id) =>
@@ -71,19 +71,19 @@ describe('create and read #2420', () => {
   });
 
   it('every task returns its own value: a child and a grandchild never read their root', async () => {
-    await M.updateAgentTask({}, { taskId: task.id, input: { properties: { root: true } } }, ctx());
-    const child = await M.createAgentTask({}, { input: { parentTaskId: task.id, title: 'Child' } }, ctx(assignee.id));
+    await M.updateAgentTask({}, { taskRef: task.id, input: { properties: { root: true } } }, ctx());
+    const child = await M.createAgentTask({}, { input: { parentTaskRef: task.id, title: 'Child' } }, ctx(assignee.id));
     expect((await stored(child.id)).properties).toBeNull();
-    await M.updateAgentTask({}, { taskId: child.id, input: { properties: { child: true } } }, ctx(assignee.id));
-    await M.updateAgentTask({}, { taskId: task.id, input: { properties: { root: 2 } } }, ctx());
+    await M.updateAgentTask({}, { taskRef: child.id, input: { properties: { child: true } } }, ctx(assignee.id));
+    await M.updateAgentTask({}, { taskRef: task.id, input: { properties: { root: 2 } } }, ctx());
     expect((await stored(child.id)).properties).toEqual({ child: true });
     expect((await stored()).properties).toEqual({ root: 2 });
     // A grandchild: made by the child's assignee under the child, it holds only its own value too.
-    await M.assignAgentTask({}, { taskId: child.id, assignee: { user: sibling.id } }, ctx(assignee.id));
-    const grand = await M.createAgentTask({}, { input: { parentTaskId: child.id, title: 'Grandchild' } }, ctx(sibling.id));
+    await M.assignAgentTask({}, { taskRef: child.id, assignee: { user: sibling.id } }, ctx(assignee.id));
+    const grand = await M.createAgentTask({}, { input: { parentTaskRef: child.id, title: 'Grandchild' } }, ctx(sibling.id));
     expect((await stored(grand.id)).properties).toBeNull();
-    await M.updateAgentTask({}, { taskId: grand.id, input: { properties: { grand: true } } }, ctx(sibling.id));
-    await M.updateAgentTask({}, { taskId: child.id, input: { properties: { child: 2 } } }, ctx(assignee.id));
+    await M.updateAgentTask({}, { taskRef: grand.id, input: { properties: { grand: true } } }, ctx(sibling.id));
+    await M.updateAgentTask({}, { taskRef: child.id, input: { properties: { child: 2 } } }, ctx(assignee.id));
     expect((await stored(grand.id)).properties).toEqual({ grand: true });
     expect((await stored(child.id)).properties).toEqual({ child: 2 });
     expect((await stored()).properties).toEqual({ root: 2 });
@@ -125,7 +125,7 @@ describe('create and read #2420', () => {
 describe('update semantics #2420', () => {
   it('omitted leaves it unchanged, an object replaces the whole value, null clears; each real change is one content-free event', async () => {
     await setProps({ a: { PRIVATE: 1 }, b: 2 });
-    await M.updateAgentTask({}, { taskId: task.id, input: { description: 'other field' } }, ctx());
+    await M.updateAgentTask({}, { taskRef: task.id, input: { description: 'other field' } }, ctx());
     expect((await stored()).properties).toEqual({ a: { PRIVATE: 1 }, b: 2 });
     await setProps({ c: 3 });
     expect((await stored()).properties).toEqual({ c: 3 });
@@ -187,9 +187,9 @@ describe('who may write #2420', () => {
   });
 
   it('admits the assignee ONLY for properties: any other field in the same patch refuses the whole call', async () => {
-    await expect(M.updateAgentTask({}, { taskId: task.id, input: { properties: { a: 1 }, title: 'Hijack' } }, ctx(assignee.id)))
+    await expect(M.updateAgentTask({}, { taskRef: task.id, input: { properties: { a: 1 }, title: 'Hijack' } }, ctx(assignee.id)))
       .rejects.toMatchObject(code('TASK_NOT_OWNER'));
-    await expect(M.updateAgentTask({}, { taskId: task.id, input: {} }, ctx(assignee.id))).rejects.toMatchObject(code('TASK_NOT_OWNER'));
+    await expect(M.updateAgentTask({}, { taskRef: task.id, input: {} }, ctx(assignee.id))).rejects.toMatchObject(code('TASK_NOT_OWNER'));
     const row = await stored();
     expect(row.title).toBe('Props task');
     expect(row.properties).toBeNull();
@@ -197,7 +197,7 @@ describe('who may write #2420', () => {
   });
 
   it('refuses a non-owner non-assignee, including the assignee of a sibling or of the root, and a revoked manager', async () => {
-    const child = await M.createAgentTask({}, { input: { parentTaskId: task.id, title: 'Child', assignee: { user: sibling.id } } }, ctx(assignee.id));
+    const child = await M.createAgentTask({}, { input: { parentTaskRef: task.id, title: 'Child', assignee: { user: sibling.id } } }, ctx(assignee.id));
     await expect(setProps({ a: 1 }, sibling.id, task.id)).rejects.toMatchObject(code('TASK_NOT_OWNER'));
     await expect(setProps({ a: 1 }, assignee.id, child.id)).resolves.toBeDefined(); // the parent's assignee owns its child
     await expect(setProps({ a: 1 }, outsider.id)).rejects.toBeDefined();
@@ -207,25 +207,25 @@ describe('who may write #2420', () => {
   });
 
   it('refuses a reassigned-away assignee, and the App key', async () => {
-    await M.reassignAgentTask({}, { taskId: task.id, assignee: { user: sibling.id } }, ctx());
+    await M.reassignAgentTask({}, { taskRef: task.id, assignee: { user: sibling.id } }, ctx());
     await expect(setProps({ a: 1 }, assignee.id)).rejects.toMatchObject(code('TASK_NOT_OWNER'));
     await setProps({ a: 1 }, sibling.id);
     const key = await db.appKey.create({ data: { appId: app.id, keyHash: generateId(), keyPreview: 'test' } });
-    await expect(M.updateAgentTask({}, { taskId: task.id, input: { properties: { k: 1 } } }, { db, appId: app.id, appKeyId: key.id, roles: [] }))
+    await expect(M.updateAgentTask({}, { taskRef: task.id, input: { properties: { k: 1 } } }, { db, appId: app.id, appKeyId: key.id, roles: [] }))
       .rejects.toMatchObject(code('TASK_NOT_FOUND'));
     expect((await stored()).properties).toEqual({ a: 1 });
   });
 
   it('refuses an impersonation session even when the impersonated user is the assignee', async () => {
     const impersonation = { sessionId: generateId(), actorUserId: manager.id, orgId: app.organizationId, expiresAt: new Date(Date.now() + 3600_000) };
-    await expect(M.updateAgentTask({}, { taskId: task.id, input: { properties: { a: 1 } } }, { ...ctx(assignee.id), impersonation }))
+    await expect(M.updateAgentTask({}, { taskRef: task.id, input: { properties: { a: 1 } } }, { ...ctx(assignee.id), impersonation }))
       .rejects.toMatchObject(code('FORBIDDEN'));
     expect((await stored()).properties).toBeNull();
   });
 
   it('conceals an unreadable task byte-identically to an absent one', async () => {
     const hidden = await setProps({ a: 1 }, outsider.id).catch((e: any) => e);
-    const absent = await M.assignAgentTask({}, { taskId: task.id, assignee: { user: outsider.id } }, ctx(outsider.id)).catch((e: any) => e);
+    const absent = await M.assignAgentTask({}, { taskRef: task.id, assignee: { user: outsider.id } }, ctx(outsider.id)).catch((e: any) => e);
     expect({ message: hidden.message, extensions: hidden.extensions }).toEqual({ message: absent.message, extensions: absent.extensions });
   });
 
@@ -487,10 +487,10 @@ describe('surfaces #2420', () => {
     await setProps({ a: 1 });
     const apollo = new ApolloServer({ typeDefs, resolvers });
     const run = (query: string, variables: any) => apollo.executeOperation({ query, variables }, { contextValue: ctx() }).then((o) => (o.body as any).singleResult);
-    const keep = await run('mutation($id:ID!){updateAgentTask(taskId:$id,input:{title:"Renamed"}){properties}}', { id: task.id });
+    const keep = await run('mutation($id:ID!){updateAgentTask(taskRef:$id,input:{title:"Renamed"}){properties}}', { id: task.id });
     expect(keep.errors).toBeUndefined();
     expect(keep.data.updateAgentTask.properties).toEqual({ a: 1 });
-    const clear = await run('mutation($id:ID!,$p:JSON){updateAgentTask(taskId:$id,input:{properties:$p}){properties}}', { id: task.id, p: null });
+    const clear = await run('mutation($id:ID!,$p:JSON){updateAgentTask(taskRef:$id,input:{properties:$p}){properties}}', { id: task.id, p: null });
     expect(clear.errors).toBeUndefined();
     expect(clear.data.updateAgentTask.properties).toBeNull();
     await apollo.stop();

@@ -100,6 +100,8 @@ export const PAGE_ARGS_FIELDS: ReadonlySet<string> = new Set([
   // #3873: pageArgs on the PublicOrganization footprint pages (pinned in resolvers.publicOrgPage3873.test.ts).
   'PublicOrganization.publicMemoriesPage',
   'PublicOrganization.publicAgentsPage',
+  // #5061 (#2212 A4b): pageArgs on the AppKey host-use page (pinned in resolvers.hostUsesPage5061.test.ts).
+  'AppKey.hostUsesPage',
   // Helper-backed fields use pageArgs too, despite not ending in Page.
   'Query.actionRegisterIndex',
   'Query.compiledPromptProvenance',
@@ -108,6 +110,9 @@ export const PAGE_ARGS_FIELDS: ReadonlySet<string> = new Set([
   'AgentTask.clones',
   // #3223 (#2212 A3): pinned in admissionMyChatsPage2212A3.test.ts.
   'Query.myChatsPage',
+  // #2212 A3 remainder: agentTasksPage sizes only through pageArgs (no externalIds widening). The rows it reads are pinned in
+  // resolvers.agentTasksPage2212.test.ts, and the charged cost by its admission drift guard.
+  'Query.agentTasksPage',
   // #3222 (#2213 S3): pinned in admissionSpecReferencePages2213S3.test.ts.
   'Query.specBacklinksPage',
   'Query.specUnresolvedReferencesPage',
@@ -139,8 +144,44 @@ export const FIXED_LIST_SIZE: Readonly<Record<string, number>> = {
  * Fields whose resolver does heavy work whatever is selected: a fixed cost added to the children's.
  * #1302: `specDocument` reads and renders the whole document for `{ markdown }` as much as for `entries`.
  */
+/**
+ * #4758: statements `App.selfJoin` pays per App it reaches on a list, MEASURED by logging every statement of
+ * `{ apps { items { id selfJoin { state role } } } }` for a list of 5 and of 9 Apps (resolvers.appSelfJoinPolish4758.test.ts pins the
+ * ratio): 8 more statements per added App, and the same list without the field adds none. Each of the 8 is one statement per App,
+ * all of them in the shared read gate and joinApp's own decision (`resolveSelfJoinRole` and its readers), which this field must
+ * call rather than copy: two reads of the App's agent links, two of its agents, and one each of the organization, the caller's
+ * org membership, the installation policy's agent import and the App row the decision reads for itself. The App and membership reads
+ * of `loadSelfJoinFacts` are NOT among the 8: they run once per batch (per synchronous resolution tick, chunked at 500 Apps), so
+ * they are a fixed overhead per batch and add nothing per App. Before the batching those two reads were by-id lookups Prisma
+ * already coalesced within a tick, so batching removed one statement per App (9 before, 8 after), not two.
+ */
+export const APP_SELF_JOIN_COST = 8;
+
+/**
+ * #5267: `App.viewerAppUserMemoryClasses` (#5218) is priced here, not batched, because the licence step is the door's own
+ * judgement (`cor:dmo:060:20`) and is not copied. The weight is the statements the field adds for one member App in the worst
+ * shape the test fixture prices: three installed Agents, none licensed, so the licence loop runs to its end (the membership
+ * read, the install listing, a licence check per Agent, the held-class read).
+ *
+ * KNOWN UNDER-ESTIMATE, stated here and not only in the issue: this is NOT an upper bound. The licence loop costs five to six
+ * statements per installed Agent that does not pass, so an App with more than three unlicensed installed Agents costs more than
+ * this weight. Closing it means capping the licence scan in the shared licence check the door uses too (the field's answer is the
+ * door's own judgement, `cor:dmo:060:20`), which changes the door's answer and needs a ruling; #5267 does neither. The number of
+ * installed Agents per App is not bounded by any rule today; the follow-up that asks for the ruling is #5362.
+ *
+ * Measured per member App when set (0.50.0): 7 with no Agent, 14 with one licensed Agent, 24 with three unlicensed ones, as
+ * the Prisma query events the field alone adds (`resolvers.appUserMemoryClassesCost5267.test.ts`, which pins this constant to
+ * the worst shape EXACTLY on purpose: if a shared read gate or the Prisma version changes the count, that test fails and the
+ * constant is re-measured by running it, not guessed). The viewer is a member in every shape; a non-member costs one statement.
+ */
+export const APP_VIEWER_USER_MEMORY_CLASSES_COST = 24;
+
 export const FIXED_FIELD_COST: Readonly<Record<string, number>> = {
   'Query.specDocument': SPEC_DOCUMENT_CALL_COST,
+  // #4758: `App.selfJoin` pays the shared read gate and joinApp's own decision (two reads) for each App it reaches, on top of the
+  // batched App and membership reads; selected per row on a list, the parent's list factor multiplies this.
+  'App.selfJoin': APP_SELF_JOIN_COST,
+  'App.viewerAppUserMemoryClasses': APP_VIEWER_USER_MEMORY_CLASSES_COST,
 };
 
 export const DEFAULT_OMITTED_PAGE_SIZE = 100;
@@ -180,9 +221,9 @@ export function hadronListEstimator(limits: Pick<GraphqlAdmissionConfig, 'maxCos
     const fixed = FIXED_FIELD_COST[`${type.name}.${field.name}`];
     if (fixed !== undefined) return Math.min(fixed + childComplexity, ceiling);
     const isList = isListType(getNullableType(field.type));
-    // #2421: agentTaskList's limit is conditional on symptom. Its legacy
+    // #2421, #5284: agentTaskList's limit is conditional on phrase. Its legacy
     // unfiltered form ignores limit, so keep that form's unpaged cost too.
-    const unfilteredTaskList = type.name === 'Query' && field.name === 'agentTaskList' && args.symptom == null;
+    const unfilteredTaskList = type.name === 'Query' && field.name === 'agentTaskList' && args.phrase == null;
     const declared = unfilteredTaskList ? undefined : field.args.find((a) => PAGE_ARG.test(a.name))?.name;
     if (!isList && declared === undefined) return undefined;
     const size = FIXED_LIST_SIZE[`${type.name}.${field.name}`] ?? pageSizeOf(`${type.name}.${field.name}`, declared, args) ?? limits.listFactor;

@@ -14,6 +14,7 @@ import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { joinHostForKey } from '../../../test/agentTeamHost.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -74,7 +75,9 @@ beforeEach(async () => {
   lone = await w('Lone');
   orca1 = await mkKey(app.id, 'orca1');
   orca2 = await mkKey(app.id, 'orca2');
+  await joinHostForKey(db, orca1.id, 'orca1');
   await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager.id));
+  await joinHostForKey(db, orca2.id, 'orca2');
   await M.grantAppKeyScope({}, { id: orca2.id, scope: 'host:operate', hostId: 'orca2' }, ctx(manager.id));
   const register = (k: { id: string }, label: string, workers: unknown[]) =>
     M.registerHost({}, { input: { appRef: app.id, label, pollIntervalSeconds: 60, workers } }, keyCtx(k));

@@ -19,6 +19,7 @@ import { matchQueuedTasks } from '../../../lib/agentTasks/matcher.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { serveEveryAgent } from '../../../test/servedBootPrompt.js';
 import { resolvers, type Context } from './resolvers.js';
+import { joinHostForKey } from '../../../test/agentTeamHost.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -88,6 +89,7 @@ beforeEach(async () => {
   kit = await w(longAgent, 'Kit', 'coordinator');
   sam = await w(shortAgent, 'Sam', 'builder');
   orca1 = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: `h-${generateId()}`, keyPreview: 'abcd', label: 'orca1' }, select: { id: true } });
+  await joinHostForKey(db, orca1.id, 'orca1');
   await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, ctx(admin.id));
   await M.registerHost({}, { input: { appRef: app.id, label: 'Orca 1', pollIntervalSeconds: 600, workers: [
     { worker: kit.id, family: 'claude', worktrees: ['hadron-server/kit'] },
@@ -109,7 +111,7 @@ describe('#4302: from the assignment through the emitted start args, for both li
     expect(args).toMatchObject({ ...CODEX, taskId: t.id });
     expect(args).not.toHaveProperty('tier');
     const s = await bindFromStart(kit);
-    await runAsActor({ workerId: kit.id, agentId: longAgent }, () => M.startAgentTask({}, { taskId: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
+    await runAsActor({ workerId: kit.id, agentId: longAgent }, () => M.startAgentTask({}, { taskRef: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
     const row = await db.agentTask.findUniqueOrThrow({ where: { id: t.id } });
     expect(T.runSettings(row)).toEqual({ ...OVERRIDE, tier: null });
     expect(T.appliedRunSettings(row)).toEqual(CODEX);
@@ -142,6 +144,7 @@ describe('#4302: from the assignment through the emitted start args, for both li
 
   it('LONG_LIVED: the host is chosen by the record\'s family, not the override\'s', async () => {
     const orca2 = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: `h-${generateId()}`, keyPreview: 'efgh', label: 'orca2' }, select: { id: true } });
+    await joinHostForKey(db, orca2.id, 'orca2');
     await M.grantAppKeyScope({}, { id: orca2.id, scope: 'host:operate', hostId: 'orca2' }, ctx(admin.id));
     await M.registerHost({}, { input: { appRef: app.id, label: 'Orca 2', pollIntervalSeconds: 600, workers: [{ worker: kit.id, family: 'codex', worktrees: ['hadron-server/kit2'] }] } }, keyCtx(orca2));
     await setRecord(kit, CODEX);
@@ -158,7 +161,7 @@ describe('#4302: from the assignment through the emitted start args, for both li
     expect(await assigneeOf(t.id)).toBe(sam.id);
     expect((await startArgs(sam))[0]).toMatchObject({ ...OVERRIDE, taskId: t.id });
     const s = await bindFromStart(sam);
-    await runAsActor({ workerId: sam.id, agentId: shortAgent }, () => M.startAgentTask({}, { taskId: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
+    await runAsActor({ workerId: sam.id, agentId: shortAgent }, () => M.startAgentTask({}, { taskRef: t.id }, { ...ctx(bo.id), sessionId: s.id } as Context));
     expect(T.appliedRunSettings(await db.agentTask.findUniqueOrThrow({ where: { id: t.id } }))).toEqual(OVERRIDE);
     expect(await recordOf(sam)).toEqual(OVERRIDE);
   });

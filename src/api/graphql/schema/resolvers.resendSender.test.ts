@@ -113,7 +113,7 @@ describe('ResendSender sanitized reads', () => {
     const page = await resolvers.Query.resendSenders({}, {}, ctxFor(member.id));
     expect(page).toMatchObject({ total: 1 });
     expect(page.items[0].id).toBe(sender.id);
-    await expect(resolvers.Query.resendSenders({}, { orgId: org.id }, ctxFor(outsider.id))).resolves.toEqual({
+    await expect(resolvers.Query.resendSenders({}, { orgRef: org.id }, ctxFor(outsider.id))).resolves.toEqual({
       items: [],
       total: 0,
     });

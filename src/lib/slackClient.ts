@@ -1,4 +1,5 @@
 import { GraphQLError } from 'graphql';
+import { toolRegistrationKey } from './toolRegistrationKey.js';
 
 /**
  * Client for the Slack capability tool (spec 043; hadrontool-slack). Mirrors
@@ -51,8 +52,15 @@ function toolFor(provider: string): { baseUrl: string; token?: string } {
   return { baseUrl: baseUrl.replace(/\/+$/, ''), token: process.env[cfg.tokenEnv] || undefined };
 }
 
-/** POST a JSON body to the provider tool with timeout + typed error mapping. */
-async function postToTool<T>(provider: string, path: string, body: unknown): Promise<T> {
+/** Replace every occurrence of each secret in `text` (a secret is a short opaque string, so a plain split is exact). */
+function scrub(text: string, secrets: readonly string[]): string {
+  let out = text;
+  for (const secret of secrets) if (secret) out = out.split(secret).join('[redacted]');
+  return out;
+}
+
+/** POST a JSON body to the provider tool with timeout + typed error mapping. `secrets` never reach an error. */
+async function postToTool<T>(provider: string, path: string, body: unknown, secrets: readonly string[] = []): Promise<T> {
   const { baseUrl, token } = toolFor(provider);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
@@ -79,7 +87,7 @@ async function postToTool<T>(provider: string, path: string, body: unknown): Pro
   } catch (err) {
     const timedOut = controller.signal.aborted;
     throw new GraphQLError(timedOut ? 'Slack service timed out.' : 'Slack service is unreachable.', {
-      extensions: { code: 'SLACK_TOOL_UNREACHABLE', provider, cause: String(err) },
+      extensions: { code: 'SLACK_TOOL_UNREACHABLE', provider, cause: scrub(String(err), secrets) },
     });
   } finally {
     clearTimeout(timer);
@@ -87,9 +95,9 @@ async function postToTool<T>(provider: string, path: string, body: unknown): Pro
 
   if (!res.ok) {
     // The tool's typed spec-043 error body: { error: <code>, message, ...fields }.
-    const slackErrorCode = typeof payload?.error === 'string' ? payload.error : undefined;
+    const slackErrorCode = typeof payload?.error === 'string' ? scrub(payload.error, secrets) : undefined;
     const message =
-      typeof payload?.message === 'string' ? payload.message.slice(0, 500) : `Slack service error (${res.status}).`;
+      typeof payload?.message === 'string' ? scrub(payload.message, secrets).slice(0, 500) : `Slack service error (${res.status}).`;
     throw new GraphQLError(message, {
       extensions: {
         code: 'SLACK_TOOL_ERROR',
@@ -148,9 +156,15 @@ export interface SlackToolConnectionIdentity {
  */
 export async function createSlackToolConnection(
   provider: string,
-  input: { botToken: string; appToken: string },
+  input: { botToken: string; appToken: string; appId: string },
 ): Promise<SlackToolConnectionIdentity> {
-  const identity = await postToTool<SlackToolConnectionIdentity>(provider, '/connections', input);
+  // #4829: see telegramClient. A tool that ignores registrationKey behaves exactly as before.
+  const body = {
+    botToken: input.botToken,
+    appToken: input.appToken,
+    registrationKey: toolRegistrationKey(provider, input.appId, [input.botToken, input.appToken]),
+  };
+  const identity = await postToTool<SlackToolConnectionIdentity>(provider, '/connections', body, [input.botToken, input.appToken, body.registrationKey]);
   const required: (keyof SlackToolConnectionIdentity)[] = ['id', 'teamId', 'teamName', 'botUserId', 'botId'];
   const invalid = required.some((k) => typeof identity[k] !== 'string' || (identity[k] as string).trim() === '');
   if (invalid || identity.provider !== provider) {
@@ -162,20 +176,25 @@ export async function createSlackToolConnection(
 }
 
 /**
- * Best-effort disconnect on the provider tool (socket teardown + soft
- * delete). NEVER throws — the caller's DB effect has already committed, so
- * a misconfigured provider or an unreachable tool must log, not fail the
- * surrounding operation. Callers fire-and-forget (`void deleteSlackToolConnection(...)`).
+ * Disconnect on the provider tool. NEVER throws (the caller's DB effect has already committed). Returns whether the tool CONFIRMED:
+ * true only on a success answer (#4847, cor:int:030:03 clause 3). A not-found is NOT a confirmation here (the tool must answer a
+ * repeat DELETE with success, hadrontool-slack#6), nor is any other status, a transport failure or an unset URL.
  */
-export async function deleteSlackToolConnection(provider: string, toolConnectionId: string): Promise<void> {
+export async function deleteSlackToolConnection(provider: string, toolConnectionId: string): Promise<boolean> {
   try {
     const { baseUrl, token } = toolFor(provider);
-    await fetch(`${baseUrl}/connections/${encodeURIComponent(toolConnectionId)}`, {
+    const res = await fetch(`${baseUrl}/connections/${encodeURIComponent(toolConnectionId)}`, {
       method: 'DELETE',
       headers: token ? { authorization: `Bearer ${token}` } : {},
       signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
     });
+    if (!res.ok) {
+      console.error(`[slackClient] tool disconnect refused for ${provider}/${toolConnectionId}: HTTP ${res.status}`);
+      return false;
+    }
+    return true;
   } catch (err) {
     console.error(`[slackClient] tool disconnect failed for ${provider}/${toolConnectionId}:`, err);
+    return false;
   }
 }

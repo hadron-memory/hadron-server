@@ -76,7 +76,7 @@ export async function schedulerTick(db: PrismaClient, now = new Date()): Promise
 
     try {
       await mintAppRun(db, {
-        organizationId: s.organizationId,
+        owner: { organizationId: s.organizationId }, // #5077: a schedule is an organization's until F3b
         appId: s.appId,
         agentId: s.agentId,
         userId: s.userId,
@@ -99,14 +99,15 @@ export async function schedulerTick(db: PrismaClient, now = new Date()): Promise
       minted += 1;
       await db.agentSchedule.updateMany({ where: { id: s.id }, data: { lastRunAt: now } });
     } catch (err) {
+      const refusalCode = bootPromptRefusalCode(err);
       if (err instanceof RunLaunchDeniedError) {
         // Denied launches are normal operation (quota, revoked relationship)
         // — log; the schedule stays enabled and tries again next occurrence.
         console.warn(`[scheduler] launch denied for schedule ${s.id}: ${err.code} ${err.message}`);
-      } else if (bootPromptRefusalCode(err)) {
+      } else if (refusalCode) {
         // #3689 (gate R2): no Agent on the schedule, or an unserveable boot prompt, is a launch denial too
         // (cor:agt:040:07 / 040:10): logged as one, and the schedule tries again next occurrence.
-        console.warn(`[scheduler] launch denied for schedule ${s.id}: ${bootPromptRefusalCode(err)} ${(err as Error).message}`);
+        console.warn(`[scheduler] launch denied for schedule ${s.id}: ${refusalCode} ${(err as Error).message}`);
       } else {
         console.error(`[scheduler] mint failed for schedule ${s.id}:`, err);
       }

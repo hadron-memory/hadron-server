@@ -22,7 +22,8 @@ export const MAX_SECRETS_PER_APP = 500;
 export const MAX_SECRET_VERSIONS = 50;
 
 /** `PURGE` (#4003, S8): a superseded version deleted by retention or the kept-versions cap; one event per version. */
-export type SecretEventKind = 'STORE' | 'VERSION' | 'METADATA' | 'DELETE' | 'REVEAL' | 'PURGE';
+/** #5335: DELETE_AFTER_USE_ON / _OFF record the option `deleteAfterUse` being set or cleared (cor:sec:060:03). */
+export type SecretEventKind = 'STORE' | 'VERSION' | 'METADATA' | 'DELETE' | 'PROTECT' | 'UNPROTECT' | 'DELETE_AFTER_USE_ON' | 'DELETE_AFTER_USE_OFF' | 'REVEAL' | 'PURGE';
 
 /** Who acted, as plain ids (no foreign keys), the way the grant tables record it. */
 export interface SecretActor {
@@ -73,6 +74,23 @@ export async function assertAppSecretRoom(tx: Prisma.TransactionClient, appId: s
 }
 
 /**
+ * #5245 (R3, Proposed, cor:sec:070:02): the room check at STAGING. Same lock, refusal and message as
+ * {@link assertAppSecretRoom}, but the count is the App's secrets plus its open, unexpired protected creates (no secret
+ * row yet), so nothing is staged that cannot complete. Completion keeps {@link assertAppSecretRoom}, so a request never
+ * counts itself. Depends on READ COMMITTED: the count runs after the lock wait and sees a create that committed meanwhile.
+ */
+export async function assertAppSecretRoomForStaging(tx: Prisma.TransactionClient, appId: string): Promise<void> {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`hadron:secret-app-count:${appId}`}))`;
+  const [{ n }] = await tx.$queryRaw<Array<{ n: bigint }>>`SELECT
+    (SELECT count(*) FROM secrets WHERE owner_type='app' AND owner_id=${appId})
+    + (SELECT count(*) FROM secret_change_requests WHERE app_id=${appId} AND state='open' AND secret_id IS NULL
+        AND operation='STORE' AND expires_at > (clock_timestamp() AT TIME ZONE 'UTC')) AS n`;
+  if (Number(n) >= MAX_SECRETS_PER_APP) {
+    throw limitRefusal('SECRET_LIMIT_REACHED', `An App holds at most ${MAX_SECRETS_PER_APP} secrets.`);
+  }
+}
+
+/**
  * Add the next version of an App secret: the caller holds the secret row's lock (`lockSecretRow`). Encrypts under the
  * App's active key, stamps the previous current version superseded, and keeps at most {@link MAX_SECRET_VERSIONS}
  * (the oldest superseded go first). Returns the new version number.
@@ -100,6 +118,7 @@ export async function addAppSecretVersion(
     await tx.$executeRaw`UPDATE secret_versions SET superseded_at = (clock_timestamp() AT TIME ZONE 'UTC')
       WHERE secret_id = ${secret.id} AND version_no < ${versionNo} AND superseded_at IS NULL`;
   }
+  // The retention pass (purge.ts `purgeable`) applies the same cap; one test pins both (#4573).
   // Retention by count: the newest MAX versions stay; older superseded ones go (never the current one). Each one
   // dropped writes a PURGE event (#4003) carrying the actor whose store pushed it out.
   const dropped = await tx.$queryRaw<Array<{ version_no: number }>>`DELETE FROM secret_versions

@@ -17,6 +17,7 @@ import { runAsActor } from '../lib/requestActor.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../middleware/auth.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../lib/workerSignature.js';
+import { joinHostForKey } from './agentTeamHost.js';
 
 export const M = resolvers.Mutation as any;
 export const MIN = 60_000;
@@ -90,6 +91,7 @@ export async function setUpResetFixture(): Promise<ResetFixture> {
   const hostKey = async (hostId: string) => {
     const raw = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
     const key = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4) }, select: { id: true } });
+    await joinHostForKey(db, key.id, hostId);
     await M.grantAppKeyScope({}, { id: key.id, scope: 'host:operate', hostId }, ctx(manager.id));
     return key;
   };
@@ -117,12 +119,12 @@ export async function setUpResetFixture(): Promise<ResetFixture> {
       },
       select: { id: true },
     });
-    await asWorker(who, () => M.startAgentTask({}, { taskId: t.id }, ctx(holder.id)));
+    await asWorker(who, () => M.startAgentTask({}, { taskRef: t.id }, ctx(holder.id)));
     return t;
   };
   const finish = (taskId: string, w: { id: string } = kit) =>
-    asWorker(w, () => M.finishAgentTask({}, { taskId, result: { outcome: 'succeeded' } }, ctx(holder.id)));
-  const cancel = (taskId: string) => M.cancelAgentTask({}, { taskId }, ctx(manager.id));
+    asWorker(w, () => M.finishAgentTask({}, { taskRef: taskId, result: { outcome: 'succeeded' } }, ctx(holder.id)));
+  const cancel = (taskId: string) => M.cancelAgentTask({}, { taskRef: taskId }, ctx(manager.id));
   const collectedReset = async () => {
     const t = await startedTask();
     await finish(t.id);

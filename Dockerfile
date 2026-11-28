@@ -30,6 +30,24 @@ COPY scripts ./scripts/
 ENV NODE_ENV=production
 EXPOSE 10300
 
+# #851 (cor:api:270:01): READINESS, not liveness. `GET /ready` answers 200 only once the first startup has settled and
+# the database answers (503 starting / startup_failed / stopping / database_unavailable otherwise), so this check reports
+# whether the container should receive traffic. The status is a readiness signal ONLY: nothing may restart or replace the
+# container on `unhealthy`. Liveness stays `/health`, which a failed first sync does not fail, precisely so a degraded
+# boot is never turned into a restart loop.
+# DEPLOY CONSEQUENCE, read before shipping this image: a reader of the Docker health status acts on it. Traefik's Docker
+# provider drops a container that is `starting` or `unhealthy` from routing with no extra configuration, so under that
+# provider this check IS the routing gate (a database outage longer than 5 retries x 15 s, about
+# 75 s, takes the replica out of rotation: clients get Traefik's 404 instead of the app's 503). Docker Swarm would
+# instead REPLACE an unhealthy task, the restart loop ruled out above, so this service must not run under Swarm's health
+# handling. Plain Docker Compose or a single container only records the status.
+# The probe reads the port the server actually bound from a file the server writes at listen time (src/lib/portFile.ts),
+# because PORT may be a Doppler secret that the probe's own environment does not carry; PORT, then the server's default
+# 4000, are only the fallback while no file exists. Anything but a 200, including no connection, is not ready. The
+# boot-time generate/migrate/transpile runs before the port opens, hence the generous start period.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=180s --retries=5 \
+  CMD ["node", "-e", "let p;try{p=require('fs').readFileSync(process.env.HADRON_PORT_FILE||'/tmp/hadron-server.port','utf8').trim()}catch{}if(!/^[0-9]+$/.test(p||''))p=undefined;fetch('http://127.0.0.1:'+(p||process.env.PORT||4000)+'/ready').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"]
+
 # Generate client, apply any pending migrations, then start — all at runtime
 # when DATABASE_URL is available. `migrate deploy` is the production-grade
 # command: it applies only the migration files in prisma/migrations/ that

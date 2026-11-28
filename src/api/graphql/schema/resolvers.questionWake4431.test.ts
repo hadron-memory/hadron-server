@@ -1,0 +1,500 @@
+/**
+ * #4431 (Questions S7): an answer wakes the asking worker's task. A worker links a question to one of its own open
+ * tasks (`taskRef`); an answer or a take-back appends one `question.answered` / `question.answer-retracted` event on
+ * that task, inside the answer's transaction, carrying ids, the code, the revision and the state only (cor:agt:050:11,
+ * never the answer); `pendingTaskWakes` makes the task's CURRENT assignee due an ANSWERED wake for an answer, never for
+ * a take-back, until delivered or the assignee acts on the task (cor:agt:050:35, modelled on :33).
+ */
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { GraphQLError } from 'graphql';
+import { db } from '../../../integrations/db/client.js';
+import { cleanDb } from '../../../test/helpers.js';
+import { generateId } from '../../../lib/id.js';
+import { runAsActor } from '../../../lib/requestActor.js';
+import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
+import { questionDataSchema } from '../../../lib/questions/codec.js';
+import { pendingTaskWakes } from '../../../lib/agentTasks/taskWakes.js';
+import { resolvers, type Context } from './resolvers.js';
+import { ApolloServer } from '@apollo/server';
+import { typeDefs } from './typeDefs.js';
+import { createTestableMcpServer } from '../../../mcp/server.js';
+import type { AuthContext } from '../../../middleware/auth.js';
+
+vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
+
+const MIN = 60_000;
+const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;
+const D = (resolvers as unknown as { Question: Record<string, (v: any, a: unknown, ctx: Context) => any> }).Question;
+
+let admin: { id: string };
+let holder: { id: string };
+let decider: { id: string };
+let app: { id: string };
+let otherApp: { id: string };
+let agent: { id: string };
+let asker: { id: string };
+let bea: { id: string };
+let foreign: { id: string };
+let memory: { id: string };
+let logId: string;
+
+const as = (userId: string): Context => ({ db, userId, roles: [] }) as Context;
+const asWorker = <T>(workerId: string, fn: () => Promise<T>) => runAsActor({ workerId, agentId: agent.id, userId: holder.id }, fn);
+
+const errorOf = async (p: Promise<unknown>): Promise<GraphQLError | null> => {
+  try { await p; return null; } catch (e) { return e as GraphQLError; }
+};
+
+const mkUser = (n: number) =>
+  db.user.create({ data: { id: generateId(), githubId: 4_431_000 + n, githubUsername: `qw-${n}`, handle: `qw-${n}`, roles: [] }, select: { id: true } });
+const mkWorker = (appId: string, name: string) =>
+  db.worker.create({
+    data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId, agentId: agent.id, name, slug: name.toLowerCase(), heldByUserId: holder.id, heldAt: new Date() },
+    select: { id: true },
+  });
+const mkTask = (data: Record<string, unknown> = {}) =>
+  db.agentTask.create({
+    data: { appId: app.id, title: 'Build #42', ownerUserId: admin.id, status: 'started', assigneeWorkerId: asker.id, assignedAt: new Date(Date.now() - 60 * MIN), startedAt: new Date(Date.now() - 50 * MIN), ...data },
+    select: { id: true, handle: true },
+  });
+
+const ASK = { title: 'Which datastore?', options: [{ key: 'pg', label: 'Postgres' }, { key: 'kv', label: 'A key-value store' }], recommendation: { key: 'pg', reason: 'already run it' } };
+const ask = (input: Record<string, unknown>, workerId: string | null = asker.id) =>
+  workerId ? asWorker(workerId, () => M.askQuestion(null, { logRef: logId, input: { ...ASK, ...input } }, as(holder.id)))
+    : M.askQuestion(null, { logRef: logId, input: { ...ASK, ...input } }, as(holder.id));
+const answer = (id: string, revision: number, input: Record<string, unknown> = { optionKey: 'pg' }) =>
+  M.answerQuestion(null, { ref: id, input, expectedRevision: revision }, as(decider.id));
+const retract = (id: string, revision: number) => M.retractQuestionAnswer(null, { ref: id, expectedRevision: revision, reason: 'not yet' }, as(decider.id));
+const questionEvents = (taskId: string) =>
+  db.agentTeamEvent.findMany({ where: { taskId, type: { startsWith: 'question.' } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+const wakesOf = async (workerId: string, now = new Date(Date.now() + MIN)) =>
+  ((await pendingTaskWakes(db, [workerId], now)).get(workerId) ?? []).map((w) => ({ taskId: w.taskId, eventId: w.eventId, event: w.event }));
+
+beforeEach(async () => {
+  await cleanDb(db);
+  const org = await db.organization.create({ data: { id: generateId(), name: 'Wake Org', urn: `wake-${generateId().slice(-8).toLowerCase()}.example` } });
+  [admin, holder, decider] = [await mkUser(1), await mkUser(2), await mkUser(3)];
+  await db.orgMember.createMany({ data: [
+    { organizationId: org.id, userId: admin.id, role: 'ADMIN' },
+    { organizationId: org.id, userId: holder.id, role: 'CONTRIBUTOR' },
+    { organizationId: org.id, userId: decider.id, role: 'CONTRIBUTOR' },
+  ] });
+  agent = await db.agent.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team`, visibility: 'ORGANIZATION' }, select: { id: true } });
+  app = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Team', urn: `${org.urn}:team` }, select: { id: true } });
+  otherApp = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'Other', urn: `${org.urn}:other` }, select: { id: true } });
+  for (const a of [app, otherApp]) {
+    await db.appAgent.create({ data: { appId: a.id, agentId: agent.id } });
+    await db.appMember.createMany({ data: [holder, decider, admin].map((u) => ({ appId: a.id, userId: u.id, role: 'member' })) });
+  }
+  asker = await mkWorker(app.id, 'Asker');
+  bea = await mkWorker(app.id, 'Bea');
+  foreign = await mkWorker(otherApp.id, 'Foreign');
+  // An App memory: its App's participants write it, so the decider and the asking worker's holder both can.
+  memory = await db.memory.create({ data: { id: generateId(), class: 'app', appId: app.id, organizationId: org.id, name: 'team questions', urn: `${org.urn}:team-questions` }, select: { id: true } });
+  logId = (await M.createQuestionLog(null, { memoryRef: memory.id, loc: 'questions', defaultDeciders: [decider.id] }, as(admin.id))).row.id;
+});
+
+const LINK_MESSAGE = 'taskRef must be an open task assigned to the asking worker, in the App this memory belongs to';
+
+describe('#4431 §1: a worker links a question to its own open task', () => {
+  it('accepted by id or by handle: the payload stores the resolved id and Question.taskId returns it', async () => {
+    const t = await mkTask();
+    const byId = await ask({ taskRef: t.id });
+    expect(D.taskId(byId, {}, as(holder.id))).toBe(t.id);
+    expect(questionDataSchema.parse((await db.node.findUniqueOrThrow({ where: { id: byId.row.id } })).data).taskId).toBe(t.id);
+    const byHandle = await ask({ taskRef: t.handle });
+    expect(D.taskId(byHandle, {}, as(holder.id))).toBe(t.id);
+    // The renderer names the task under what the question blocks; the state is OPEN with no findings.
+    expect(byId.row.content).toContain(`**Blocks task:** ${t.id}`);
+    expect(D.state(byId, {}, as(holder.id))).toBe('OPEN');
+  });
+
+  it('refused QUESTION_INVALID at /taskRef with one fixed message, whatever the reason', async () => {
+    const others = await mkTask({ assigneeWorkerId: bea.id });
+    const finished = await mkTask({ status: 'finished', finishedAt: new Date(), resultOutcome: 'done' });
+    const foreignTask = await db.agentTask.create({ data: { appId: otherApp.id, title: 'Theirs', ownerUserId: admin.id, status: 'started', assigneeWorkerId: foreign.id, assignedAt: new Date(), startedAt: new Date() }, select: { id: true } });
+    const own = await mkTask();
+    const cases: Array<[string, () => Promise<unknown>]> = [
+      ['another worker\'s task', () => ask({ taskRef: others.id })],
+      ['a finished task', () => ask({ taskRef: finished.id })],
+      ['a task of another App (asked by its own assignee)', () => ask({ taskRef: foreignTask.id }, foreign.id)],
+      ['a task id that does not exist', () => ask({ taskRef: generateId() })],
+      ['a malformed reference', () => ask({ taskRef: 'not a task ref!' })],
+      ['a handle that names no task', () => ask({ taskRef: 'AT9999' })],
+      ['a caller with no worker', () => ask({ taskRef: own.id }, null)],
+    ];
+    // Thunks: each ask starts only when awaited, so no refusal is ever an unhandled rejection.
+    for (const [label, run] of cases) {
+      const e = await errorOf(run());
+      expect(e, label).not.toBeNull();
+      expect(e!.extensions.code, label).toBe('QUESTION_INVALID');
+      expect(e!.extensions.pointers ?? e!.extensions.errors, label).toEqual([{ pointer: '/taskRef', message: LINK_MESSAGE }]);
+    }
+  });
+
+  it('a person with no worker cannot link even a task assigned to them (no worker never equals a null worker assignee)', async () => {
+    const mine = await mkTask({ assigneeWorkerId: null, assigneeUserId: holder.id });
+    const e = await errorOf(ask({ taskRef: mine.id }, null));
+    expect(e?.extensions.code).toBe('QUESTION_INVALID');
+    expect(e?.extensions.pointers).toEqual([{ pointer: '/taskRef', message: LINK_MESSAGE }]);
+  });
+
+  it('amendQuestion cannot change the link', async () => {
+    const t = await mkTask();
+    const q = await ask({});
+    const e = await errorOf(asWorker(asker.id, () => M.amendQuestion(null, { ref: q.row.id, input: { taskRef: t.id }, expectedRevision: q.row.revSeq, reason: 'link it' }, as(holder.id))));
+    expect(e?.extensions.code).toBe('QUESTION_INVALID');
+  });
+});
+
+describe('#4431 §2: one event on the task per answer and per take-back, in the answer\'s transaction', () => {
+  it('payload keys are exactly questionId, code, revision, state; never the option, the text or the reason', async () => {
+    const t = await mkTask();
+    const q = await ask({ taskRef: t.id });
+    const after = await answer(q.row.id, q.row.revSeq, { optionKey: 'kv', text: 'ZEBRA-TEXT-4431', reason: 'QUOKKA-REASON-4431' });
+    const [e, ...more] = await questionEvents(t.id);
+    expect(more).toHaveLength(0);
+    expect(e).toMatchObject({ type: 'question.answered', appId: app.id, taskId: t.id, actorUserId: decider.id, actorWorkerId: null });
+    expect(Object.keys(e!.payload as object).sort()).toEqual(['code', 'questionId', 'revision', 'state']);
+    expect(e!.payload).toEqual({ questionId: q.row.id, code: D.code(q, {}, as(holder.id)), revision: after.row.revSeq, state: D.state(after, {}, as(holder.id)) });
+    const serialised = JSON.stringify(e);
+    for (const secret of ['ZEBRA-TEXT-4431', 'QUOKKA-REASON-4431', '"kv"', 'key-value']) expect(serialised).not.toContain(secret);
+  });
+
+  it('a take-back records question.answer-retracted with the same shape', async () => {
+    const t = await mkTask();
+    const q = await ask({ taskRef: t.id });
+    const a = await answer(q.row.id, q.row.revSeq);
+    const r = await retract(a.row.id, a.row.revSeq);
+    const events = await questionEvents(t.id);
+    expect(events.map((x) => x.type)).toEqual(['question.answered', 'question.answer-retracted']);
+    expect(events[1]!.payload).toEqual({ questionId: q.row.id, code: D.code(q, {}, as(holder.id)), revision: r.row.revSeq, state: 'OPEN' });
+    expect(JSON.stringify(events[1])).not.toContain('not yet');
+  });
+
+  it('a failed answer (stale expectedRevision) writes no event', async () => {
+    const t = await mkTask();
+    const q = await ask({ taskRef: t.id });
+    const e = await errorOf(answer(q.row.id, q.row.revSeq + 7));
+    expect(e?.extensions.code).toBe('NODE_WRITE_CONFLICT');
+    expect(await questionEvents(t.id)).toHaveLength(0);
+  });
+
+  it('the answer and its event commit together: an event append that fails after the node write rolls the answer back', async () => {
+    const t = await mkTask();
+    const q = await ask({ taskRef: t.id });
+    // Beckett P3 on #4644: fail the append itself, which runs after the question's node write in the same transaction.
+    // The setup is inside the cleanup scope, and the refusal must be the trigger's own, so the insert was reached.
+    try {
+      await db.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION test_4431_refuse_answer_event() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.type = 'question.answered' THEN RAISE EXCEPTION 'test 4431: event append refused'; END IF; RETURN NEW; END $$`);
+      await db.$executeRawUnsafe(`CREATE TRIGGER test_4431_refuse_answer_event BEFORE INSERT ON agent_team_events FOR EACH ROW EXECUTE FUNCTION test_4431_refuse_answer_event()`);
+      const e = await errorOf(answer(q.row.id, q.row.revSeq));
+      expect(String((e as Error | null)?.message)).toContain('test 4431: event append refused');
+    } finally {
+      await db.$executeRawUnsafe(`DROP TRIGGER IF EXISTS test_4431_refuse_answer_event ON agent_team_events`);
+      await db.$executeRawUnsafe(`DROP FUNCTION IF EXISTS test_4431_refuse_answer_event()`);
+    }
+    const row = await db.node.findUniqueOrThrow({ where: { id: q.row.id } });
+    expect(row.revSeq).toBe(q.row.revSeq);
+    expect(questionDataSchema.parse(row.data).answers).toHaveLength(0);
+    expect(await questionEvents(t.id)).toHaveLength(0);
+  });
+
+  it('a task that is no longer open gets no event, and the answer still succeeds', async () => {
+    const t = await mkTask();
+    const q = await ask({ taskRef: t.id });
+    await db.agentTask.update({ where: { id: t.id }, data: { status: 'finished', finishedAt: new Date(), resultOutcome: 'done' } });
+    const after = await answer(q.row.id, q.row.revSeq);
+    expect(D.state(after, {}, as(holder.id))).toBe('DECIDED');
+    expect(await questionEvents(t.id)).toHaveLength(0);
+  });
+});
+
+/**
+ * Beckett P2 on #4644: both eligibility checks hold a share lock on the task row. A second transaction holds the
+ * task's row lock, ends the task and commits while the ask (or the answer) waits; the waiting side must judge the
+ * ended task, never the one it would have read before the lock.
+ */
+async function whileTaskLocked<T>(taskId: string, end: Record<string, unknown>, act: () => Promise<T>): Promise<T> {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  let locked!: (pid: number) => void;
+  const holderPid = new Promise<number>((r) => { locked = r; });
+  const holder = db.$transaction(async (tx) => {
+    const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    await tx.$queryRaw`SELECT id FROM agent_tasks WHERE id = ${taskId} FOR UPDATE`;
+    locked(pid);
+    await gate;
+    await tx.agentTask.update({ where: { id: taskId }, data: end });
+  }, { timeout: 30_000 });
+  holder.catch(() => undefined); // surfaced by the await below, never an unhandled rejection
+  // Beckett P3 :232 on #4644: a holder that fails before it signals its PID rejects at once, with its own error.
+  const holderEndedEarly = holder.then(() => { throw new Error('the holder transaction ended before it held the task row'); });
+  holderEndedEarly.catch(() => undefined);
+  let acting: Promise<T> | undefined;
+  let blocked = false;
+  try {
+    const pid = await Promise.race([holderPid, holderEndedEarly]);
+    // Beckett P3 :240 on #4644: the evidence is the ACTING backend waiting on THIS holder. Nothing waits on the holder
+    // before the act starts, so the one backend that does afterwards, on the share lock the eligibility check takes,
+    // is the act's.
+    const waiters = () => db.$queryRaw<Array<{ pid: number; blockers: number[]; query: string }>>`
+      SELECT pid, pg_blocking_pids(pid) AS blockers, query FROM pg_stat_activity
+      WHERE pid <> pg_backend_pid() AND ${pid}::int = ANY(pg_blocking_pids(pid))`;
+    expect(await waiters(), 'nothing waits on the holder before the act').toEqual([]);
+    let settled = false;
+    acting = act().finally(() => { settled = true; });
+    acting.catch(() => undefined); // judged below; never an unhandled rejection
+    for (let i = 0; i < 200 && !settled && !blocked; i++) {
+      const rows = await waiters();
+      if (rows.length > 0) {
+        expect(rows, 'exactly one backend, the act, waits on the holder').toHaveLength(1);
+        expect(rows[0]!.pid).not.toBe(pid);
+        expect(rows[0]!.blockers).toContain(pid);
+        expect(rows[0]!.query).toMatch(/FROM agent_tasks WHERE id = \$1 FOR SHARE/);
+        blocked = true;
+      } else await new Promise((r) => setTimeout(r, 25));
+    }
+  } finally {
+    // Beckett P3 :247 on #4644: on every exit, release the holder and let BOTH operations settle before teardown;
+    // the original failure (thrown in the try) still propagates.
+    release();
+    await Promise.allSettled([holder, ...(acting ? [acting] : [])]);
+  }
+  await holder;
+  // Without the share lock the act never waits on the holder: that is the defect these pins catch.
+  expect(blocked, 'the act waited on the task row lock').toBe(true);
+  return acting!;
+}
+const FINISH = () => ({ status: 'finished', finishedAt: new Date(), resultOutcome: 'done' });
+const CANCEL = () => ({ status: 'cancelled', cancelledAt: new Date() });
+
+describe('#4431: eligibility is judged under the task\'s row lock (Beckett P2)', () => {
+  it('an ask that waits on a task being finished is refused, never linked to the finished task', async () => {
+    const t = await mkTask();
+    const e = await errorOf(whileTaskLocked(t.id, FINISH(), () => ask({ taskRef: t.id })));
+    expect(e?.extensions.code).toBe('QUESTION_INVALID');
+    expect(e?.extensions.pointers).toEqual([{ pointer: '/taskRef', message: LINK_MESSAGE }]);
+  });
+
+  it('an ask that waits on a reassignment away from the asker is refused', async () => {
+    const t = await mkTask();
+    const e = await errorOf(whileTaskLocked(t.id, { assigneeWorkerId: bea.id }, () => ask({ taskRef: t.id })));
+    expect(e?.extensions.code).toBe('QUESTION_INVALID');
+  });
+
+  it('an answer that waits on the task being cancelled records no event, and the answer stands', async () => {
+    const t = await mkTask();
+    const q = await ask({ taskRef: t.id });
+    const after = await whileTaskLocked(t.id, CANCEL(), () => answer(q.row.id, q.row.revSeq));
+    expect(D.state(after, {}, as(holder.id))).toBe('DECIDED');
+    expect(await questionEvents(t.id)).toHaveLength(0);
+  });
+});
+
+describe('#4431 §3: the answer wakes the task\'s current assignee', () => {
+  it('one ANSWERED wake naming the task and the event; gone once delivered', async () => {
+    const t = await mkTask();
+    const q = await ask({ taskRef: t.id });
+    await answer(q.row.id, q.row.revSeq);
+    const [e] = await questionEvents(t.id);
+    expect(await wakesOf(asker.id)).toEqual([{ taskId: t.id, eventId: e!.id, event: 'ANSWERED' }]);
+    expect((await pendingTaskWakes(db, [asker.id], new Date(Date.now() + MIN))).get(asker.id)?.[0]?.questionCode).toBe(D.code(q, {}, as(holder.id)));
+    await db.workerDeliveryTaskEvent.create({ data: { workerId: asker.id, eventId: e!.id, chainIndex: 0, deliveredAt: new Date() } });
+    expect(await wakesOf(asker.id)).toEqual([]);
+  });
+
+  it('a question.answered recorded under ANOTHER App, naming this task, wakes nobody (Rodolfo P3 on #4644)', async () => {
+    // Nothing in the schema ties an event's App to its task's (#4202), so the wake join must.
+    const t = await mkTask();
+    await db.agentTeamEvent.create({ data: { appId: otherApp.id, taskId: t.id, type: 'question.answered', actorUserId: decider.id, payload: { questionId: generateId(), code: 'Q-1', revision: 2, state: 'DECIDED' } } });
+    expect(await wakesOf(asker.id)).toEqual([]);
+  });
+
+  it('gone without delivery once the worker acts on the task after the answer', async () => {
+    const t = await mkTask();
+    const q = await ask({ taskRef: t.id });
+    await answer(q.row.id, q.row.revSeq);
+    expect(await wakesOf(asker.id)).toHaveLength(1);
+    await db.agentTeamEvent.create({ data: { appId: app.id, taskId: t.id, type: 'task.progress', actorWorkerId: asker.id, actorUserId: holder.id, createdAt: new Date(Date.now() + 1000) } });
+    expect(await wakesOf(asker.id, new Date(Date.now() + 2 * MIN))).toEqual([]);
+  });
+
+  it('a task that ends after the answer stops waking its assignee', async () => {
+    const t = await mkTask();
+    const q = await ask({ taskRef: t.id });
+    await answer(q.row.id, q.row.revSeq);
+    expect(await wakesOf(asker.id)).toHaveLength(1);
+    await db.agentTask.update({ where: { id: t.id }, data: { status: 'cancelled', cancelledAt: new Date() } });
+    expect(await wakesOf(asker.id)).toEqual([]);
+  });
+
+  it('a take-back wakes nobody and does not withdraw an answer wake still undelivered (it stands until delivered or acted on)', async () => {
+    // Beckett P3 on #4644. cor:agt:050:35: a take-back is recorded and wakes nobody; a wake stands until it
+    // is delivered or the assignee acts on the task. The nudge carries no answer, so the woken worker reads the
+    // question and finds it OPEN again.
+    const t = await mkTask();
+    const q = await ask({ taskRef: t.id });
+    const a = await answer(q.row.id, q.row.revSeq);
+    await retract(a.row.id, a.row.revSeq);
+    const [answered, retracted] = await questionEvents(t.id);
+    expect(retracted!.type).toBe('question.answer-retracted');
+    expect(await wakesOf(asker.id)).toEqual([{ taskId: t.id, eventId: answered!.id, event: 'ANSWERED' }]);
+  });
+
+  it('through GraphQL: dueWakes offers the ANSWERED reason for the task, and acknowledging its proof clears it', async () => {
+    const t = await mkTask();
+    const q = await ask({ taskRef: t.id });
+    await answer(q.row.id, q.row.revSeq);
+    // Beckett P3 on #4644: through the executable schema, so the new field is resolved and serialised as clients see it.
+    const api = new ApolloServer<Context>({ typeDefs, resolvers });
+    await api.start();
+    try {
+      const exec = async (query: string, variables: Record<string, unknown>) => {
+        const res = await api.executeOperation({ query, variables }, { contextValue: as(admin.id) });
+        if (res.body.kind !== 'single') throw new Error('single response required');
+        expect(res.body.singleResult.errors).toBeUndefined();
+        return res.body.singleResult.data as any;
+      };
+      const READ = `query($app: String!, $w: [String!]) { dueWakes(appRef: $app, workerRefs: $w) {
+        wakes { proof worker { id } reasons { kind task { id event handle questionCode ref } } } } }`;
+      const page = (await exec(READ, { app: app.id, w: [asker.id] })).dueWakes;
+      const wake = page.wakes.find((w: any) => w.worker.id === asker.id);
+      const reason = wake?.reasons.find((r: any) => r.kind === 'TASK');
+      // Dara's P2 on #4644: the nudge names the question's code (cor:agt:050:35: "the task and the question's code").
+      expect(reason?.task).toEqual({ id: t.id, event: 'ANSWERED', handle: t.handle, questionCode: D.code(q, {}, as(holder.id)), ref: `TASK:${t.id}:answered` });
+      await exec(`mutation($p: [String!]!) { acknowledgeWakes(proofs: $p) { __typename } }`, { p: [wake.proof] });
+      const again = (await exec(READ, { app: app.id, w: [asker.id] })).dueWakes;
+      expect((again.wakes.find((w: any) => w.worker.id === asker.id)?.reasons ?? []).filter((r: any) => r.kind === 'TASK')).toEqual([]);
+    } finally {
+      await api.stop();
+    }
+  });
+
+  it('a re-answer is a new event and wakes again', async () => {
+    const t = await mkTask();
+    const q = await ask({ taskRef: t.id });
+    const a = await answer(q.row.id, q.row.revSeq);
+    const [first] = await questionEvents(t.id);
+    await db.workerDeliveryTaskEvent.create({ data: { workerId: asker.id, eventId: first!.id, chainIndex: 0, deliveredAt: new Date() } });
+    await answer(a.row.id, a.row.revSeq, { optionKey: 'kv' });
+    const all = await questionEvents(t.id);
+    expect(await wakesOf(asker.id)).toEqual([{ taskId: t.id, eventId: all[1]!.id, event: 'ANSWERED' }]);
+  });
+
+  it('§4 a task reassigned before the answer wakes its new assignee, not the asker', async () => {
+    const t = await mkTask();
+    const q = await ask({ taskRef: t.id });
+    await db.agentTask.update({ where: { id: t.id }, data: { assigneeWorkerId: bea.id } });
+    await answer(q.row.id, q.row.revSeq);
+    expect((await wakesOf(bea.id)).map((w) => w.event)).toEqual(['ANSWERED']);
+    expect(await wakesOf(asker.id)).toEqual([]);
+  });
+});
+
+describe('#4431 §5: who is not woken', () => {
+  it('a question with no task, a task ended before the answer, a take-back, a worker of another App', async () => {
+    const plain = await ask({});
+    await answer(plain.row.id, plain.row.revSeq);
+    expect(await wakesOf(asker.id)).toEqual([]);
+
+    const ended = await mkTask();
+    const q1 = await ask({ taskRef: ended.id });
+    await db.agentTask.update({ where: { id: ended.id }, data: { status: 'cancelled', cancelledAt: new Date() } });
+    await answer(q1.row.id, q1.row.revSeq);
+    expect(await questionEvents(ended.id)).toHaveLength(0);
+
+    const t = await mkTask();
+    const q2 = await ask({ taskRef: t.id });
+    const a = await answer(q2.row.id, q2.row.revSeq);
+    const [answered] = await questionEvents(t.id);
+    await db.workerDeliveryTaskEvent.create({ data: { workerId: asker.id, eventId: answered!.id, chainIndex: 0, deliveredAt: new Date() } });
+    await retract(a.row.id, a.row.revSeq);
+    expect((await questionEvents(t.id)).map((e) => e.type)).toEqual(['question.answered', 'question.answer-retracted']);
+    expect(await wakesOf(asker.id)).toEqual([]);
+
+    // A worker of another App named as the assignee (not possible through the doors) is never due it.
+    await db.agentTask.update({ where: { id: t.id }, data: { assigneeWorkerId: foreign.id } });
+    await db.agentTeamEvent.create({ data: { appId: app.id, taskId: t.id, type: 'question.answered', actorUserId: decider.id, payload: {} } });
+    expect(await wakesOf(foreign.id)).toEqual([]);
+  });
+});
+
+describe('#4431 §5: a dead App wakes nobody (Dara P3)', () => {
+  it.each([
+    ['uninstalled', () => db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } })],
+    ['deleted', () => db.app.update({ where: { id: app.id }, data: { deletedAt: new Date() } })],
+    ['in a deleted org', async () => {
+      const a = await db.app.findUniqueOrThrow({ where: { id: app.id }, select: { organizationId: true } });
+      await db.organization.update({ where: { id: a.organizationId! }, data: { deletedAt: new Date() } });
+    }],
+  ] as const)('an answer on a task whose App is %s is recorded but wakes nobody', async (_label, kill) => {
+    const t = await mkTask();
+    const q = await ask({ taskRef: t.id });
+    await answer(q.row.id, q.row.revSeq);
+    expect(await wakesOf(asker.id)).toHaveLength(1);
+    await kill();
+    expect(await wakesOf(asker.id)).toEqual([]);
+  });
+});
+
+describe('#4431 §6: an answer is passive history', () => {
+  it('a question.answered event does not suppress the assignee\'s undelivered ASSIGNED wake', async () => {
+    const t = await mkTask({ status: 'pending', startedAt: null });
+    await db.agentTeamEvent.create({ data: { appId: app.id, taskId: t.id, type: 'task.assigned', actorUserId: holder.id, subjectWorkerId: asker.id, payload: { assignee: { workerId: asker.id } }, createdAt: new Date(Date.now() - 30 * MIN) } });
+    const q = await ask({ taskRef: t.id });
+    // The asker's own ask is no task event, so its ASSIGNED wake still stands.
+    expect((await wakesOf(asker.id)).map((w) => w.event)).toEqual(['ASSIGNED']);
+    await answer(q.row.id, q.row.revSeq);
+    expect((await wakesOf(asker.id)).map((w) => w.event).sort()).toEqual(['ANSWERED', 'ASSIGNED']);
+    // A decider is never a worker (NOT_A_PERSON), so the door writes these with no worker actor. The passive list is
+    // what keeps a worker-attributed one from counting as the assignee acting: pin both types directly.
+    for (const type of ['question.answered', 'question.answer-retracted']) {
+      await db.agentTeamEvent.create({ data: { appId: app.id, taskId: t.id, type, actorWorkerId: asker.id, actorUserId: holder.id, payload: {} } });
+    }
+    expect((await wakesOf(asker.id)).map((w) => w.event)).toContain('ASSIGNED');
+  });
+});
+
+describe('#4431 §4: hadron_ask_question takes taskRef (S6 #4643 merged first)', () => {
+  const mcp = () => createTestableMcpServer(
+    { userId: holder.id, roles: ['READER'], clientId: `user:${holder.id}` } as AuthContext,
+    { sessionId: `q-${generateId()}`, cachedAppResolution: { kind: 'multi-app' } },
+  );
+  it('a worker session links its own open task through MCP; another worker\'s task is [question_invalid]', async () => {
+    const t = await mkTask();
+    const text = await asWorker(asker.id, () => mcp().callToolText('hadron_ask_question', { logRef: logId, ...ASK, taskRef: t.handle }));
+    expect(text).toMatch(/^Asked /);
+    const stored = await db.node.findFirstOrThrow({ where: { memoryId: memory.id, role: 'question' }, orderBy: { seq: 'desc' } });
+    expect(questionDataSchema.parse(stored.data).taskId).toBe(t.id);
+    const others = await mkTask({ assigneeWorkerId: bea.id });
+    const refused = await asWorker(asker.id, () => mcp().callToolText('hadron_ask_question', { logRef: logId, ...ASK, taskRef: others.id }));
+    expect(refused).toMatch(/^\[question_invalid\]/);
+    expect(refused).toContain(LINK_MESSAGE);
+  });
+});
+
+describe('#4431 §7: earlier questions', () => {
+  it('a question with taskId null still evaluates OPEN, answers, and writes no event', async () => {
+    const t = await mkTask();
+    const q = await ask({});
+    expect(D.state(q, {}, as(holder.id))).toBe('OPEN');
+    expect(D.taskId(q, {}, as(holder.id))).toBeNull();
+    expect(q.row.content).not.toContain('Blocks task');
+    const after = await answer(q.row.id, q.row.revSeq);
+    expect(D.state(after, {}, as(holder.id))).toBe('DECIDED');
+    expect(await db.agentTeamEvent.count({ where: { type: { startsWith: 'question.' } } })).toBe(0);
+    void t;
+  });
+
+  it('a question with blocks and taskId null renders its blocking section exactly as before #4431', async () => {
+    // Beckett P3 on #4644. taskId is required-nullable in the codec since #4426 (z.string().nullable()), so every
+    // stored question carries taskId: null; this drives the renderer's unchanged branch with a non-empty section.
+    const q = await ask({ blocks: [{ ref: 'hadron-server#4431' }] });
+    expect(q.row.content).toContain('## What this question is blocking\n\n- hadron-server#4431\n');
+    expect(q.row.content).not.toContain('Blocks task');
+    expect(D.state(q, {}, as(holder.id))).toBe('OPEN');
+  });
+});

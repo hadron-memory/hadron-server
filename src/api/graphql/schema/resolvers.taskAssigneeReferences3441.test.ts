@@ -20,7 +20,7 @@ const PR2 = 'https://github.com/hadron-memory/hadron-server/pull/2';
 const ISSUE = 'https://github.com/hadron-memory/hadron-server/issues/3441';
 const code = (c: string) => ({ extensions: { code: c } });
 const edit = (input: Record<string, unknown>, userId: string = assignee.id, taskId: string = task.id) =>
-  M.updateAgentTask({}, { taskId, input }, ctx(userId));
+  M.updateAgentTask({}, { taskRef: taskId, input }, ctx(userId));
 const row = async (id: string = task.id) => (await db.agentTask.findUniqueOrThrow({ where: { id } })) as any;
 const edited = (id: string = task.id) => db.agentTeamEvent.findMany({ where: { taskId: id, type: 'task.edited' } });
 
@@ -84,7 +84,7 @@ describe('everything else stays refused to the assignee (#3441)', () => {
   });
 
   it('a reassigned-away assignee is refused', async () => {
-    await M.reassignAgentTask({}, { taskId: task.id, assignee: { user: sibling.id } }, ctx());
+    await M.reassignAgentTask({}, { taskRef: task.id, assignee: { user: sibling.id } }, ctx());
     await expect(edit({ references: [{ kind: 'PULL_REQUEST', target: PR1 }] })).rejects.toMatchObject(code('TASK_NOT_OWNER'));
     await edit({ references: [{ kind: 'PULL_REQUEST', target: PR1 }] }, sibling.id);
     expect((await row()).references).toHaveLength(1);
@@ -105,14 +105,14 @@ describe('everything else stays refused to the assignee (#3441)', () => {
 describe('§10 negatives (#3441)', () => {
   it('an impersonation session never authorizes it, even as the assignee', async () => {
     const impersonation = { sessionId: generateId(), actorUserId: manager.id, orgId: app.organizationId, expiresAt: new Date(Date.now() + 3600_000) };
-    await expect(M.updateAgentTask({}, { taskId: task.id, input: { references: [{ kind: 'PULL_REQUEST', target: PR1 }] } }, { ...ctx(assignee.id), impersonation }))
+    await expect(M.updateAgentTask({}, { taskRef: task.id, input: { references: [{ kind: 'PULL_REQUEST', target: PR1 }] } }, { ...ctx(assignee.id), impersonation }))
       .rejects.toMatchObject(code('FORBIDDEN'));
     expect((await row()).references).toEqual([]);
   });
 
   it('an App key is refused', async () => {
     const key = await db.appKey.create({ data: { appId: app.id, keyHash: generateId(), keyPreview: 'test' } });
-    await expect(M.updateAgentTask({}, { taskId: task.id, input: { references: [{ kind: 'PULL_REQUEST', target: PR1 }] } }, { db, appId: app.id, appKeyId: key.id, roles: [] }))
+    await expect(M.updateAgentTask({}, { taskRef: task.id, input: { references: [{ kind: 'PULL_REQUEST', target: PR1 }] } }, { db, appId: app.id, appKeyId: key.id, roles: [] }))
       .rejects.toMatchObject(code('TASK_NOT_FOUND'));
     expect((await row()).references).toEqual([]);
   });
@@ -127,7 +127,7 @@ describe('§10 negatives (#3441)', () => {
 describe('a worker assignee (#3441, LOCAL P3 and §10 P3-1: the any-worker mutant)', () => {
   let agent: any, worker: any, otherWorker: any, workerTask: any;
   const asWorker = (w: any, input: Record<string, unknown>, userId: string) =>
-    runAsActor({ workerId: w.id, agentId: agent.id }, () => M.updateAgentTask({}, { taskId: workerTask.id, input }, ctx(userId)));
+    runAsActor({ workerId: w.id, agentId: agent.id }, () => M.updateAgentTask({}, { taskRef: workerTask.id, input }, ctx(userId)));
   beforeEach(async () => {
     const system = await db.memory.create({ data: { organizationId: org.id, name: 'Team system', urn: `${org.urn}:team-system`, class: 'system' } });
     agent = await db.agent.create({ data: { organizationId: org.id, name: 'Team', urn: `${org.urn}:team`, systemMemoryId: system.id } });
@@ -145,7 +145,7 @@ describe('a worker assignee (#3441, LOCAL P3 and §10 P3-1: the any-worker mutan
   });
 
   it('the worker\'s holder acting as a person, with no worker actor, is refused', async () => {
-    await expect(M.updateAgentTask({}, { taskId: workerTask.id, input: { references: [{ kind: 'PULL_REQUEST', target: PR2 }] } }, ctx(sibling.id)))
+    await expect(M.updateAgentTask({}, { taskRef: workerTask.id, input: { references: [{ kind: 'PULL_REQUEST', target: PR2 }] } }, ctx(sibling.id)))
       .rejects.toMatchObject(code('TASK_NOT_OWNER'));
     expect((await row(workerTask.id)).references).toEqual([]);
   });

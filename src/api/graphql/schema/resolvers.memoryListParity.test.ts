@@ -172,7 +172,7 @@ describe('#1626 record/list parity', () => {
     const subscribed = await query('{ memories { items { id } } }', { db, userId: users.reader, roles: ['READER'] });
     expect(subscribed.memories.items.map((row: { id: string }) => row.id)).not.toContain(worker.id);
     // The new AppMember scope cannot widen an explicitly selected org.
-    const scoped = await query(`{ memories(orgId: "${orgId}") { total items { id } } }`, externalCtx);
+    const scoped = await query(`{ memories(orgRef: "${orgId}") { total items { id } } }`, externalCtx);
     expect(scoped.memories).toEqual({ total: 0, items: [] });
   });
 

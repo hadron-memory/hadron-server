@@ -26,6 +26,7 @@ let admin: { id: string };
 let memory: { id: string; urn: string };
 let h1 = 0;
 const roles = new AsyncLocalStorage<'A'|'B'>();
+let backendA = -1;
 let backendB = -1;
 const hash = async (s: string) => (await db.$queryRaw<Array<{ h: number }>>`SELECT hashtext(${s}) AS h`)[0].h;
 const auth = () => ({ userId: admin.id, roles: ['ADMIN'], clientId: `user:${admin.id}` }) as never;
@@ -44,6 +45,7 @@ function installHook() {
     if (typeof work !== 'function') return orig(work as never, opts as never);
     return orig(async (tx: any) => {
       const [{ pid }] = await tx.$queryRaw`SELECT pg_backend_pid() AS pid`;
+      if (roles.getStore() === 'A') backendA = pid;
       if (roles.getStore() === 'B') backendB = pid;
       const proxied = new Proxy(tx, {
         get(target, prop) {
@@ -104,20 +106,41 @@ const CASES = [
 
 async function run(label: string, R: string, startA: () => Promise<unknown>, startB: () => Promise<unknown>, D: string) {
   const hR = await hash(R); const hD = await hash(D);
-  backendB=-1;
+  backendA = backendB = -1;
   const before = await deadlocks();
   const granted = latch(); const release = latch();
   pauseOn = { h2: hR, loc: R, granted, release };
   const a = Promise.allSettled([roles.run('A', startA)]);
-  await Promise.race([granted.promise, sleep(8000).then(()=>{throw new Error('A did not grant root');})]); // A holds R, has not asked for anything after it
-  const b = Promise.allSettled([roles.run('B', startB)]);
-  // B must be queued behind A on R; record whether it already holds D.
+  let b: typeof a | undefined;
   let bHoldsD = false; let observationError: unknown;
-  try { const pidB = await waiterOn(hR, hD); bHoldsD = await holds(pidB, hD); }
-  catch (error) { observationError=error; }
-  finally { release.resolve(); }
-  const [ra] = await a; const [rb] = await b;
-  if(observationError) throw observationError;
+  try {
+    await Promise.race([granted.promise, sleep(8000).then(() => { throw new Error('A did not grant root'); })]);
+    b = Promise.allSettled([roles.run('B', startB)]);
+    if (label === 'S1') {
+      // This ordinary MCP create has no inline-edge memory set; its counterparty still reaches P.
+      const pidB = await waiterOn(hR, hD); bHoldsD = await holds(pidB, hD);
+    } else {
+      // #1213: both owning callers now take C before P. B must queue on the exact one-argument
+      // memory key held by A, without retaining either old path key. A later P wait is unreachable.
+      const key = await hash('channel-host:' + memory.id);
+      await vi.waitFor(async () => {
+        const [{ waiting }] = await db.$queryRaw<Array<{ waiting: boolean }>>`
+          SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted
+            AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
+            AND pid=${backendB} AND classid=${key < 0 ? 4294967295 : 0}::bigint::oid
+            AND objid=${key >>> 0}::bigint::oid AND objsubid=1
+            AND ${backendA}=ANY(pg_blocking_pids(${backendB}::int))) AS waiting`;
+        expect(waiting).toBe(true);
+      }, { timeout: 8000, interval: 10 });
+      expect(await holds(backendB, hR)).toBe(false);
+      bHoldsD = await holds(backendB, hD);
+      expect(bHoldsD).toBe(false);
+    }
+  } catch (error) { observationError = error; }
+  finally { pauseOn = null; release.resolve(); }
+  const [ra] = await a; const rb = b ? (await b)[0] : undefined;
+  if (observationError) throw observationError;
+  if (!rb) throw new Error('counterparty never started');
   const dl = (await deadlocks()) - before;
   return { dl, bHoldsD, hD, hR, ra, rb };
 }

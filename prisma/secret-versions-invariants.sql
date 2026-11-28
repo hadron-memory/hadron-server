@@ -1,6 +1,6 @@
 -- #3997 (S2 of #3991) — App-owned secrets: the widened owner CHECK, the value/owner pairing, versions bound to their
 -- App, the append-only event trail with its one-year purge rule, the tombstone, and "no secret outlives its App".
--- Prisma cannot model any of these. One source, shared verbatim with migration 20261114120000_app_secret_versions.
+-- Prisma cannot model any of these. One source; the newest migration to carry it (today 20261127090000_secret_delete_after_use, #5335; before it 20261124180200_qualify_secret_guard_reads) ends with it verbatim (pinned by src/api/graphql/schema/resolvers.appSecrets3997.test.ts).
 
 -- The owner types: user, org, app. (#696 narrowed to user/org; D-2026-11-12-001 made an App an owner again.)
 ALTER TABLE secrets DROP CONSTRAINT IF EXISTS chk_secret_owner_type;
@@ -11,6 +11,9 @@ ALTER TABLE secrets DROP CONSTRAINT IF EXISTS chk_secret_app_value;
 ALTER TABLE secrets ADD CONSTRAINT chk_secret_app_value CHECK ((owner_type = 'app') = (value_encrypted IS NULL));
 ALTER TABLE secrets DROP CONSTRAINT IF EXISTS chk_secret_protected_app_only;
 ALTER TABLE secrets ADD CONSTRAINT chk_secret_protected_app_only CHECK (owner_type = 'app' OR NOT protected);
+-- #5335 (cor:sec:060:03): deleteAfterUse, like protection, exists only on App rows.
+ALTER TABLE secrets DROP CONSTRAINT IF EXISTS chk_secret_delete_after_use_app_only;
+ALTER TABLE secrets ADD CONSTRAINT chk_secret_delete_after_use_app_only CHECK (owner_type = 'app' OR NOT delete_after_use);
 
 ALTER TABLE secret_versions DROP CONSTRAINT IF EXISTS chk_secret_version_shape;
 ALTER TABLE secret_versions ADD CONSTRAINT chk_secret_version_shape
@@ -19,7 +22,7 @@ ALTER TABLE secret_versions ADD CONSTRAINT chk_secret_version_shape
 -- A version's App is its secret's owner, and that owner is an App (owner_id is not a foreign key, so a trigger).
 CREATE OR REPLACE FUNCTION hadron_secret_version_owner() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM secrets WHERE id = NEW.secret_id AND owner_type = 'app' AND owner_id = NEW.app_id) THEN
+  IF NOT EXISTS (SELECT 1 FROM public.secrets WHERE id = NEW.secret_id AND owner_type = 'app' AND owner_id = NEW.app_id) THEN
     RAISE EXCEPTION 'A secret version belongs to the App that owns its secret' USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
@@ -33,10 +36,10 @@ FOR EACH ROW EXECUTE FUNCTION hadron_secret_version_owner();
 CREATE OR REPLACE FUNCTION hadron_secret_event_guard() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF TG_OP = 'DELETE'
-     AND EXISTS (SELECT 1 FROM secret_owner_tombstones t
+     AND EXISTS (SELECT 1 FROM public.secret_owner_tombstones t
                  WHERE t.owner_type = OLD.owner_type AND t.owner_id = OLD.owner_id
                    AND t.deleted_at <= (clock_timestamp() AT TIME ZONE 'UTC') - interval '1 year')
-     AND NOT EXISTS (SELECT 1 FROM apps a WHERE a.id = OLD.owner_id AND a.deleted_at IS NULL) THEN
+     AND NOT EXISTS (SELECT 1 FROM public.apps a WHERE a.id = OLD.owner_id AND a.deleted_at IS NULL) THEN
     RETURN OLD;
   END IF;
   RAISE EXCEPTION 'Secret events are append-only' USING ERRCODE = '23514';
@@ -51,7 +54,7 @@ CREATE OR REPLACE FUNCTION hadron_secret_tombstone_guard() RETURNS trigger LANGU
 BEGIN
   IF TG_OP = 'DELETE'
      AND OLD.deleted_at <= (clock_timestamp() AT TIME ZONE 'UTC') - interval '1 year'
-     AND NOT EXISTS (SELECT 1 FROM secret_events e WHERE e.owner_type = OLD.owner_type AND e.owner_id = OLD.owner_id) THEN
+     AND NOT EXISTS (SELECT 1 FROM public.secret_events e WHERE e.owner_type = OLD.owner_type AND e.owner_id = OLD.owner_id) THEN
     RETURN OLD;
   END IF;
   RAISE EXCEPTION 'A secret owner tombstone is written once and kept until its events are purged' USING ERRCODE = '23514';
@@ -65,10 +68,10 @@ FOR EACH ROW EXECUTE FUNCTION hadron_secret_tombstone_guard();
 -- restricted key rows. An owner that has events and no tombstone yet gets one now (a soft delete's tombstone stands).
 CREATE OR REPLACE FUNCTION hadron_apps_secrets_gone() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  INSERT INTO secret_owner_tombstones (owner_type, owner_id)
-    SELECT 'app', OLD.id WHERE EXISTS (SELECT 1 FROM secret_events WHERE owner_type = 'app' AND owner_id = OLD.id)
+  INSERT INTO public.secret_owner_tombstones (owner_type, owner_id)
+    SELECT 'app', OLD.id WHERE EXISTS (SELECT 1 FROM public.secret_events WHERE owner_type = 'app' AND owner_id = OLD.id)
     ON CONFLICT DO NOTHING;
-  DELETE FROM secrets WHERE owner_type = 'app' AND owner_id = OLD.id;
+  DELETE FROM public.secrets WHERE owner_type = 'app' AND owner_id = OLD.id;
   RETURN OLD;
 END $$;
 DROP TRIGGER IF EXISTS apps_secrets_gone ON apps;

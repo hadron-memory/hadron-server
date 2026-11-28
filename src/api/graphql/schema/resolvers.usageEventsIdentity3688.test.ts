@@ -66,7 +66,7 @@ const byId = (rows: Array<{ id: string }>, id: string) => rows.find(r => r.id ==
 
 describe('#3688 — a named memory discloses other principals\' volumes only, through the real schema', () => {
   it('a READER member naming a memory gets another user\'s row masked on both fields (the issue\'s repro)', async () => {
-    const res = await gql(`query($m: ID!){ a: usageEvents(memoryId: $m){ ${IDENTITY} } b: usageEventsPage(memoryId: $m){ items { ${IDENTITY} } } }`, { m: mem.id }, ctx({ userId: me.id, roles: ['READER'] }));
+    const res = await gql(`query($m: ID!){ a: usageEvents(memoryRef: $m){ ${IDENTITY} } b: usageEventsPage(memoryRef: $m){ items { ${IDENTITY} } } }`, { m: mem.id }, ctx({ userId: me.id, roles: ['READER'] }));
     expect(res.errors).toBeUndefined();
     const data = res.data as any;
     expect(byId(data.a, theirs)).toEqual(masked(theirs, 5));
@@ -74,7 +74,7 @@ describe('#3688 — a named memory discloses other principals\' volumes only, th
   });
 
   it('an ADMIN gets the same masking: there is no admin exception (ruling 0246)', async () => {
-    const res = await gql(`query($m: ID!){ a: usageEvents(memoryId: $m){ ${IDENTITY} } b: usageEventsPage(memoryId: $m){ items { ${IDENTITY} } } }`, { m: mem.id }, ctx({ userId: me.id, roles: ['ADMIN'] }));
+    const res = await gql(`query($m: ID!){ a: usageEvents(memoryRef: $m){ ${IDENTITY} } b: usageEventsPage(memoryRef: $m){ items { ${IDENTITY} } } }`, { m: mem.id }, ctx({ userId: me.id, roles: ['ADMIN'] }));
     expect(res.errors).toBeUndefined();
     const data = res.data as any;
     expect(byId(data.a, theirs)).toEqual(masked(theirs, 5));
@@ -82,7 +82,7 @@ describe('#3688 — a named memory discloses other principals\' volumes only, th
   });
 
   it('the caller\'s own row inside the named memory keeps its identity: it is the caller\'s own activity', async () => {
-    const res = await gql(`query($m: ID!){ a: usageEvents(memoryId: $m){ ${IDENTITY} } b: usageEventsPage(memoryId: $m){ items { ${IDENTITY} } } }`, { m: mem.id }, ctx({ userId: me.id, roles: ['READER'] }));
+    const res = await gql(`query($m: ID!){ a: usageEvents(memoryRef: $m){ ${IDENTITY} } b: usageEventsPage(memoryRef: $m){ items { ${IDENTITY} } } }`, { m: mem.id }, ctx({ userId: me.id, roles: ['READER'] }));
     expect(res.errors).toBeUndefined();
     const data = res.data as any;
     expect(byId(data.a, mine)).toEqual(raw());
@@ -100,7 +100,7 @@ describe('#3688 — a named memory discloses other principals\' volumes only, th
   it('a loc or an exact node names a resource too, and is masked the same way', async () => {
     const n = await db.node.create({ data: { id: generateId(), memoryId: mem.id, loc: 'shared', name: 'Shared' } });
     await db.usageEvent.update({ where: { id: theirs }, data: { nodeId: n.id } });
-    const res = await gql(`query($n: ID!){ a: usageEvents(loc: "shared"){ ${IDENTITY} } b: usageEventsPage(nodeId: $n){ items { ${IDENTITY} } } }`, { n: n.id }, ctx({ userId: me.id, roles: ['READER'] }));
+    const res = await gql(`query($n: ID!){ a: usageEvents(loc: "shared"){ ${IDENTITY} } b: usageEventsPage(nodeRef: $n){ items { ${IDENTITY} } } }`, { n: n.id }, ctx({ userId: me.id, roles: ['READER'] }));
     expect(res.errors).toBeUndefined();
     const data = res.data as any;
     expect(byId(data.a, theirs)).toEqual(masked(theirs, 5));
@@ -110,8 +110,8 @@ describe('#3688 — a named memory discloses other principals\' volumes only, th
   it('an unreadable memory still answers MEMORY_NOT_FOUND, exactly like a missing one', async () => {
     const missing = generateId();
     for (const m of [unreadable.id, missing]) {
-      const res = await gql(`query($m: ID!){ usageEvents(memoryId: $m){ id } }`, { m }, ctx({ userId: me.id, roles: ['READER'] }));
-      expect(res.errors?.[0]?.message).toContain(`MEMORY_NOT_FOUND: ${m}`);
+      const res = await gql(`query($m: ID!){ usageEvents(memoryRef: $m){ id } }`, { m }, ctx({ userId: me.id, roles: ['READER'] }));
+      expect(res.errors?.[0]?.message).toContain('MEMORY_NOT_FOUND: nothing found for the given ref.');
     }
   });
 });

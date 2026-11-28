@@ -68,9 +68,9 @@ beforeEach(async () => {
 
 describe('guard A: a generic write never touches a compiled node (#2043)', () => {
   it.each([
-    ['updateNode', (id: string) => resolvers.Mutation.updateNode(null, { input: { id, content: 'edited' } }, ctx())],
-    ['updateNode role strip', (id: string) => resolvers.Mutation.updateNode(null, { input: { id, role: 'notes' } }, ctx())],
-    ['updateNode marker strip', (id: string) => resolvers.Mutation.updateNode(null, { input: { id, nodeType: 'info' } }, ctx())],
+    ['updateNode', (id: string) => resolvers.Mutation.updateNode(null, { input: { ref: id, content: 'edited' } }, ctx())],
+    ['updateNode role strip', (id: string) => resolvers.Mutation.updateNode(null, { input: { ref: id, role: 'notes' } }, ctx())],
+    ['updateNode marker strip', (id: string) => resolvers.Mutation.updateNode(null, { input: { ref: id, nodeType: 'info' } }, ctx())],
     ['deleteNode', (id: string) => resolvers.Mutation.deleteNode(null, { nodeRef: id }, ctx())],
     ['moveNode', (id: string) => resolvers.Mutation.moveNode(null, { sourceRef: id, targetUrn: `hrn:node:${memory.urn}:elsewhere:compiled` }, ctx())],
   ])('%s is refused and changes nothing', async (_name, op) => {
@@ -90,28 +90,28 @@ describe('guard A: a generic write never touches a compiled node (#2043)', () =>
 
   it('a generic create of a compiled node is refused', async () => {
     expect(await codeOf(resolvers.Mutation.createNode(null, {
-      input: { memoryId: memory.id, loc: 'x:1', name: 'X', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
+      input: { memoryRef: memory.id, loc: 'x:1', name: 'X', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
     }, ctx()))).toBe('BOOT_PROMPT_COMPILED_WRITE');
     expect(await db.node.count({ where: { memoryId: memory.id, loc: 'x:1' } })).toBe(0);
   });
 
   it('restoreNodeRevision of a compiled node is refused', async () => {
     const c = await compiled();
-    await withCompileWrite(() => resolvers.Mutation.updateNode(null, { input: { id: c.id, content: 'second compile' } }, ctx()));
+    await withCompileWrite(() => resolvers.Mutation.updateNode(null, { input: { ref: c.id, content: 'second compile' } }, ctx()));
     const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: c.id } });
-    expect(await codeOf(resolvers.Mutation.restoreNodeRevision(null, { revisionId: rev.id }, ctx()))).toBe('BOOT_PROMPT_COMPILED_WRITE');
+    expect(await codeOf(resolvers.Mutation.restoreNodeRevision(null, { nodeRevRef: rev.id }, ctx()))).toBe('BOOT_PROMPT_COMPILED_WRITE');
   });
 
   it('the compile seam writes and revises a compiled node', async () => {
     const c = await compiled();
-    await withCompileWrite(() => resolvers.Mutation.updateNode(null, { input: { id: c.id, content: 'recompiled' } }, ctx()));
+    await withCompileWrite(() => resolvers.Mutation.updateNode(null, { input: { ref: c.id, content: 'recompiled' } }, ctx()));
     expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).content).toBe('recompiled');
   });
 
   it('searchReplaceInNodes skips a compiled node and reports it', async () => {
     const c = await compiled();
     await resolvers.Mutation.searchReplaceInNodes(null, {
-      input: { nodeIds: [c.id], fields: ['content'], oldText: 'Basil', newText: 'Eve', dryRun: false },
+      input: { nodeRefs: [c.id], fields: ['content'], oldText: 'Basil', newText: 'Eve', dryRun: false },
     }, ctx());
     expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).content).toBe('You are Basil.');
   });
@@ -143,27 +143,27 @@ describe('guard B: a worker session never edits a boot prompt (#2043, cor:agt:04
     const plain = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'n:1', name: 'Plain', content: 'p', role: 'notes' } });
     const before = await snapshot(s.id);
     const refused = (fn: () => Promise<unknown>) => asWorker(() => codeOf(fn()));
-    expect(await refused(() => resolvers.Mutation.updateNode(null, { input: { id: s.id, content: 'edit' } }, ctx())))
+    expect(await refused(() => resolvers.Mutation.updateNode(null, { input: { ref: s.id, content: 'edit' } }, ctx())))
       .toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
-    expect(await refused(() => resolvers.Mutation.updateNode(null, { input: { id: s.id, role: 'notes' } }, ctx())))
+    expect(await refused(() => resolvers.Mutation.updateNode(null, { input: { ref: s.id, role: 'notes' } }, ctx())))
       .toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
-    expect(await refused(() => resolvers.Mutation.updateNode(null, { input: { id: plain.id, role: 'boot-prompt' } }, ctx())))
+    expect(await refused(() => resolvers.Mutation.updateNode(null, { input: { ref: plain.id, role: 'boot-prompt' } }, ctx())))
       .toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
-    expect(await refused(() => resolvers.Mutation.createNode(null, { input: { memoryId: memory.id, loc: 'b:2', name: 'B', role: 'boot-prompt' } }, ctx())))
+    expect(await refused(() => resolvers.Mutation.createNode(null, { input: { memoryRef: memory.id, loc: 'b:2', name: 'B', role: 'boot-prompt' } }, ctx())))
       .toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
     expect(await refused(() => resolvers.Mutation.deleteNode(null, { nodeRef: s.id }, ctx())))
       .toBe('BOOT_PROMPT_WORKER_SESSION_REFUSED');
     expect(await snapshot(s.id)).toEqual(before);
     expect(await db.node.count({ where: { memoryId: memory.id, loc: 'b:2' } })).toBe(0);
     // controls: ordinary node edits by the same session; the manager as themselves.
-    expect(await refused(() => resolvers.Mutation.updateNode(null, { input: { id: plain.id, content: 'ok' } }, ctx()))).toBe('NO_ERROR');
-    expect(await codeOf(resolvers.Mutation.updateNode(null, { input: { id: s.id, content: 'by the manager' } }, ctx()))).toBe('NO_ERROR');
+    expect(await refused(() => resolvers.Mutation.updateNode(null, { input: { ref: plain.id, content: 'ok' } }, ctx()))).toBe('NO_ERROR');
+    expect(await codeOf(resolvers.Mutation.updateNode(null, { input: { ref: s.id, content: 'by the manager' } }, ctx()))).toBe('NO_ERROR');
   });
 
   it('a worker session replace-text skips boot-prompt sources; cloneMemory and mergeMemories refuse whole', async () => {
     const s = await source();
     await asWorker(() => resolvers.Mutation.searchReplaceInNodes(null, {
-      input: { nodeIds: [s.id], fields: ['content'], oldText: 'You', newText: 'We', dryRun: false },
+      input: { nodeRefs: [s.id], fields: ['content'], oldText: 'You', newText: 'We', dryRun: false },
     }, ctx()));
     expect((await db.node.findUniqueOrThrow({ where: { id: s.id } })).content).toBe('You are {{worker.name}}.');
     const target = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'boot-target' }, ctx());
@@ -180,8 +180,8 @@ describe('guard B: a worker session never edits a boot prompt (#2043, cor:agt:04
 describe('controls (#2043)', () => {
   it('boot-prompt is a plain role: any writer creates and edits a source', async () => {
     const s = await source();
-    expect(await codeOf(resolvers.Mutation.updateNode(null, { input: { id: s.id, content: 'edit' } }, ctx()))).toBe('NO_ERROR');
-    expect(await codeOf(resolvers.Mutation.createNode(null, { input: { memoryId: memory.id, loc: 'b:3', name: 'B3', role: 'boot-prompt.worker' } }, ctx()))).toBe('NO_ERROR');
+    expect(await codeOf(resolvers.Mutation.updateNode(null, { input: { ref: s.id, content: 'edit' } }, ctx()))).toBe('NO_ERROR');
+    expect(await codeOf(resolvers.Mutation.createNode(null, { input: { memoryRef: memory.id, loc: 'b:3', name: 'B3', role: 'boot-prompt.worker' } }, ctx()))).toBe('NO_ERROR');
   });
 
   it('cloneMemory by a non-session caller excludes the compiled node and carries the source', async () => {

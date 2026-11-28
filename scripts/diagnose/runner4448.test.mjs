@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const LOAD_LINE = '{"kind":"load","workload":"held","cap":100,"startAt":0,"endAt":0,"ok":101,"probe":{"method":"tools/list","requests":7,"errors":0,"minMs":1,"p50Ms":1,"p95Ms":1,"p99Ms":1,"maxMs":1}}';
+const LOAD_LINE = '{"kind":"load","workload":"held","cap":100,"startAt":0,"endAt":0,"ok":101,"capRefused":0,"other":0,"closeOk":0,"closeFailed":0,"missingSession":0,"probe":{"method":"tools/list","requests":7,"errors":0,"minMs":1,"p50Ms":1,"p95Ms":1,"p99Ms":1,"maxMs":1}}';
 
 function fixture(mode) {
   const dir = mkdtempSync(join(tmpdir(), 'gloria-run4448-'));
@@ -43,6 +43,9 @@ esac\n`);
     case "$MODE" in
      timeout) exit 124;;
      empty) exit 0;;
+     noop) printf '%s\\n' '{"kind":"other"}'; exit 0;;
+     extraline) printf '%s\\n' '${LOAD_LINE}' '{"kind":"other"}'; exit 0;;
+     wrongworkload) printf '%s\\n' '${LOAD_LINE.replace('"workload":"held"', '"workload":"idle"')}'; exit 0;;
     esac
     printf '%s\\n' '${LOAD_LINE}'; case "$MODE" in fail|failkept) exit 5;; esac;;
    *memory.max*) echo 6442450944;;
@@ -184,6 +187,89 @@ test('exit 0 with no load line is an invalid run, not a pass', () => {
     expect(r.status).toBe(7);
     expect(r.stderr).toContain('printed no load line');
     expect(readFileSync(join(f.dir, 'down'), 'utf8')).toBe('down\n');
+  } finally { f.clean(); }
+});
+
+// #2627: exit 0 with output that is not a valid load record for the requested workload is an invalid run, refused
+// before any sample capture; only a positive record is accepted.
+for (const mode of ['noop', 'wrongworkload', 'extraline']) {
+  test(`exit 0 with output that is not this workload's load record is refused (${mode})`, () => {
+    const f = fixture(mode);
+    try {
+      const r = f.run();
+      expect(r.status).toBe(7);
+      expect(r.stderr).toContain('printed no valid load record for held');
+      expect(existsSync(join(f.dir, 'sleeps')) ? readFileSync(join(f.dir, 'sleeps'), 'utf8').split('\n').filter(Boolean).length : 0).toBe(1);
+      expect(readFileSync(join(f.dir, 'down'), 'utf8')).toBe('down\n');
+    } finally { f.clean(); }
+  });
+}
+
+// #4608 BLIND F2: a host that cannot run the check is named as such, not reported as a bad record.
+test('a failed load record check (no usable host node) is reported as a check failure, not a rejected record', () => {
+  const f = fixture('cap');
+  try {
+    // #4608 BLIND delta: exit 1 too (a crashing node) is a failed check, never a rejected record.
+    for (const code of ['9', '1']) {
+      writeFileSync(join(f.dir, 'bin', 'node'), `#!/bin/bash\nif [ "\${1:-}" = --input-type=module ]; then exit ${code}; fi\nexec '${process.execPath}' "$@"\n`, { mode: 0o755 });
+      const r = f.run();
+      expect(r.status).toBe(7);
+      expect(r.stderr).toContain(`could not run the load record check on this host (node exit ${code})`);
+      expect(r.stderr).not.toContain('printed no valid load record');
+      rmSync(join(f.dir, 'state'), { recursive: true, force: true }); rmSync(join(f.dir, 'down'), { force: true });
+    }
+  } finally { f.clean(); }
+});
+
+// #4650: on a host Node without import.meta.main, load.mjs's guard throws UNSUPPORTED_NODE when the record check imports it.
+// run.sh used to discard that error (exit 3, no runtime named); the operator must be told which Node is needed. Real run.sh,
+// real load.mjs: the host node is a wrapper that runs the check against a scratch copy of load.mjs (and its sampler import)
+// where import.meta.main reads undefined (exactly what an unsupported runtime does), or whose import cannot resolve.
+// The scratch path reaches the wrapper through the environment, never interpolated into the script.
+function checkAgainst(f, loadSource, extraFiles = {}) {
+  const copy = join(f.dir, 'copy'); mkdirSync(copy);
+  writeFileSync(join(copy, 'sampler.mjs'), readFileSync(join(here, 'sampler.mjs'), 'utf8'));
+  for (const [name, body] of Object.entries(extraFiles)) writeFileSync(join(copy, name), body);
+  writeFileSync(join(copy, 'load.mjs'), loadSource);
+  writeFileSync(join(f.dir, 'bin', 'node'),
+    '#!/bin/bash\nif [ "${1:-}" = --input-type=module ]; then n=$#; args=("$@"); args[$((n-1))]="$COPY/load.mjs"; exec "$REALNODE" "${args[@]}"; fi\nexec "$REALNODE" "$@"\n',
+    { mode: 0o755 });
+  Object.assign(f.env, { COPY: copy, REALNODE: process.execPath });
+  return f.run();
+}
+const settleSleeps = (f) => {
+  expect(existsSync(join(f.dir, 'sleeps'))).toBe(true);
+  return readFileSync(join(f.dir, 'sleeps'), 'utf8').split('\n').filter(Boolean).length;
+};
+
+test('a host Node without import.meta.main: the refusal names the Node requirement, exits 7 and captures nothing (#4650)', async () => {
+  const { UNSUPPORTED_NODE } = await import('./load.mjs');
+  const f = fixture('cap');
+  try {
+    const src = readFileSync(join(here, 'load.mjs'), 'utf8');
+    expect(src.split('(import.meta.main)').length - 1).toBe(2);   // the guard call and the entry check, as in entry2627
+    const r = checkAgainst(f, src.split('(import.meta.main)').join('(undefined)'));
+    expect(r.status).toBe(7);
+    // The message, whole and first: it precedes the check-failed line, and only the message is printed (no stack frames).
+    const lines = r.stderr.split('\n');
+    const at = lines.indexOf(UNSUPPORTED_NODE);
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(lines[at + 1]).toContain('could not run the load record check on this host (node exit 3)');
+    expect(r.stderr).not.toMatch(/\n\s+at /);
+    expect(r.stderr).not.toContain('printed no valid load record');
+    expect(settleSleeps(f)).toBe(1);   // only the settle sleep ran: no idle tail, no snapshot after the refusal
+  } finally { f.clean(); }
+});
+
+test('any import error of the record check is named, message only (a load.mjs that cannot resolve a module) (#4650)', () => {
+  const f = fixture('cap');
+  try {
+    const r = checkAgainst(f, "import './nope-4650.mjs';\nexport const loadRecordOk = () => true;\n");
+    expect(r.status).toBe(7);
+    expect(r.stderr).toContain('nope-4650.mjs');
+    expect(r.stderr).toContain('could not run the load record check on this host (node exit 3)');
+    expect(r.stderr).not.toMatch(/\n\s+at /);
+    expect(settleSleeps(f)).toBe(1);
   } finally { f.clean(); }
 });
 

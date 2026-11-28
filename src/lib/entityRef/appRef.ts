@@ -8,8 +8,9 @@
 
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
 import { isId as isIdFunc } from './shape.js';
-import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup } from '../urn.js';
+import { parseUrnInput, assertFullyQualifiedUrn, normalizeUrnForLookup, UrnNotQualifiedError } from '../urn.js';
 import { AppNotFoundError } from './errors.js';
+import { refHasUnstorableChars } from './refNamesNothing.js';
 import { resolveLegacyAlias } from './legacyAlias.js';
 import { findLiveUrnAliasTargets, dedupeById } from '../urnAlias.js';
 
@@ -18,6 +19,12 @@ export async function resolveAppRef(
   ref: string,
   options?: { includeDeleted?: boolean; scope?: Prisma.AppWhereInput },
 ): Promise<{ id: string }> {
+  // #2975 §10 / Baylor P2 on #4948: the urn grammar admits a NUL or a lone UTF-16 surrogate no
+  // stored URN can contain, and Postgres rejects it as a query parameter — a DRIVER fault, not a
+  // miss, so a narrowed fold catch lets it surface as an internal error where the old bare catch
+  // swallowed it. Reject it BEFORE the lookup: it names nothing, and every door's fold (or KEEP
+  // door's typed boundary contract) answers it exactly like any other malformed ref.
+  if (refHasUnstorableChars(ref)) throw new UrnNotQualifiedError(ref, undefined, 'app');
   const isId = isIdFunc(ref);
   if (!isId) {
     // Non-ID inputs MUST be fully-qualified URNs (spec 022).

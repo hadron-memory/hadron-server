@@ -1,6 +1,11 @@
 import type { SyncNotAttemptedReason } from './syncNotAttempted.js';
+import { acquireSyncRunLock } from './syncRunLock.js';
 import { committedSyncReport, failedSyncReport, type SyncReportEntry } from './syncReport.js';
+import { exceedsNodeContentLimit, resultingNodeContent } from '../../lib/nodeContentLimit.js';
+import { requireNodeHeadroom } from '../../lib/ownerLimits/nodes.js';
+import { OWNER_LIMIT_NO_NUMBER_MESSAGE, OwnerLimitReachedError } from '../../lib/ownerLimits/errors.js';
 import { GitCommandError } from './execGit.js';
+import { syncFailureText } from './syncErrorText.js';
 import { stampEmbeddingObligation } from '../../services/embedding/obligation.js';
 import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRows, assertNoWorkerSessionBootPromptWrite, boundWorkerId, withSyncCaller } from '../../lib/bootPrompt.js';
 import { currentActor } from '../../lib/requestActor.js';
@@ -30,7 +35,8 @@ import { join, dirname } from 'path';
 import { GRAPHS_PATH } from '../../config.js';
 import { pathUnderGraphsRoot } from '../localFs/pathUnderGraphsRoot.js';
 import { InvalidNodeNameError, loadGraphFromFs, type UnreadableFile } from '../localFs/loadGraphFromFs.js';
-import { deriveEdgeLoc } from '../../lib/edgeLoc.js';
+import { deriveEdgeLoc, isAuthoredLoc, rekeyDerivedEdgeLoc } from '../../lib/edgeLoc.js';
+import { derivedEdgeLocForUpsert } from '../../lib/edgeLocLookup.js';
 import { validateEdgeCondition } from '../../lib/edge-conditions/validator.js';
 import { entryConditionOf, validateEntryCondition } from '../../lib/edge-conditions/entryCondition.js';
 import { countCrossMemoryEdgesForNodeDelete } from '../../lib/crossMemoryEdgeDelete.js';
@@ -41,6 +47,7 @@ import { execGit } from './execGit.js';
 import { validateMemorySource } from '../../lib/gitSource.js';
 import { wakeEmbeddingQueue } from '../../services/embedding/enqueue.js';
 import { acquireLockSet, ancestorLocs, lockAncestorsForCreateMany } from '../../lib/nodeSubtreeLock.js';
+import { createChatbotContainers, missingChatbotContainers } from '../../lib/chatbotAncestors.js';
 import { Prisma, type Memory, type Node, type Organization } from '../../generated/prisma/index.js';
 import { validateGitBranch } from '../../lib/gitRef.js';
 import { withMirrorCheckoutLock } from './mirrorCheckoutLock.js';
@@ -154,6 +161,8 @@ export function describeSyncOutcome(result: {
   skippedUndeclaredRoles?: SkippedUndeclaredRole[];
   skippedAttestations?: SkippedAttestation[];
   skippedInvalidIncludes?: SkippedInvalidInclude[];
+  /** #5019 — locs NOT synced because the node would pass `NODE_CONTENT_MAX_BYTES`; each row is kept. */
+  skippedOversize?: string[];
   deferredLateRows?: string[];
   heldMoves?: string[];
 }): string {
@@ -172,6 +181,10 @@ export function describeSyncOutcome(result: {
     section(
       result.skippedInvalidIncludes?.map((i) => `${i.loc} (${i.code}: ${i.message})`),
       (n) => `Skipped ${n} file(s) with an invalid include tag (fix the tag; the stored node was kept as it was):`,
+    ) +
+    section(
+      result.skippedOversize,
+      (n) => `Skipped ${n} file(s), NODE_CONTENT_TOO_LARGE (the node would be over this server's size ceiling; shorten the file; the stored node was kept as it was):`,
     ) +
     section(
       result.deferredLateRows,
@@ -323,12 +336,20 @@ export async function updateNodeFromGitSync(
  */
 const syncGraphFromGithubAsSystem = async (
   graph: MemoryWithOrg,
+  /**
+   * #5015 (cor:acl:150:04) — `ownerLimitCaller`: the person whose act this sync is, for the form of the owner-limit
+   * refusal it RETURNS (`ownerLimitError`). The user from `syncMemory` and `hadron_sync_graph`; null (the default) from
+   * the push webhook and the boot sync, which have nobody to tell. What the memory stores is the no-number form either way.
+   */
+  opts: { ownerLimitCaller?: { userId: string } | null } = {},
   edgeEndpointPreflightAttempt = 0,
 ): Promise<{
   /** Configuration refused an attempt; callers must not serve an old report as this run's outcome. */
   notAttemptedReason?: SyncNotAttemptedReason;
   error?: string;
-  errorCode?: 'BAD_USER_INPUT' | typeof ENCRYPTED_GIT_SYNC_UNAVAILABLE;
+  errorCode?: 'BAD_USER_INPUT' | 'OWNER_LIMIT_REACHED' | typeof ENCRYPTED_GIT_SYNC_UNAVAILABLE;
+  /** #5015 — the owner-limit refusal in the caller's own form (its extensions), for `syncMemory` and `hadron_sync_graph` to throw. */
+  ownerLimitError?: OwnerLimitReachedError;
   /** #1789: `error` is an unexpected exception's text (driver, filesystem, git), not a typed refusal; callers must not echo it. */
   fault?: true;
   nodeCount?: number;
@@ -360,6 +381,8 @@ const syncGraphFromGithubAsSystem = async (
   skippedAttestations?: SkippedAttestation[];
   /** #2040 — files NOT synced because an include tag is malformed or cycles. */
   skippedInvalidIncludes?: SkippedInvalidInclude[];
+  /** #5019 — locs NOT synced because the node would pass `NODE_CONTENT_MAX_BYTES`; each row is kept. */
+  skippedOversize?: string[];
   /**
    * #1330 — files left for the next sync because the node they would write
    * arrived after this sync locked its rows (`loc (node <id>)`). Only while
@@ -375,6 +398,8 @@ const syncGraphFromGithubAsSystem = async (
    */
   heldMoves?: string[];
 }> => {
+  // #3571: held from before the SYNCING stamp until after the final OK/ERROR write (released in the finally below).
+  let releaseRunLock: (() => Promise<void>) | undefined;
   try {
     const graphName = graph.urn;
 
@@ -430,6 +455,10 @@ const syncGraphFromGithubAsSystem = async (
       where: { id: graph.id }, select: { isEncrypted: true },
     });
     if (encryptionState?.isEncrypted) throw new GitSyncEncryptedMemoryError();
+
+    // #3571 (ruling 0223): take the memory's sync-run lock (shared) BEFORE stamping SYNCING, so a row reads SYNCING
+    // only while an attempt holds the lock; the reconciliation of abandoned rows skips any row whose lock is held.
+    releaseRunLock = await acquireSyncRunLock(graph.id);
 
     // Update sync status to SYNCING
     await db.memory.update({
@@ -489,6 +518,7 @@ const syncGraphFromGithubAsSystem = async (
     const skippedUndeclaredRoles: SkippedUndeclaredRole[] = [];
     const skippedAttestations: SkippedAttestation[] = [];
     const skippedInvalidIncludes: SkippedInvalidInclude[] = [];
+    const skippedOversize: string[] = [];
     const deferredLateRows: string[] = [];
     const heldMoves: string[] = [];
     const reportEntries: SyncReportEntry[] = [];
@@ -564,11 +594,15 @@ const syncGraphFromGithubAsSystem = async (
     // Every accumulator restarts with the attempt: a rolled-back attempt
     // wrote nothing, so nothing it reported is true.
     embeddingWakeNeeded = false;
-    for (const acc of [writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, skippedAttestations, skippedInvalidIncludes, deferredLateRows, heldMoves, reportEntries]) {
+    for (const acc of [writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, skippedAttestations, skippedInvalidIncludes, skippedOversize, deferredLateRows, heldMoves, reportEntries]) {
       acc.length = 0;
     }
     pendingSourceMemories = [];
     correctionCheckCompleted = false;
+    // #5015 — the live nodes this attempt adds (inserts; an update never revives a tombstone) and removes (the cleanup's
+    // hard delete of live rows and of their live comment threads).
+    let liveNodesAdded = 0n;
+    let liveNodesRemoved = 0n;
     try {
       await db.$transaction(async (tx: Parameters<Parameters<typeof db.$transaction>[0]>[0]) => {
       // #4039 (B4): a conversation node whose entry condition is invalid, or reads a variable with no value at chat start,
@@ -1216,8 +1250,19 @@ const syncGraphFromGithubAsSystem = async (
           refusedRoleLocs.add(loc);
           return true;
         };
+        // #5019 (cor:dmo:060:19) — a file that would leave its node over the ceiling is skipped and named, its row kept; the
+        // run does not fail. Judged before anything is written, so it is not in the owner-limit net either.
+        const refusesSize = (prior: Node | null): boolean => {
+          const data = update.data === Prisma.DbNull ? null : update.data;
+          if (!exceedsNodeContentLimit(resultingNodeContent({ content: update.content, description: update.description, data }, prior))) return false;
+          skippedOversize.push(loc);
+          reportEntries.push({ kind: 'oversize', loc, code: 'NODE_CONTENT_TOO_LARGE' });
+          if (prior) protectedRowIds.add(prior.id);
+          refusedRoleLocs.add(loc);
+          return true;
+        };
         const refusesRole = async (prior: Node | null): Promise<boolean> =>
-          (await refusesGovernance(prior)) || refusesAttestation(prior);
+          (await refusesGovernance(prior)) || (await refusesAttestation(prior)) || refusesSize(prior);
 
         const fileId = node.id && !claimedFileIds.has(node.id) ? node.id : null;
         const byId = fileId
@@ -1422,6 +1467,7 @@ const syncGraphFromGithubAsSystem = async (
               },
               select: { id: true },
             });
+            liveNodesAdded += 1n;
             rowId = row.id;
           }
         }
@@ -1538,6 +1584,11 @@ const syncGraphFromGithubAsSystem = async (
           // #449 — PendingEdges aimed at the pruned rows: targetId is not a
           // foreign key, so the row cascade never reaches them.
           pendingSourceMemories = await deletePendingEdgesTargetingNodes(tx, pruned.map((n) => n.id));
+          // #5015 — what the hard deletes below free: the live pruned rows and their live comment threads.
+          liveNodesRemoved += BigInt(await tx.node.count({ where: { ...cleanupWhere, deletedAt: null } }));
+          liveNodesRemoved += BigInt(pruned.length
+            ? await tx.node.count({ where: { deletedAt: null, commentMeta: { targetNodeId: { in: pruned.map((n) => n.id) } } } })
+            : 0);
           // #1606 — a pruned (hard-deleted) target takes its comment threads.
           await hardDeleteThreadsOfTargets(tx, pruned.map((n) => n.id));
           await tx.node.deleteMany({ where: cleanupWhere });
@@ -1575,10 +1626,11 @@ const syncGraphFromGithubAsSystem = async (
           for (const edge of incident) {
             const beforeSource = edge.sourceId === movedRoot.id ? oldLoc : edge.source.loc;
             const beforeTarget = edge.targetId === movedRoot.id ? oldLoc : edge.target.loc;
-            if (edge.loc === deriveEdgeLoc(beforeSource, edge.name, beforeTarget)) {
-              await tx.edge.update({ where: { id: edge.id }, data: {
-                loc: deriveEdgeLoc(edge.source.loc, edge.name, edge.target.loc),
-              } });
+            // #4583: each edge keeps the spelling its loc carries, so twins do not land on one loc.
+            // #2947: an AUTHORED loc is never rewritten, even one that equals the derivation.
+            const rekeyed = edge.locAuthored ? null : rekeyDerivedEdgeLoc(edge.loc, beforeSource, edge.name, beforeTarget, edge.source.loc, edge.target.loc);
+            if (rekeyed !== null) {
+              await tx.edge.update({ where: { id: edge.id }, data: { loc: rekeyed } });
             }
           }
         }
@@ -1644,7 +1696,15 @@ const syncGraphFromGithubAsSystem = async (
           // Spec 037: the edge's identity is its loc within the source's
           // memory (= graph.id here; the source came from this repo). Derive
           // it deterministically so re-syncs are idempotent.
-          const edgeLoc = deriveEdgeLoc(edge.sourceLoc, edge.name, targetExists.loc);
+          // #4583: an edge the historical migration wrote under the other non-BMP spelling is the same edge.
+          const edgeLoc = await derivedEdgeLocForUpsert(tx, {
+            memoryId: graph.id,
+            sourceId: edgeSourceId,
+            targetId: edgeTargetId,
+            sourceLoc: edge.sourceLoc,
+            targetLoc: targetExists.loc,
+            name: edge.name,
+          });
           const edgeCondition = edge.condition ?? null;
           const edgePriority = edge.priority ?? 0;
           const conditionValidation = validateEdgeCondition(edgeCondition);
@@ -1659,6 +1719,7 @@ const syncGraphFromGithubAsSystem = async (
               sourceId: edgeSourceId,
               targetId: edgeTargetId,
               loc: edgeLoc,
+              locAuthored: false, // #2947: derived from the endpoints and name
               name: edge.name,
               description: edge.description ?? null,
               ...(edge.data != null ? { data: edge.data as Prisma.InputJsonValue } : {}),
@@ -1731,7 +1792,14 @@ const syncGraphFromGithubAsSystem = async (
               );
             }
             if (pSrc) {
-              const pLoc = p.loc ?? deriveEdgeLoc(pSrc.loc, p.name, target.loc);
+              const pLoc = p.loc ?? await derivedEdgeLocForUpsert(tx, {
+                memoryId: pSrc.memoryId,
+                sourceId: p.sourceId,
+                targetId: p.targetId,
+                sourceLoc: pSrc.loc,
+                targetLoc: target.loc,
+                name: p.name,
+              });
               const promotedEdge = await tx.edge.upsert({
                 where: { loc_memoryId: { loc: pLoc, memoryId: pSrc.memoryId } },
                 create: {
@@ -1740,6 +1808,7 @@ const syncGraphFromGithubAsSystem = async (
                   sourceId: p.sourceId,
                   targetId: p.targetId,
                   loc: pLoc,
+                  locAuthored: isAuthoredLoc(p.loc), // #2947: a loc the pending edge carried was supplied
                   name: p.name,
                   description: p.description,
                   ...(p.data != null ? { data: p.data as Prisma.InputJsonValue } : {}),
@@ -1767,6 +1836,21 @@ const syncGraphFromGithubAsSystem = async (
           }
         }
         await reconcilePendingEdgeCount(tx, graph.id);
+        // #5390 — the container parents (`conversations`, `prompts`, `prompts:<name>`) of the conversation, stage and prompt
+        // nodes this sync wrote, when an Agent system memory lacks them. After the cleanup, so a parent the repo no longer
+        // carries is put back; under the ancestor keys taken for every written loc. No `ownerRepo`: the repo does not own
+        // them, so a later sync's cleanup leaves them, as it leaves a parent made by hand. Counted in the net below.
+        const containers = await missingChatbotContainers(tx, graph.id, writtenNodes.map((w) => w.loc));
+        await createChatbotContainers(tx, graph.id, containers, 'system:github-sync');
+        liveNodesAdded += BigInt(containers.length);
+        // #5015 (cor:acl:150:04, gate ruling 7) — a sync is judged once, on its NET: the live nodes it added less those its
+        // cleanup removed. The net is known only now (the loop's skips decide which files insert), so the judgement is the
+        // last thing before the outcome is recorded; the memory row has been held FOR SHARE since the start, so the owner
+        // is the one at commit. A refusal rolls back the whole sync (cor:int:010:01): nothing it wrote commits.
+        const net = liveNodesAdded - liveNodesRemoved;
+        if (net > 0n) {
+          await requireNodeHeadroom(tx, { memoryId: graph.id, amount: net, alreadyWritten: net, caller: opts.ownerLimitCaller ?? null });
+        }
         // #1507: the graph and its outcome commit together. A metadata failure
         // must roll back the graph, never leave a falsely clean old report.
         const recordedAt = new Date();
@@ -1797,7 +1881,7 @@ const syncGraphFromGithubAsSystem = async (
         // absent would strand a resolvable PendingEdge after the target sync's
         // promotion pass already ran. Abort this transaction and rerun the
         // whole preflight so the new endpoint memory joins the stable lock set.
-        return syncGraphFromGithub(graph, edgeEndpointPreflightAttempt + 1);
+        return syncGraphFromGithub(graph, opts, edgeEndpointPreflightAttempt + 1);
       }
       throw error;
     }
@@ -1839,28 +1923,44 @@ const syncGraphFromGithubAsSystem = async (
         `Sync of "${graphName}": skipped ${skippedInvalidIncludes.length} file(s) with an invalid include tag: ${skippedInvalidIncludes.map((i) => `${i.loc} (${i.code})`).join('; ')}`,
       );
     }
+    if (skippedOversize.length > 0) {
+      console.warn(`Sync of "${graphName}": skipped ${skippedOversize.length} file(s) over the node size ceiling (NODE_CONTENT_TOO_LARGE): ${skippedOversize.join('; ')}`);
+    }
     if (heldMoves.length > 0) {
       console.warn(
         `Sync of "${graphName}": held ${heldMoves.length} move(s) whose destination's occupant could not be moved out of the way this sync: ${heldMoves.join('; ')}`,
       );
     }
-    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, skippedAttestations, skippedInvalidIncludes, deferredLateRows, heldMoves };
+    return { nodeCount: fsGraph.nodes.length, writtenNodes, skippedProtected, skippedObjectTypes, skippedUndeclaredRoles, skippedAttestations, skippedInvalidIncludes, skippedOversize, deferredLateRows, heldMoves };
   } catch (error) {
+    // #5015 — an owner-limit refusal is recorded with its code and in the form that names no owner and no number,
+    // whoever started the sync: every reader of the memory reads these fields. The caller's own form is returned.
+    if (error instanceof OwnerLimitReachedError) {
+      await db.memory.update({
+        where: { id: graph.id },
+        data: { syncStatus: 'ERROR', syncError: OWNER_LIMIT_NO_NUMBER_MESSAGE, lastSyncReport: failedSyncReport('OWNER_LIMIT_REACHED') },
+      }).catch(() => {});
+      console.warn(`Sync of "${graph.name}" refused: the owner's nodes limit (OWNER_LIMIT_REACHED)`);
+      return { error: error.message, errorCode: 'OWNER_LIMIT_REACHED' as const, ownerLimitError: error };
+    }
     // Update sync status to ERROR
     await db.memory.update({
       where: { id: graph.id },
-      data: { syncStatus: 'ERROR', syncError: (error as Error).message,
+      data: { syncStatus: 'ERROR', syncError: syncFailureText(error),
         lastSyncReport: failedSyncReport(error instanceof InvalidNodeNameError || error instanceof GitSyncUnreadableFileError ? 'BAD_USER_INPUT' : 'SYNC_FAILED') },
     }).catch(() => {});
     console.error(`Failed to sync memory "${graph.name}":`, error);
     return {
-      error: (error as Error).message,
+      error: syncFailureText(error), // #4731: no host or port from a driver or Prisma fault, in the row or the return
       ...(error instanceof InvalidNodeNameError || error instanceof GitSyncUnreadableFileError
         ? { errorCode: 'BAD_USER_INPUT' as const }
         : error instanceof GitSyncEncryptedMemoryError ? { errorCode: ENCRYPTED_GIT_SYNC_UNAVAILABLE }
           // A git failure's message is fixed and credential-free by design (execGit), so it stays a typed refusal.
           : error instanceof GitCommandError ? {} : { fault: true as const }),
     };
+  } finally {
+    // #3571: after the final status write on every path; a no-op when the attempt returned before taking it.
+    await releaseRunLock?.();
   }
 };
 

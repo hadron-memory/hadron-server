@@ -40,6 +40,9 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const SERVER_TS = join(__dirname, 'server.ts');
+// #236: the tool input shapes moved to toolShapes.ts; the audit scans both files so no text escapes it.
+const TOOL_SHAPES_TS = join(__dirname, 'toolShapes.ts');
+const readServerSources = (): string => readFileSync(SERVER_TS, 'utf8') + '\n' + readFileSync(TOOL_SHAPES_TS, 'utf8');
 
 /**
  * Strip TypeScript/JavaScript comments from source before running
@@ -91,7 +94,7 @@ export function findV1UrnLiterals(
 }
 
 describe('spec 027: MCP surface URN canonical-form audit', () => {
-  const rawSource = readFileSync(SERVER_TS, 'utf8');
+  const rawSource = readServerSources();
   const nonCommentSource = stripComments(rawSource);
 
   // ── INVERTED IN #865 ──────────────────────────────────────────────────
@@ -438,7 +441,7 @@ describe('spec 027 US3: error messages quote canonical-form recovery templates',
     // comment may legitimately name the v1 form (the migration-window note on
     // Memory.urn storage has to say pre-flip rows can still hold
     // 'hadronmemory.com::dev'). Only what ships in an error template counts.
-    const serverTs = stripComments(readFileSync(SERVER_TS, 'utf8'));
+    const serverTs = stripComments(readServerSources());
     expect(serverTs).toContain("'hadronmemory.com:dev'");
     expect(serverTs).toContain("'hrn:mem:hadronmemory.com:dev'");
     // Negative: the v1 `::` form must not come back in an error template.

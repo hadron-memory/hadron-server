@@ -168,12 +168,18 @@ describe('memory — knowledge class', () => {
         createdBy: member.id,
       },
     });
+    // The holding's RECORD is read by its creator alone (cor:cht:010:02), so a platform admin cannot audit it: it answers as
+    // missing, like another user's personal memory (#1381). The creator, who can open it, sees no org-conferred access for an org ADMIN.
     for (const subject of [member.id, orgAdmin.id]) {
-      const res = await call(subject, `hrn:memory:${holding.urn}`, asAdmin());
-      expect(res.canRead).toBe(false);
-      expect(res.canWrite).toBe(false);
-      expect(res.grants).toEqual([]);
+      await expect(call(subject, `hrn:memory:${holding.urn}`, asAdmin())).rejects.toThrow('Resource not found');
     }
+    // An org ADMIN who is not the creator cannot open it either, whoever asks about themselves.
+    await expect(call(orgAdmin.id, `hrn:memory:${holding.urn}`, ctx({ userId: orgAdmin.id, roles: ['READER'] }))).rejects.toThrow('Resource not found');
+    // The creator opens the record; the org membership they hold still confers no read or write grant of its own.
+    const own = await call(member.id, `hrn:memory:${holding.urn}`, ctx({ userId: member.id, roles: ['READER'] }));
+    expect(own.canRead).toBe(false);
+    expect(own.canWrite).toBe(false);
+    expect(own.grants).toEqual([]);
   });
 
   it('a non-member has no access — empty grants, not an error', async () => {
@@ -233,14 +239,26 @@ describe('memory — personal class (strict owner)', () => {
 
   it('a MemoryShare writer grantee gets MEMORY_SHARE write', async () => {
     const mem = await freeStandingPersonal(member.id);
+    // The row carries the org, so the grantee must be a live member (granteeShareAccess's mirror).
     await db.memoryShare.create({
-      data: { memoryId: mem.id, granteeId: stranger.id, grantorId: member.id, role: 'writer' },
+      data: { memoryId: mem.id, granteeId: orgAdmin.id, grantorId: member.id, role: 'writer' },
     });
-    const res = await call(stranger.id, `hrn:memory:${mem.urn}`, ctx({ userId: member.id, roles: ['READER'] }));
+    const res = await call(orgAdmin.id, `hrn:memory:${mem.urn}`, ctx({ userId: member.id, roles: ['READER'] }));
     expect(res.canRead).toBe(true);
     expect(res.canWrite).toBe(true);
     expect(res.grants[0].source).toBe('MEMORY_SHARE');
     expect(res.role).toBe('writer');
+  });
+
+  // #5389 (Gustav at 9f98fd9b): before, this reported a read the node gate and Query.memory refuse.
+  it('a share on an org-set personal memory to a non-member of that org grants nothing, as at the gate', async () => {
+    const mem = await freeStandingPersonal(member.id);
+    await db.memoryShare.create({
+      data: { memoryId: mem.id, granteeId: stranger.id, grantorId: member.id, role: 'writer' },
+    });
+    const res = await call(stranger.id, `hrn:memory:${mem.urn}`, ctx({ userId: member.id, roles: ['READER'] }));
+    expect(res.canRead).toBe(false);
+    expect(res.grants).toEqual([]);
   });
 
   it('the owner may audit their own personal memory', async () => {

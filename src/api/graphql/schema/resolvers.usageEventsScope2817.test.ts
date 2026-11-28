@@ -90,20 +90,20 @@ describe('#2817 item 1 — an App key is admitted', () => {
   });
 
   it('naming a memory it can read answers that memory\'s resource scope (every principal\'s events)', async () => {
-    expect(ids(await list({ memoryId: appMem.id }, asKey()))).toEqual([otherInApp]);
-    expect(ids((await page({ memoryId: appMem.urn }, asKey())).items)).toEqual([otherInApp]);
+    expect(ids(await list({ memoryRef: appMem.id }, asKey()))).toEqual([otherInApp]);
+    expect(ids((await page({ memoryRef: appMem.urn }, asKey())).items)).toEqual([otherInApp]);
   });
 
   it('an invalid window is still BAD_USER_INPUT for an App key, checked before any resource (Gloria P3-7)', async () => {
     const bad = { since: '2026-01-02T00:00:00Z', until: '2026-01-01T00:00:00Z' };
     await expect(list(bad, asKey())).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
-    await expect(page({ ...bad, memoryId: memB.id }, asKey())).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    await expect(page({ ...bad, memoryRef: memB.id }, asKey())).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   });
 
   it('naming a memory it cannot read answers MEMORY_NOT_FOUND, exactly like a missing one', async () => {
     const missingId = generateId();
-    await expect(list({ memoryId: memB.id }, asKey())).rejects.toThrow(`MEMORY_NOT_FOUND: ${memB.id}`);
-    await expect(list({ memoryId: missingId }, asKey())).rejects.toThrow(`MEMORY_NOT_FOUND: ${missingId}`);
+    await expect(list({ memoryRef: memB.id }, asKey())).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
+    await expect(list({ memoryRef: missingId }, asKey())).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
   });
 
   it('a bare loc names a resource: the key gets that loc in its readable memories, never own activity', async () => {
@@ -125,22 +125,22 @@ describe('#2817 review — what an App key\'s resource read discloses', () => {
   });
 
   it('masks other principals\' identity and the content they touched, keeping the volumes, on both fields', async () => {
-    const fromList = (await list({ memoryId: appMem.id }, asKey())).find((r: { id: string }) => r.id === identified);
-    const fromPage = (await page({ memoryId: appMem.id }, asKey())).items.find((r: { id: string }) => r.id === identified);
+    const fromList = (await list({ memoryRef: appMem.id }, asKey())).find((r: { id: string }) => r.id === identified);
+    const fromPage = (await page({ memoryRef: appMem.id }, asKey())).items.find((r: { id: string }) => r.id === identified);
     for (const row of [fromList, fromPage]) {
       expect(row).toMatchObject({ userId: null, sessionId: null, appId: null, organizationId: null, actionArgs: null, tokensIn: 7, nodeLoc: 'who', memoryId: appMem.id });
     }
   });
 
   it('keeps the App\'s own appId: that is the caller\'s own identity, not another principal\'s', async () => {
-    const row = (await list({ memoryId: appMem.id }, asKey())).find((r: { id: string }) => r.id === ownApp);
+    const row = (await list({ memoryRef: appMem.id }, asKey())).find((r: { id: string }) => r.id === ownApp);
     expect(row).toMatchObject({ appId: app.id, userId: null });
   });
 
   it('through the real schema: usageEvents and usageEventsPage answer userId null to an App key', async () => {
     const server = new ApolloServer<Context>({ typeDefs, resolvers });
     const r = await server.executeOperation(
-      { query: `query($m: ID!){ a: usageEvents(memoryId: $m){ id userId sessionId appId organizationId actionArgs } b: usageEventsPage(memoryId: $m){ items { id userId sessionId appId organizationId actionArgs } } }`, variables: { m: appMem.id } },
+      { query: `query($m: ID!){ a: usageEvents(memoryRef: $m){ id userId sessionId appId organizationId actionArgs } b: usageEventsPage(memoryRef: $m){ items { id userId sessionId appId organizationId actionArgs } } }`, variables: { m: appMem.id } },
       { contextValue: asKey() },
     );
     if (r.body.kind !== 'single') throw new Error('incremental response');
@@ -153,7 +153,7 @@ describe('#2817 review — what an App key\'s resource read discloses', () => {
   });
 
   it('a user principal\'s resource read is masked the same way, admins included (#3688, ruling 0246)', async () => {
-    const row = (await list({ memoryId: appMem.id }, ctx({ userId: me.id, roles: ['ADMIN'] }))).find((r: { id: string }) => r.id === identified);
+    const row = (await list({ memoryRef: appMem.id }, ctx({ userId: me.id, roles: ['ADMIN'] }))).find((r: { id: string }) => r.id === identified);
     expect(row).toMatchObject({ userId: null, sessionId: null, appId: null, organizationId: null, actionArgs: null, tokensIn: 7 });
   });
 
@@ -166,35 +166,35 @@ describe('#2817 review — what an App key\'s resource read discloses', () => {
   it('naming PUBLIC knowledge answers its resource scope to an App key, as its READ gate admits (Rico P3-2)', async () => {
     const pub = generateId();
     await db.usageEvent.create({ data: ev({ id: pub, userId: other.id, memoryId: pubMem.id }) });
-    const rows = await list({ memoryId: pubMem.id }, asKey());
+    const rows = await list({ memoryRef: pubMem.id }, asKey());
     expect(ids(rows)).toEqual([pub]);
     expect(rows[0].userId).toBeNull();
-    expect(ids((await page({ memoryId: pubMem.urn }, asKey())).items)).toEqual([pub]);
+    expect(ids((await page({ memoryRef: pubMem.urn }, asKey())).items)).toEqual([pub]);
   });
 
   it('naming an exact node in PUBLIC knowledge answers it like naming the memory, on both fields (Dorian P2-2)', async () => {
     const n = await db.node.create({ data: { id: generateId(), memoryId: pubMem.id, loc: 'pub-node', name: 'Pub node' } });
     const pub = generateId();
     await db.usageEvent.create({ data: { ...ev({ id: pub, userId: other.id, memoryId: pubMem.id, nodeLoc: n.loc }), nodeId: n.id } });
-    expect(ids(await list({ memoryId: pubMem.id }, asKey()))).toEqual([pub]);
-    const rows = await list({ nodeId: n.id }, asKey());
+    expect(ids(await list({ memoryRef: pubMem.id }, asKey()))).toEqual([pub]);
+    const rows = await list({ nodeRef: n.id }, asKey());
     expect(ids(rows)).toEqual([pub]);
     expect(rows[0].userId).toBeNull();
-    expect(ids((await page({ nodeId: `${pubMem.urn}:${n.loc}` }, asKey())).items)).toEqual([pub]);
+    expect(ids((await page({ nodeRef: `${pubMem.urn}:${n.loc}` }, asKey())).items)).toEqual([pub]);
   });
 
   it('naming an exact node in a memory the key cannot read still answers nothing (no widening)', async () => {
     const n = await db.node.create({ data: { id: generateId(), memoryId: memB.id, loc: 'b-node', name: 'B node' } });
     await db.usageEvent.create({ data: { ...ev({ userId: other.id, memoryId: memB.id, nodeLoc: n.loc }), nodeId: n.id } });
-    expect(await list({ nodeId: n.id }, asKey())).toEqual([]);
-    expect(await page({ nodeId: n.id }, asKey())).toEqual({ items: [], total: 0, hasMore: false });
+    expect(await list({ nodeRef: n.id }, asKey())).toEqual([]);
+    expect(await page({ nodeRef: n.id }, asKey())).toEqual({ items: [], total: 0, hasMore: false });
   });
 });
 
 describe('#2817 item 2 — missing and unreadable memories answer alike (regression)', () => {
   it('a user naming an unreadable memory and a missing one both get MEMORY_NOT_FOUND', async () => {
     for (const memoryId of [memB.id, memB.urn, generateId()]) {
-      await expect(page({ memoryId }, asMe())).rejects.toThrow(`MEMORY_NOT_FOUND: ${memoryId}`);
+      await expect(page({ memoryRef: memoryId }, asMe())).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
     }
   });
 });
@@ -213,14 +213,14 @@ describe('#2817 item 3 — no resource named is the caller\'s own activity', () 
   });
 
   it('a named memory keeps the resource scope: other principals\' events, not just mine', async () => {
-    expect(ids(await list({ memoryId: memA.id }, asMe()))).toEqual([mineInA, otherInA].sort());
+    expect(ids(await list({ memoryRef: memA.id }, asMe()))).toEqual([mineInA, otherInA].sort());
     expect(ids(await list({ loc: 'shared' }, asMe()))).toEqual([mineInA, otherInA].sort());
   });
 
   it('an empty resource scope never falls back to own activity', async () => {
     // `b-only` exists only in memB, which `me` cannot read — even though the one event there is mine.
     expect(await list({ loc: 'b-only' }, asMe())).toEqual([]);
-    expect(await list({ nodeId: 'b-only' }, asMe())).toEqual([]);
+    expect(await list({ nodeRef: 'b-only' }, asMe())).toEqual([]);
   });
 });
 
@@ -234,7 +234,7 @@ describe('#2817 — principals the change must not admit', () => {
     // An impersonation session can carry an appId (resolvers.helpers.ts getAccessibleMemoryIds), and its roles are [].
     const c = ctx({ appId: app.id, userId: me.id, roles: [], impersonation: { orgId: 'x' } as Context['impersonation'] });
     await expect(list({}, c)).rejects.toThrow('Forbidden');
-    await expect(page({ memoryId: appMem.id }, c)).rejects.toThrow('Forbidden');
+    await expect(page({ memoryRef: appMem.id }, c)).rejects.toThrow('Forbidden');
   });
 });
 
@@ -242,7 +242,7 @@ describe('#2817 review — the App-key admission keys on the key itself (Gloria 
   it('an App context with no user but no hdr_app_ key keeps the READER gate', async () => {
     const c = ctx({ appId: app.id, roles: [] });
     await expect(list({}, c)).rejects.toThrow('Forbidden');
-    await expect(page({ memoryId: appMem.id }, c)).rejects.toThrow('Forbidden');
+    await expect(page({ memoryRef: appMem.id }, c)).rejects.toThrow('Forbidden');
   });
 });
 

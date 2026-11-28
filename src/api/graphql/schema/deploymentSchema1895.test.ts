@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { buildSchema, graphql, printSchema } from 'graphql';
+import { buildSchema, graphql, printSchema, validateSchema } from 'graphql';
 import { deploymentSchema } from './deploymentSchema.js';
 import { signingSurfacePolicy } from '../../../lib/signing/surface.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
@@ -20,6 +20,10 @@ describe('#1895 off-state discovery and execution', () => {
     expect(signingSurfacePolicy()).toEqual({ signing: false, registration: false });
     const surface = deploymentSchema();
     const schema = buildSchema(surface.typeDefs);
+    expect(validateSchema(schema)).toEqual([]);
+    expect(schema.getType('SecretChangeRequest')).toBeUndefined();
+    expect(schema.getQueryType()?.getFields()).not.toHaveProperty('secretChangeRequest');
+    expect(surface.resolvers.Query).not.toHaveProperty('secretChangeRequest');
     const sdl = printSchema(schema);
     for (const name of [...fields, 'SigningRequest', 'SigningRequestsPage', 'NodeSignature', 'SigningRequester', 'SignatureState']) {
       expect(sdl).not.toMatch(new RegExp(`\\b${name}\\b`));

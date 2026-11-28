@@ -21,12 +21,14 @@ import { requirePersonOnlyAct, type PersonOnlyAct } from '../../../lib/auth/pers
 import { APP_KEY_SCOPES, APP_KEY_SCOPE_CATALOGUE, isAppKeyScope, type AppKeyScopeName } from '../../../lib/appKeyScopes/scopes.js';
 import { generateId } from '../../../lib/id.js';
 import { HOST_ID_PATTERN } from '../../../lib/agentTasks/hosts.js';
-import { appKeyHostUses } from './resolvers.hostOperation.js';
+import { appKeyHostUses, appKeyHostUsesPage } from './resolvers.hostOperation.js';
 import { type ActAdmission, type ActInstruction } from '../../../lib/auth/instructedAct.js';
 import { admitAppManagement, requireInstructedActKeepingRuns, readActInstruction, callerIsWorkerSession, lockCallerSession } from './resolvers.instruction.js';
 import { appendCredentialInstructionEvent } from '../../../lib/agentTasks/events.js';
+import { isLiveTeamHost } from '../../../lib/hostOperations/teamHosts.js';
 
-const keyNotFound = (id: string) => taskError('APP_KEY_NOT_FOUND', 'App key not found.', { id });
+/** #5225: the code only; the caller's id is not relayed (cor:api:140:01). */
+const keyNotFound = (_id: string) => taskError('APP_KEY_NOT_FOUND', 'App key not found.');
 const scopeForbidden = () => taskError('FORBIDDEN', 'Only whoever manages this App can change what its keys may do.');
 
 /** The key and its App as the caller may see them: a key of an App they do not participate in does not exist. */
@@ -65,7 +67,7 @@ async function changeScope(
   if (revoke && await callerIsWorkerSession(ctx)) await admitAppManagement(ctx, app, scopeForbidden, revoke.instruction);
   requireWritable(ctx, app);
   if (!isAppKeyScope(scope)) {
-    throw new GraphQLError(`Unknown scope "${scope}". The scopes are: ${APP_KEY_SCOPES.join(', ')}.`, { extensions: { code: 'BAD_USER_INPUT' } });
+    throw new GraphQLError(`Unknown scope. The scopes are: ${APP_KEY_SCOPES.join(', ')}.`, { extensions: { code: 'BAD_USER_INPUT' } });
   }
   if (hostId !== undefined) checkHostArg(scope, hostId);
   await inTaskWriteTx(ctx, app, actor, () => keyNotFound(id), async (tx, txCtx, fresh) => {
@@ -94,15 +96,13 @@ export const appKeyScopeMutations = {
   grantAppKeyScope: (_: unknown, a: { id: string; scope: string; hostId?: string | null }, ctx: Context) =>
     changeScope(ctx, a.id, a.scope, async (tx, keyId, scope, userId) => {
       const hostId = APP_KEY_SCOPE_CATALOGUE[scope].requiresHostId ? a.hostId!.trim() : null;
-      // One live row per key and scope: granting again changes nothing, and keeps the first grant's record.
-      const have = await tx.appKeyScope.findFirst({ where: { appKeyId: keyId, scope, revokedAt: null }, select: { id: true, hostId: true } });
-      if (have && have.hostId !== hostId) {
-        throw taskError(
-          'APP_KEY_SCOPE_HOST_CONFLICT',
-          `This key already operates as host ${have.hostId}. A host key reaches one host: revoke host:operate first, or use another key.`,
-        );
+      // #5259: a key operates only as a host joined to its App (hrn:node:hadronmemory.com:specs:cor:agt:070:01, Proposed).
+      // The App's anchor is held exclusive, as joining and removing a host hold it, so the row cannot change under this.
+      if (hostId !== null) {
+        const { appId } = await tx.appKey.findUniqueOrThrow({ where: { id: keyId }, select: { appId: true } });
+        if (!(await isLiveTeamHost(tx, appId, hostId))) throw hostNotFound();
       }
-      if (!have) await tx.appKeyScope.create({ data: { id: generateId(), appKeyId: keyId, scope, grantedByUserId: userId, hostId } });
+      await grantScopeRow(tx, { keyId, scope, userId, hostId });
     }, a.hostId ?? null, 'grant.give'),
   revokeAppKeyScope: (_: unknown, a: { id: string; scope: string; instruction?: ActInstruction | null }, ctx: Context) =>
     changeScope(ctx, a.id, a.scope, async (tx, keyId, scope, userId) => {
@@ -113,6 +113,28 @@ export const appKeyScopeMutations = {
       return ended.count > 0;
     }, undefined, undefined, { instruction: a.instruction }),
 };
+
+/** #5259: the host has no live record in the App. The code only; the caller's host id is not relayed (#5168). */
+export const hostNotFound = () => taskError('HOST_NOT_FOUND', 'Host not found.');
+
+/**
+ * #5259: the one writer of a scope grant, shared by `grantAppKeyScope` and `joinAgentTeamHost`, run after the door's
+ * gate. One live row per key and scope: granting again changes nothing, and keeps the first grant's record. A key
+ * operates as one host at a time (APP_KEY_SCOPE_HOST_CONFLICT).
+ */
+export async function grantScopeRow(
+  tx: Prisma.TransactionClient,
+  a: { keyId: string; scope: AppKeyScopeName; userId: string; hostId: string | null },
+): Promise<void> {
+  const have = await tx.appKeyScope.findFirst({ where: { appKeyId: a.keyId, scope: a.scope, revokedAt: null }, select: { id: true, hostId: true } });
+  if (have && have.hostId !== a.hostId) {
+    throw taskError(
+      'APP_KEY_SCOPE_HOST_CONFLICT',
+      `This key already operates as host ${have.hostId}. A host key reaches one host: revoke host:operate first, or use another key.`,
+    );
+  }
+  if (!have) await tx.appKeyScope.create({ data: { id: generateId(), appKeyId: a.keyId, scope: a.scope, grantedByUserId: a.userId, hostId: a.hostId } });
+}
 
 /**
  * #1709: host:operate names exactly one host (cor:agt:070:04); no other scope takes one. #4489: the rule is read from
@@ -144,6 +166,7 @@ export const appKeyScopeFieldResolvers = {
     },
     /** #1709 — what the key did as a host (cor:agt:070:07). Gated the same way, for the same reason. */
     hostUses: (key: { id: string; appId: string }, a: { first?: number | null }, ctx: Context) => appKeyHostUses(key, a, ctx),
+    hostUsesPage: (key: { id: string; appId: string }, a: { limit?: number | null; offset?: number | null }, ctx: Context) => appKeyHostUsesPage(key, a, ctx),
   },
   AppKeyScope: {
     grantedBy: (s: { grantedByUserId: string }) => s.grantedByUserId,

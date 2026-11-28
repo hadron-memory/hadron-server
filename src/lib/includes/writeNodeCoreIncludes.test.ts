@@ -18,9 +18,9 @@ let admin: { id: string };
 const as = (): Context => ({ db, userId: admin.id, roles: [] });
 const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknown, c: Context) => Promise<any>>;
 const create = (loc: string, content: string) =>
-  M.createNode(null, { input: { memoryId, loc, name: loc, abstract: loc, content } }, as());
+  M.createNode(null, { input: { memoryRef: memoryId, loc, name: loc, abstract: loc, content } }, as());
 const update = (loc: string, content: string, extra: Record<string, unknown> = {}) =>
-  M.updateNode(null, { input: { memoryId, loc, content, ...extra } }, as());
+  M.updateNode(null, { input: { memoryRef: memoryId, loc, content, ...extra } }, as());
 const code = async (p: Promise<unknown>) => {
   try { await p; return 'NO_ERROR'; } catch (e: any) { return String(e.extensions?.code ?? e.message); }
 };
@@ -60,7 +60,7 @@ describe('include tags through createNode / updateNode (#2040)', () => {
   it('keeps derived edges when the write passes inline edges', async () => {
     await create('b', 'B'); await create('c', 'C');
     await create('a', '{{> b}}');
-    await update('a', '{{> b}}', { edges: [{ name: 'see', targetId: 'c' }] });
+    await update('a', '{{> b}}', { edges: [{ name: 'see', targetRef: 'c' }] });
     expect((await includeEdges('a')).map(e => e.target.loc)).toEqual(['b']);
     expect(await db.edge.count({ where: { source: { memoryId, loc: 'a' }, governedKind: null } })).toBe(1);
   });
@@ -176,7 +176,7 @@ describe('include tags through createNode / updateNode (#2040)', () => {
 
 describe('searchReplaceInNodes (#2040)', () => {
   const replace = (nodeIds: string[], oldText: string, newText: string) =>
-    M.searchReplaceInNodes(null, { input: { nodeIds, fields: ['content'], oldText, newText, dryRun: false } }, as());
+    M.searchReplaceInNodes(null, { input: { nodeRefs: nodeIds, fields: ['content'], oldText, newText, dryRun: false } }, as());
   const idOf = async (loc: string) => (await db.node.findFirstOrThrow({ where: { memoryId, loc } })).id;
 
   it('derives edges for a rewritten node', async () => {
@@ -209,7 +209,7 @@ describe('mergeNodes and restoreNodeRevision (#2040)', () => {
     await update('b', '{{> a}}');
     const a = await db.node.findFirstOrThrow({ where: { memoryId, loc: 'a' } });
     const v1 = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: a.id, content: 'v1 {{> b}}' } });
-    expect(await code(M.restoreNodeRevision(null, { revisionId: v1.id }, as()))).toBe('INCLUDE_CYCLE');
+    expect(await code(M.restoreNodeRevision(null, { nodeRevRef: v1.id }, as()))).toBe('INCLUDE_CYCLE');
     expect((await db.node.findUniqueOrThrow({ where: { id: a.id } })).content).toBe('v2 plain');
   });
 });

@@ -83,7 +83,7 @@ describe('updateNode snapshot capture (#620)', () => {
       resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>
     ).updateTaskNode(
       {},
-      { input: { id: n.id, content: 'v2 body', tags: ['a', 'b'], reason: 'tighten wording' } },
+      { input: { ref: n.id, content: 'v2 body', tags: ['a', 'b'], reason: 'tighten wording' } },
       ctx(),
     );
 
@@ -117,7 +117,7 @@ describe('updateNode snapshot capture (#620)', () => {
     const n = await makeNode('same', { content: 'stable', description: 'd' });
     await resolvers.Mutation.updateNode(
       {},
-      { input: { id: n.id, content: 'stable', description: 'd2' } } as never,
+      { input: { ref: n.id, content: 'stable', description: 'd2' } } as never,
       ctx(),
     );
     const [v] = await db.nodeRevision.findMany({ where: { nodeId: n.id } });
@@ -149,7 +149,7 @@ describe('#1323 current revision contract', () => {
     const n = await makeNode('revision-owner-repo-only', { ownerRepo: 'before/repo' });
     const updated = await resolvers.Mutation.updateNode(
       {},
-      { input: { id: n.id, ownerRepo: 'after/repo' } } as never,
+      { input: { ref: n.id, ownerRepo: 'after/repo' } } as never,
       ctx(),
     );
 
@@ -203,7 +203,7 @@ describe('#1323 current revision contract', () => {
 
     const updated = await resolvers.Mutation.updateNode(
       {},
-      { input: { id: withHistory.id, content: 'next live' } } as never,
+      { input: { ref: withHistory.id, content: 'next live' } } as never,
       ctx(),
     );
     expect(updated.revSeq).toBe(3);
@@ -220,7 +220,7 @@ describe('#1323 current revision contract', () => {
 
     const updated = await resolvers.Mutation.updateNode(
       {},
-      { input: { id: n.id, content: 'v2' } } as never,
+      { input: { ref: n.id, content: 'v2' } } as never,
       ctx(),
     );
     expect(await resolvers.Node.revision(updated as never, {}, ctx())).toBe(2);
@@ -233,8 +233,8 @@ describe('#1323 current revision contract', () => {
     await resolvers.Node.revision(n as never, {}, ctx());
 
     await Promise.all([
-      resolvers.Mutation.updateNode({}, { input: { id: n.id, content: 'v2-a' } } as never, ctx()),
-      resolvers.Mutation.updateNode({}, { input: { id: n.id, content: 'v2-b' } } as never, ctx()),
+      resolvers.Mutation.updateNode({}, { input: { ref: n.id, content: 'v2-a' } } as never, ctx()),
+      resolvers.Mutation.updateNode({}, { input: { ref: n.id, content: 'v2-b' } } as never, ctx()),
     ]);
 
     const live = await db.node.findUniqueOrThrow({ where: { id: n.id } });
@@ -266,7 +266,7 @@ describe('#1323 current revision contract', () => {
 
     const result = await resolvers.Query.findNodes(
       {},
-      { filter: { memoryIds: [memory.id] } },
+      { filter: { memoryRefs: [memory.id] } },
       ctx(),
     );
     const hit = result.hits.find((candidate) => candidate.node.id === n.id)!;
@@ -294,12 +294,12 @@ describe('restoreNodeRevision round-trip (#620)', () => {
     });
     await resolvers.Mutation.updateNode(
       {},
-      { input: { id: n.id, content: 'v2', properties: { p: 2 }, data: { d: 2 }, seq: 9 } } as never,
+      { input: { ref: n.id, content: 'v2', properties: { p: 2 }, data: { d: 2 }, seq: 9 } } as never,
       ctx(),
     );
     const [v1snap] = await db.nodeRevision.findMany({ where: { nodeId: n.id } });
 
-    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: v1snap.id }, ctx());
+    await resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: v1snap.id }, ctx());
 
     const restored = await db.node.findUniqueOrThrow({ where: { id: n.id } });
     expect(restored.content).toBe('v1');
@@ -336,7 +336,7 @@ describe('restoreNodeRevision round-trip (#620)', () => {
       },
     });
 
-    await resolvers.Mutation.restoreNodeRevision({}, { revisionId: legacy.id }, ctx());
+    await resolvers.Mutation.restoreNodeRevision({}, { nodeRevRef: legacy.id }, ctx());
 
     const restored = await db.node.findUniqueOrThrow({ where: { id: n.id } });
     // Captured fields restore…
@@ -355,32 +355,32 @@ describe('updateNodeRevision (#620 revLabel)', () => {
 
   beforeEach(async () => {
     const n = await makeNode('lbl', { content: 'v1' });
-    await resolvers.Mutation.updateNode({}, { input: { id: n.id, content: 'v2' } } as never, ctx());
+    await resolvers.Mutation.updateNode({}, { input: { ref: n.id, content: 'v2' } } as never, ctx());
     const [v] = await db.nodeRevision.findMany({ where: { nodeId: n.id } });
     revisionId = v.id;
   });
 
   it('sets and clears the label', async () => {
     const labeled = await resolvers.Mutation.updateNodeRevision(
-      {}, { revisionId, revLabel: 'the good one' }, ctx(),
+      {}, { nodeRevRef: revisionId, revLabel: 'the good one' }, ctx(),
     );
     expect(labeled.revLabel).toBe('the good one');
 
     const cleared = await resolvers.Mutation.updateNodeRevision(
-      {}, { revisionId, revLabel: null }, ctx(),
+      {}, { nodeRevRef: revisionId, revLabel: null }, ctx(),
     );
     expect(cleared.revLabel).toBeNull();
   });
 
   it('omitting revLabel preserves the existing label (omit-means-preserve)', async () => {
-    await resolvers.Mutation.updateNodeRevision({}, { revisionId, revLabel: 'keep me' }, ctx());
-    const untouched = await resolvers.Mutation.updateNodeRevision({}, { revisionId }, ctx());
+    await resolvers.Mutation.updateNodeRevision({}, { nodeRevRef: revisionId, revLabel: 'keep me' }, ctx());
+    const untouched = await resolvers.Mutation.updateNodeRevision({}, { nodeRevRef: revisionId }, ctx());
     expect(untouched.revLabel).toBe('keep me');
   });
 
   it('rejects a label over the 500-char cap', async () => {
     await expect(
-      resolvers.Mutation.updateNodeRevision({}, { revisionId, revLabel: 'x'.repeat(501) }, ctx()),
+      resolvers.Mutation.updateNodeRevision({}, { nodeRevRef: revisionId, revLabel: 'x'.repeat(501) }, ctx()),
     ).rejects.toThrow('500-character cap');
   });
 
@@ -388,7 +388,7 @@ describe('updateNodeRevision (#620 revLabel)', () => {
     const revision = await db.nodeRevision.findUniqueOrThrow({ where: { id: revisionId } });
     await db.node.update({ where: { id: revision.nodeId }, data: { deletedAt: new Date() } });
     await expect(
-      resolvers.Mutation.updateNodeRevision({}, { revisionId, revLabel: 'x' }, ctx()),
+      resolvers.Mutation.updateNodeRevision({}, { nodeRevRef: revisionId, revLabel: 'x' }, ctx()),
     ).rejects.toThrow('Node revision not found');
   });
 
@@ -415,15 +415,15 @@ describe('updateNodeRevision (#620 revLabel)', () => {
     // org role, but no read on the other org's memory.
     await expect(
       resolvers.Mutation.updateNodeRevision(
-        {}, { revisionId: secretSnap.id, revLabel: 'x' },
+        {}, { nodeRevRef: secretSnap.id, revLabel: 'x' },
         { db, roles: [], userId: admin.id } as never,
       ),
     ).rejects.toThrow('Node revision not found');
   });
 
-  it('throws NOT_FOUND for an unknown revisionId', async () => {
+  it('throws NOT_FOUND for an unknown nodeRevRef', async () => {
     await expect(
-      resolvers.Mutation.updateNodeRevision({}, { revisionId: 'nope', revLabel: 'x' }, ctx()),
+      resolvers.Mutation.updateNodeRevision({}, { nodeRevRef: 'nope', revLabel: 'x' }, ctx()),
     ).rejects.toThrow('Node revision not found');
   });
 
@@ -433,7 +433,7 @@ describe('updateNodeRevision (#620 revLabel)', () => {
     });
     await expect(
       resolvers.Mutation.updateNodeRevision(
-        {}, { revisionId, revLabel: 'x' }, ctx({ roles: ['READER'], userId: outsider.id }),
+        {}, { nodeRevRef: revisionId, revLabel: 'x' }, ctx({ roles: ['READER'], userId: outsider.id }),
       ),
     ).rejects.toThrow();
   });

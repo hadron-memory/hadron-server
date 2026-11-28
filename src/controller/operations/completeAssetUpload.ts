@@ -12,6 +12,7 @@
  * Per FR-014: encrypts `storage_key` at rest for encrypted memories.
  */
 
+import { assetLimitCaller, memoryOwnerRef, requireAssetBytesHeadroom } from '../../lib/asset/ownerBytes.js';
 import type { Asset, PrismaClient } from '../../generated/prisma/index.js';
 import { consumeUpload } from '../../lib/asset/uploadRegistry.js';
 import { logAssetEvent } from '../../lib/asset/audit.js';
@@ -21,7 +22,7 @@ import {
   deleteObject,
   readObjectPrefix,
   copyObject,
-} from '../../integrations/r2/client.js';
+} from '../../integrations/objectstore/index.js';
 import {
   verifyDeclaredContentType,
   MAGIC_BYTES_WINDOW,
@@ -183,6 +184,9 @@ export async function completeAssetUpload(
         }
         storedStorageKey = encryptStorageKeyForMemory(entry.storageKey, { isEncrypted: true }, key);
       }
+      // #5017: the owner's file-bytes cap, judged again here under the owner-limit lock and before the row: two uploads begun under
+      // the cap complete one after the other, and the second is refused. The catch below deletes the promoted and staging objects.
+      await requireAssetBytesHeadroom(tx, memoryOwnerRef(memory), entry.expectedSizeBytes, assetLimitCaller(caller));
       return tx.asset.create({
         data: {
           id: entry.assetId,

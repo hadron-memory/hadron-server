@@ -53,16 +53,17 @@ beforeEach(async () => {
   rook = await worker('Rook');
 });
 
-type Ev = { id: string; acknowledgedAt: string | null; escalationEndedAt: string | null };
+type Ev = { id: string; acknowledgedAt: string | null; escalationEndedAt: string | null; type?: string };
 async function events(args = ''): Promise<Ev[]> {
   const r = await server.executeOperation(
-    { query: `{ agentTeamEvents(appRef: "${app.id}", alarmsOnly: true ${args}) { id acknowledgedAt escalationEndedAt } }` },
+    { query: `{ agentTeamEvents(appRef: "${app.id}", alarmsOnly: true ${args}) { id acknowledgedAt escalationEndedAt type } }` },
     { contextValue: ctx(admin.id) },
   );
   if (r.body.kind !== 'single') throw new Error('single response required');
   const s = r.body.singleResult;
   if (s.errors) throw new Error(JSON.stringify(s.errors));
-  return (s.data as any).agentTeamEvents;
+  // #4531: these pins are about the stall rules' alarms; an App with queued work and nobody driven also raises team.dark.
+  return ((s.data as any).agentTeamEvents as { type: string }[]).filter((e) => e.type !== 'team.dark') as any;
 }
 const inEffect = async () => (await events('alarmsInEffect: true')).map((e) => e.id);
 const record = (hhmm: string) => recordEndedEscalations(db, at(hhmm));

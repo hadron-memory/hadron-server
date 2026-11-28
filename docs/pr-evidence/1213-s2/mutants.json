@@ -1,0 +1,97 @@
+[
+  {
+    "mutant": "remove-participation",
+    "exit": 1,
+    "killed": true
+  },
+  {
+    "mutant": "truthiness",
+    "exit": 1,
+    "killed": true
+  },
+  {
+    "mutant": "unconditional",
+    "exit": 1,
+    "killed": true
+  },
+  {
+    "mutant": "omit-kind",
+    "exit": 1,
+    "killed": true
+  },
+  {
+    "mutant": "omit-create",
+    "exit": 1,
+    "killed": true
+  },
+  {
+    "mutant": "new-state-member",
+    "exit": 1,
+    "killed": true
+  },
+  {
+    "mutant": "omit-clone-memory",
+    "exit": 1,
+    "killed": true
+  },
+  {
+    "mutant": "omit-task-entry",
+    "exit": 1,
+    "killed": true
+  },
+  {
+    "mutant": "omit-late-set-guard",
+    "exit": 1,
+    "killed": true
+  },
+  {
+    "mutant": "omit-extract",
+    "exit": 1,
+    "killed": true
+  },
+  {
+    "mutant": "omit-clone-node",
+    "exit": 1,
+    "killed": true
+  },
+  {
+    "mutant": "omit-restore",
+    "exit": 1,
+    "killed": true
+  },
+  {
+    "mutant": "omit-merge-node",
+    "exit": 1,
+    "killed": true
+  },
+  {
+    "mutant": "omit-graphql-move",
+    "exit": 1,
+    "killed": true
+  },
+  {
+    "mutant": "omit-mcp-source",
+    "exit": 1,
+    "killed": true
+  },
+  {
+    "mutant": "omit-relocate-entry",
+    "exit": 1,
+    "killed": true
+  },
+  {
+    "mutant": "omit-role-branch",
+    "exit": 1,
+    "killed": true
+  },
+  {
+    "mutant": "omit-runnable-branch",
+    "exit": 1,
+    "killed": true
+  },
+  {
+    "mutant": "stale-existing-decision",
+    "exit": 1,
+    "killed": true
+  }
+]

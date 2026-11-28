@@ -17,7 +17,11 @@ export function isRunPrincipal(auth: { clientId?: string | null }): boolean {
 }
 
 /** One definition of the authority carried by a headless activation or setup. */
-export function runAuthContext(run: { id: string; appId: string; userId: string | null; organizationId: string }): import('../../middleware/auth.js').AuthContext {
-  return { limiterIdentity: internalRateIdentity(run.appId), appId: run.appId, userId: run.userId ?? undefined, organizationId: run.organizationId,
+/**
+ * #5077: a run of an App a person owns has no organization; its principal then carries none, as that App's key does
+ * (`organizationId` undefined, never null). No memory gate filters by the principal's own organization.
+ */
+export function runAuthContext(run: { id: string; appId: string; userId: string | null; organizationId: string | null }): import('../../middleware/auth.js').AuthContext {
+  return { limiterIdentity: internalRateIdentity(run.appId), appId: run.appId, userId: run.userId ?? undefined, organizationId: run.organizationId ?? undefined,
     clientId: `${RUN_CLIENT_PREFIX}${run.id}`, roles: [] };
 }

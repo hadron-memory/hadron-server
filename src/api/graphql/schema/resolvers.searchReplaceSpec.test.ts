@@ -10,6 +10,7 @@ import { decryptNodeFieldsWithKey } from '../../../lib/nodeCrypto.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
+import { encryptWithSecret } from '../../../test/encryptMemoryWithSecret.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -34,7 +35,7 @@ const call = (input: Record<string, unknown>) => resolvers.Mutation.searchReplac
 );
 const request = (nodeIds: string[], rest: Record<string, unknown> = {}) => ({
   memoryRef: draft.id,
-  nodeIds,
+  nodeRefs: nodeIds,
   oldText: 'cat',
   newText: 'dog',
   fields: ['content'],
@@ -110,10 +111,18 @@ describe('searchReplaceInSpecNodes', () => {
       .rejects.toMatchObject({ extensions: { code: 'SEARCH_REPLACE_PLAN_STALE' } });
     expect((await db.node.findUniqueOrThrow({ where: { id: spec.id } })).content).toBe('cat revised');
 
-    // Minting is not exposed by #1451 yet; flip only this disposable fixture.
-    await db.memory.update({ where: { id: draft.id }, data: { corpusDraft: false } });
-    await expect(call(request([spec.id], { dryRun: false, expectedPlan: preview.plan })))
+    // #5088 F8: the first plan is already stale after the content change, so judging the mint against it proves
+    // nothing. Take a FRESH preview of the revised content (it applies, so the only thing that can stale it now is
+    // the mint), then mint, then assert stale.
+    // (The direct content write left unrevisioned drift; a canonical raw read reconciles it, as the drift test below does.)
+    await resolvers.Query.node({}, { ref: spec.id, raw: true }, ctx());
+    const fresh = await call(request([spec.id]));
+    expect(fresh).toMatchObject({ dryRun: true, nodesChanged: 1 });
+    // Minting is not exposed by #1451 yet; mint only this disposable fixture's node.
+    await db.node.update({ where: { id: spec.id }, data: { mintedAt: new Date(), mintedByInfo: 'test' } });
+    await expect(call(request([spec.id], { dryRun: false, expectedPlan: fresh.plan })))
       .rejects.toMatchObject({ extensions: { code: 'SEARCH_REPLACE_PLAN_STALE' } });
+    expect((await db.node.findUniqueOrThrow({ where: { id: spec.id } })).content).toBe('cat revised');
   });
 
   it('keeps drifted previews read-only and recovers through a canonical node read', async () => {
@@ -265,7 +274,7 @@ describe('searchReplaceInSpecNodes', () => {
     await expect(call(request([outside.id], { memoryRef: minted.id })))
       .rejects.toMatchObject({ extensions: { code: 'SEARCH_REPLACE_NOT_DRAFT' } });
     const generic = await resolvers.Mutation.searchReplaceInNodes(null, {
-      input: { nodeIds: [spec.id], oldText: 'cat', newText: 'dog', fields: ['content'], dryRun: true },
+      input: { nodeRefs: [spec.id], oldText: 'cat', newText: 'dog', fields: ['content'], dryRun: true },
     }, ctx());
     expect(generic).toMatchObject({ nodesSelected: 1, nodesScanned: 0, nodesSkipped: 1 });
   });
@@ -350,7 +359,7 @@ describe('searchReplaceInSpecNodes', () => {
     }, ctx());
     const spec = await node('pas:050:01', { abstract: 'cat summary' }, privateDraft.id);
     const dataKey = Buffer.alloc(32, 9).toString('base64');
-    await resolvers.Mutation.encryptMemory(null, { memoryRef: privateDraft.id, dataKey }, ctx());
+    await encryptWithSecret(null, { memoryRef: privateDraft.id, dataKey }, ctx());
     const key = parseDataKey(dataKey);
     sessionKeyCache.set('spec-replace-test', privateDraft.id, key);
 
@@ -380,7 +389,7 @@ describe('searchReplaceInSpecNodes', () => {
       orgRef: org.id, name: 'locked-draft', memoryClass: 'private', draftCorpus: true,
     }, ctx());
     const spec = await node('pas:051:01', {}, privateDraft.id);
-    await resolvers.Mutation.encryptMemory(null, {
+    await encryptWithSecret(null, {
       memoryRef: privateDraft.id, dataKey: Buffer.alloc(32, 10).toString('base64'),
     }, ctx());
     sessionKeyCache.clear();

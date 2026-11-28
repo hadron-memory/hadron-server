@@ -46,16 +46,16 @@ describe('#1300 — an org OWNER with default platform roles', () => {
   });
 
   it('can create spec nodes through the spec door', async () => {
-    const parent = await M.createSpecNode({}, { input: { memoryId, loc: 'app:onb:010', name: 'feature', role: 'spec' } }, await ownerCtx());
+    const parent = await M.createSpecNode({}, { input: { memoryRef: memoryId, loc: 'app:onb:010', name: 'feature', role: 'spec' } }, await ownerCtx());
     expect(parent.id).toBeTruthy();
   });
 
   it('FIXED (Q1, Holger 2026-09-24): createEdge / updateEdge / deleteEdge work for her, spec or plain nodes', async () => {
     const c = await ownerCtx();
-    const parent = await M.createSpecNode({}, { input: { memoryId, loc: 'app:onb:010', name: 'feature', role: 'spec' } }, c);
-    const child = await M.createSpecNode({}, { input: { memoryId, loc: 'app:onb:010:02', name: 'rule', role: 'spec' } }, c);
-    const plainA = await M.createNode({}, { input: { memoryId, loc: 'notes:a', name: 'a' } }, c);
-    const plainB = await M.createNode({}, { input: { memoryId, loc: 'notes:b', name: 'b' } }, c);
+    const parent = await M.createSpecNode({}, { input: { memoryRef: memoryId, loc: 'app:onb:010', name: 'feature', role: 'spec' } }, c);
+    const child = await M.createSpecNode({}, { input: { memoryRef: memoryId, loc: 'app:onb:010:02', name: 'rule', role: 'spec' } }, c);
+    const plainA = await M.createNode({}, { input: { memoryRef: memoryId, loc: 'notes:a', name: 'a' } }, c);
+    const plainB = await M.createNode({}, { input: { memoryRef: memoryId, loc: 'notes:b', name: 'b' } }, c);
 
     const specEdge = await M.createEdge({}, { sourceRef: child.id, targetRef: parent.id, name: 'part-of' }, c);
     expect(specEdge).toMatchObject({ sourceId: child.id, targetId: parent.id });
@@ -75,8 +75,8 @@ describe('#1300 — an org OWNER with default platform roles', () => {
     let tgtId: string;
     beforeEach(async () => {
       const c = await ownerCtx();
-      srcId = (await M.createNode({}, { input: { memoryId, loc: 'n:src', name: 's' } }, c)).id;
-      tgtId = (await M.createNode({}, { input: { memoryId, loc: 'n:tgt', name: 't' } }, c)).id;
+      srcId = (await M.createNode({}, { input: { memoryRef: memoryId, loc: 'n:src', name: 's' } }, c)).id;
+      tgtId = (await M.createNode({}, { input: { memoryRef: memoryId, loc: 'n:tgt', name: 't' } }, c)).id;
       edgeId = (await M.createEdge({}, { sourceRef: srcId, targetRef: tgtId, name: 'rel' }, c)).id;
     });
 
@@ -167,10 +167,10 @@ describe('#1300 — an org OWNER with default platform roles', () => {
 
   it('CAN wire the edge through the spec door itself: createSpecNode with inline edges', async () => {
     const c = await ownerCtx();
-    const parent = await M.createSpecNode({}, { input: { memoryId, loc: 'app:onb:010', name: 'feature', role: 'spec' } }, c);
+    const parent = await M.createSpecNode({}, { input: { memoryRef: memoryId, loc: 'app:onb:010', name: 'feature', role: 'spec' } }, c);
     const child = await M.createSpecNode(
       {},
-      { input: { memoryId, loc: 'app:onb:010:02', name: 'rule', role: 'spec', edges: [{ targetId: parent.id, name: 'part-of' }] } },
+      { input: { memoryRef: memoryId, loc: 'app:onb:010:02', name: 'rule', role: 'spec', edges: [{ targetRef: parent.id, name: 'part-of' }] } },
       c,
     );
     const edges = await db.edge.findMany({ where: { sourceId: child.id, deletedAt: null } });
@@ -184,7 +184,7 @@ describe('#1300 — an org OWNER with default platform roles', () => {
     await expect(
       M.createSpecNode(
         {},
-        { input: { memoryId, loc: 'app:onb:010:03', name: 'rule', role: 'spec', edges: [{ targetId: 'app:onb:does-not-exist', name: 'part-of' }] } },
+        { input: { memoryRef: memoryId, loc: 'app:onb:010:03', name: 'rule', role: 'spec', edges: [{ targetRef: 'app:onb:does-not-exist', name: 'part-of' }] } },
         await ownerCtx(),
       ),
     ).rejects.toThrow(/Edge target not found/);
@@ -195,10 +195,10 @@ describe('#1300 — an org OWNER with default platform roles', () => {
     // `edges` on an update REPLACES the node's whole outgoing set, so a
     // client adding one edge must send the ones already there as well.
     const c = await ownerCtx();
-    const parent = await M.createSpecNode({}, { input: { memoryId, loc: 'app:onb:010', name: 'feature', role: 'spec' } }, c);
-    const orphan = await M.createSpecNode({}, { input: { memoryId, loc: 'app:onb:010:02', name: 'rule', role: 'spec' } }, c);
+    const parent = await M.createSpecNode({}, { input: { memoryRef: memoryId, loc: 'app:onb:010', name: 'feature', role: 'spec' } }, c);
+    const orphan = await M.createSpecNode({}, { input: { memoryRef: memoryId, loc: 'app:onb:010:02', name: 'rule', role: 'spec' } }, c);
 
-    await M.updateSpecNode({}, { input: { id: orphan.id, edges: [{ targetId: parent.id, name: 'part-of' }] } }, c);
+    await M.updateSpecNode({}, { input: { ref: orphan.id, edges: [{ targetRef: parent.id, name: 'part-of' }] } }, c);
 
     const edges = await db.edge.findMany({ where: { sourceId: orphan.id, deletedAt: null } });
     expect(edges.map((e) => [e.targetId, e.name])).toEqual([[parent.id, 'part-of']]);

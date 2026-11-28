@@ -224,10 +224,12 @@ describe('chatAiConfigChoices', () => {
   it('a non-member gets exactly the answer a missing App gets', async () => {
     const a = await Q.chatAiConfigChoices(null, { appRef: app.id }, ctx(outsider)).catch((e: any) => e);
     const b = await Q.chatAiConfigChoices(null, { appRef: generateId() }, ctx(outsider)).catch((e: any) => e);
-    const strip = (e: Error, id: string) => `${e.name}|${e.message.split(id).join('<ref>')}`;
+    // #5168: the refusal no longer quotes the ref, so the two compare whole, with nothing to strip.
+    const whole = (e: Error) => `${e.name}|${e.message}`;
     expect(a).toBeInstanceOf(Error);
     expect(a.name).toBe('AppNotFoundError');
-    expect(strip(a, app.id)).toBe(strip(b, (b.message.match(/[A-Za-z0-9]{20,}/) ?? [''])[0]));
+    expect(whole(a)).toBe(whole(b));
+    expect(a.message).not.toContain(app.id);
   });
 });
 
@@ -242,7 +244,6 @@ describe('the chat path', () => {
     const created = await M.createAgent({}, { orgRef: org.id, name: 'chat-agent', visibility: 'ORGANIZATION' }, ctx(admin, ['ADMIN']));
     chatAgent = { id: created.id, systemMemoryId: created.systemMemoryId! };
     for (const [loc, data, content] of [
-      ['conversations', null, null],
       ['conversations:main', { stageOrder: ['s1'] }, null],
       ['conversations:main:s1', {}, 'prompt main/s1'],
     ] as const) {
@@ -251,7 +252,7 @@ describe('the chat path', () => {
     await db.appAgent.create({ data: { appId: app.id, agentId: chatAgent.id } });
     await serveEveryAgent(db);
   });
-  const start = (args: Record<string, unknown>, c: Context = asMember()) => M.startChat(null, { agentRef: chatAgent.id, scope: 'shared', ...args }, c);
+  const start = (args: Record<string, unknown>, c: Context = asMember()) => M.startChat(null, { agentRef: chatAgent.id, appRef: app.id, scope: 'shared', ...args }, c);
 
   // loc-scope-ok: a count over every memory, to prove that a refused start left no chat anywhere.
   const chatCount = () => db.node.count({ where: { loc: { startsWith: 'chats:' }, nodeType: { not: 'message' }, name: { not: 'messages' } } });
@@ -327,9 +328,11 @@ describe('the chat path', () => {
       expect(await counts()).toEqual(before);
     }
     // Retain the no-App refusal leg with a lawful direct manager and no installed App.
+    // #5394: before, the manager's direct route reached the choice check and refused AiServiceConfigNotFoundError. The
+    // route is retired: the start is now refused like an unknown Agent, still before any write.
     await db.appAgent.delete({ where: { appId_agentId: { appId: app.id, agentId: chatAgent.id } } });
     const noAppBefore = await counts();
-    expect(await code(start({ scope: 'private', aiConfigChoice: claude.id }, asAdmin()))).toBe('AiServiceConfigNotFoundError');
+    expect(await code(start({ scope: 'private', aiConfigChoice: claude.id }, asAdmin()))).toBe('AgentNotFoundError');
     expect(await counts()).toEqual(noAppBefore);
     await db.appAgent.create({ data: { appId: app.id, agentId: chatAgent.id } });
     // The AppMember's own config is accepted and the cold start provisions in that App.
@@ -350,27 +353,43 @@ describe('the chat path', () => {
 
   // Rodolfo P3-2 (cor:dmo:050:10: a pin naming another App's config, a deleted one or an id that doesn't exist is refused
   // like a missing id, with nothing revealing that the config exists): a chat with no App, and a REAL org config's id.
-  it('a choice on a chat with no App is refused identically to a nonexistent id, after normalizing only the id the caller sent', async () => {
+  it('a choice on a chat with no App is refused identically to a nonexistent id, and no spelling of the id is echoed', async () => {
     // #4046: only an Agent manager may start directly without an App.
     await db.orgMember.create({ data: { userId: member.id, organizationId: org.id, role: 'ADMIN' } });
     await db.appAgent.deleteMany({ where: { agentId: chatAgent.id } });
     const orgConfig = await db.aiServiceConfig.create({ data: { organizationId: org.id, name: 'org-wide', provider: 'openai', model: 'gpt-org', apiKeyEncrypted: encryptToken(KEY), apiKeyPreview: '…3957' } });
     // The manager has no installed App, so the lazy per-user memory belongs to no App.
-    // Victor's conditions: every occurrence of the caller's exact input becomes one shared placeholder on both sides and the WHOLE
-    // serialized error is compared; and the echo is the verbatim input, never anything config-derived.
+    // Victor's conditions: the WHOLE serialized error is compared across spellings; it holds neither the caller's input (#5168)
+    // nor anything config-derived. #5227: the wire code is asserted on its own, not only inside the serialized text.
     const refusal = (id: string, run: () => Promise<unknown>) => run().then(() => null, (e: any) => {
+      expect(e.extensions?.code).toBe('AiServiceConfigNotFoundError');
       const whole = JSON.stringify({ name: e.name, ...(typeof e.toJSON === 'function' ? e.toJSON() : { message: e.message }) });
-      expect(whole).toContain(id); // the caller's own input comes back verbatim
+      expect(whole).not.toContain(id); // #5168: the caller's input is not echoed back
       for (const derived of [orgConfig.name, orgConfig.model, orgConfig.provider, orgConfig.apiKeyPreview!, KEY]) expect(whole).not.toContain(derived);
-      return whole.split(id).join('<id>');
+      return whole;
     });
     const absent = generateId();
-    const spellings = [orgConfig.id, orgConfig.id.toUpperCase(), orgConfig.id.toLowerCase(), absent]; // a spelling only the caller supplied is echoed as sent
-    const starts = await Promise.all(spellings.map(id => refusal(id, () => start({ scope: 'private', aiConfigChoice: id }))));
+    const spellings = [orgConfig.id, orgConfig.id.toUpperCase(), orgConfig.id.toLowerCase(), absent]; // no spelling is echoed (#5168)
+    // #5394: before, the manager's start with no installed App provisioned a no-App home, and the choice was refused
+    // there. That route is retired: under the named App, which no longer installs the Agent, every spelling is refused
+    // like an unknown Agent, one answer that echoes no spelling and nothing config-derived.
+    const starts = await Promise.all(spellings.map(id => start({ scope: 'private', aiConfigChoice: id }).then(() => null, (e: any) => {
+      expect(e.name).toBe('AgentNotFoundError');
+      const whole = JSON.stringify({ name: e.name, ...(typeof e.toJSON === 'function' ? e.toJSON() : { message: e.message }) });
+      expect(whole).not.toContain(id);
+      for (const derived of [orgConfig.name, orgConfig.model, orgConfig.provider, orgConfig.apiKeyPreview!, KEY]) expect(whole).not.toContain(derived);
+      return whole;
+    })));
     expect(new Set(starts).size).toBe(1);
-    expect(starts[0]).toContain('AiServiceConfigNotFoundError');
+    expect(starts[0]).not.toBeNull();
+    // #5394: the send half still holds for a no-App chat written before the route was retired. Make one the way the
+    // retired route left it (class knowledge, no App, no owner column, ORGANIZATION), from a chat started under the App.
+    await db.appAgent.create({ data: { appId: app.id, agentId: chatAgent.id } });
     const { chatId } = await start({ scope: 'private' });
-    expect((await db.memory.findUniqueOrThrow({ where: { id: (await chatNodeByLocOrThrow(db, chatId)).memoryId } })).appId).toBeNull();
+    const legacyHome = (await chatNodeByLocOrThrow(db, chatId)).memoryId;
+    await db.memory.update({ where: { id: legacyHome }, data: { class: 'knowledge', userId: null, appId: null, visibility: 'ORGANIZATION' } });
+    await db.appAgent.deleteMany({ where: { agentId: chatAgent.id } });
+    expect((await db.memory.findUniqueOrThrow({ where: { id: legacyHome } })).appId).toBeNull();
     const sends = await Promise.all(spellings.map(id => refusal(id, () => M.sendChatMessage(null, { chatId, userMessage: 'x', aiConfigChoice: id }, asMember()))));
     expect(new Set(sends).size).toBe(1);
     expect(sends[0]).toContain('AiServiceConfigNotFoundError');

@@ -35,7 +35,7 @@ const grant = (values: Record<string, unknown>, over: Record<string, unknown> = 
   user_id: null, worker_id: workerId, action: EDIT, action_values: values, max_uses: 1,
   activated_at: raw(DB_NOW), verification_kind: 'passkey', verified_by: admin.id, issuer_user_id: admin.id, expires_at: null, ...over,
 } as never);
-const edit = (id: string) => runAsActor({ workerId, agentId: null }, () => resolvers.Mutation.updateNode(null, { input: { id, content: 'edited' } }, ctx()));
+const edit = (id: string) => runAsActor({ workerId, agentId: null }, () => resolvers.Mutation.updateNode(null, { input: { ref: id, content: 'edited' } }, ctx()));
 const view = async (id: string) => (await getGrantForWorker(db, { appId, workerId }, id))!;
 const row = (id: string) => db.grant.findUniqueOrThrow({ where: { id } });
 
@@ -195,7 +195,7 @@ describe('item 2: the hour is the action\'s lifetime, read by the shared definit
 });
 
 describe('item 3: a grant ended by use or by the hour keeps its first end when the worker goes (ruling 0259)', () => {
-  const depart = async () => { await db.worker.update({ where: { id: workerId }, data: { retiredAt: new Date() } }); return db.$transaction((tx) => endHeldGrants(tx, 'worker', workerId)); };
+  const depart = async () => { await db.worker.update({ where: { id: workerId }, data: { retiredAt: new Date() } }); return db.$transaction((tx) => endHeldGrants(tx, 'worker', workerId, 'WORKER_RETIRED')); };
   it('a used grant, a grant past its hour and a spent batch get no holder_departed_at; a live one does', async () => {
     const s = await source();
     const used = await grant({ sourceNode: s.id });
@@ -238,7 +238,7 @@ describe('upgrade: a grant used before the count existed (LOCAL P2, Baloo)', () 
     expect((await db.action.findUniqueOrThrow({ where: { name: EDIT } })).maxUses).toBe(1);
     expect((await view(g)).allows).toBe(false);
     await db.worker.update({ where: { id: workerId }, data: { retiredAt: new Date() } });
-    await db.$transaction((tx) => endHeldGrants(tx, 'worker', workerId));
+    await db.$transaction((tx) => endHeldGrants(tx, 'worker', workerId, 'WORKER_RETIRED'));
     expect((await row(g)).holderDepartedAt).toBeNull();
     expect((await row(untouched)).holderDepartedAt).not.toBeNull();
     // the guard is back on after the migration statement

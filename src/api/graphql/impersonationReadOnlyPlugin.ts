@@ -27,6 +27,15 @@ import type {
 import type { ApolloServerPlugin } from '@apollo/server';
 import type { ImpersonationContext } from '../../lib/auth/impersonation.js';
 
+/**
+ * The ONE predicate for "this request is a read-only impersonation session". The mutation plugin below refuses on it,
+ * and `Memory.canWrite` (#606) answers false on it: sharing it keeps the field's promise ("a write would be allowed") in
+ * step with what this plugin actually refuses.
+ */
+export function isReadOnlyImpersonation(ctx: { impersonation?: unknown } | null | undefined): boolean {
+  return Boolean(ctx?.impersonation);
+}
+
 const ALLOWED_MUTATION_FIELDS = new Set(['stopImpersonation', '__typename']);
 
 /**
@@ -52,7 +61,7 @@ const MAX_SELECTION_DEPTH = 64;
  * (legal GraphQL) executed on a supposedly read-only session. Both PR #875
  * reviewers flagged it independently.
  */
-function topLevelFieldNames(
+export function topLevelFieldNames(
   selectionSet: SelectionSetNode,
   fragments: Map<string, FragmentDefinitionNode>,
   // Fragment names on the CURRENT path, for cycle detection. Copied on
@@ -89,7 +98,7 @@ function topLevelFieldNames(
   return names;
 }
 
-function fragmentMap(document: DocumentNode): Map<string, FragmentDefinitionNode> {
+export function fragmentMap(document: DocumentNode): Map<string, FragmentDefinitionNode> {
   const map = new Map<string, FragmentDefinitionNode>();
   for (const def of document.definitions) {
     if (def.kind === 'FragmentDefinition') map.set(def.name.value, def);
@@ -103,7 +112,7 @@ export const impersonationReadOnlyPlugin: ApolloServerPlugin<{
   async requestDidStart() {
     return {
       async didResolveOperation({ operation, document, contextValue }) {
-        if (!contextValue.impersonation) return;
+        if (!isReadOnlyImpersonation(contextValue)) return;
         const op = operation as OperationDefinitionNode | undefined;
         if (!op || op.operation !== 'mutation') return;
         const fields = topLevelFieldNames(op.selectionSet, fragmentMap(document));

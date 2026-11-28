@@ -48,10 +48,8 @@ const subsFor = (agentId: string) =>
 
 async function seedConversations(systemMemoryId: string) {
   const nodes = [
-    { loc: 'conversations', name: 'conversations' },
     { loc: 'conversations:research', name: 'research', data: { stageOrder: ['scope'], isSetup: false } },
     { loc: 'conversations:research:scope', name: 'scope', data: { promptRef: 'prompts:research:scope' } },
-    { loc: 'prompts', name: 'prompts' },
     { loc: 'prompts:research', name: 'research' },
     { loc: 'prompts:research:scope', name: 'scope', content: 'Scope the research.' },
   ];
@@ -99,53 +97,57 @@ beforeEach(async () => {
 
 describe('#1581: startChat gates the Agent before reading or licensing anything', () => {
   it('a stranger is refused as "not found": no prompt, and no license minted', async () => {
-    await expect(M.startChat(null, { agentRef: agent.id }, userCtx(stranger.id)))
+    await expect(M.startChat(null, { agentRef: agent.id, appRef: app.id }, userCtx(stranger.id)))
       .rejects.toMatchObject({ name: 'AgentNotFoundError' });
     expect(await subsFor(agent.id)).toEqual([]);
   });
 
   it('a stranger naming a victim is refused, and the victim gets no license (the reproduced exploit)', async () => {
-    await expect(M.startChat(null, { agentRef: agent.id, userId: victim.id }, userCtx(stranger.id)))
+    await expect(M.startChat(null, { agentRef: agent.id, appRef: app.id, userId: victim.id }, userCtx(stranger.id)))
       .rejects.toMatchObject({ name: 'AgentNotFoundError' });
     expect(await subsFor(agent.id)).toEqual([]);
   });
 
   it('even a user who CAN reach the Agent may not start a chat on behalf of someone else', async () => {
-    await expect(M.startChat(null, { agentRef: agent.id, userId: victim.id }, userCtx(member.id)))
+    // #5394: before, the reaching user was `member` (an org READER) with no App named. A start now runs under an App the
+    // caller takes part in, which an org READER does not, so the reaching user is the App's end user naming that App.
+    await expect(M.startChat(null, { agentRef: agent.id, appRef: app.id, userId: victim.id }, userCtx(endUser.id)))
       .rejects.toThrow(/only an App key can start a chat on behalf of another user/);
     expect(await subsFor(agent.id)).toEqual([]);
   });
 
   it('#4046: an org READER without App participation cannot start', async () => {
-    await expect(M.startChat(null, { agentRef: agent.id }, userCtx(member.id)))
+    await expect(M.startChat(null, { agentRef: agent.id, appRef: app.id }, userCtx(member.id)))
       .rejects.toMatchObject({ name: 'AgentNotFoundError' });
     expect(await subsFor(agent.id)).toEqual([]);
   });
 
   it('CONTROL: an App end user (AppMember, not an org member) reaches the Agent through the live install', async () => {
-    const out = await M.startChat(null, { agentRef: agent.id }, userCtx(endUser.id));
+    const out = await M.startChat(null, { agentRef: agent.id, appRef: app.id }, userCtx(endUser.id));
     expect(out.chatId).toMatch(/^chats:/);
     expect(await subsFor(agent.id)).toEqual([endUser.id]);
   });
 
   it('the App end user loses the path when the App is uninstalled (the license must be live)', async () => {
     await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
-    await expect(M.startChat(null, { agentRef: agent.id }, userCtx(endUser.id)))
+    await expect(M.startChat(null, { agentRef: agent.id, appRef: app.id }, userCtx(endUser.id)))
       .rejects.toMatchObject({ name: 'AgentNotFoundError' });
     expect(await subsFor(agent.id)).toEqual([]);
   });
 
   it('#4046: PUBLIC visibility does not admit an App-less non-manager start', async () => {
     await db.agent.update({ where: { id: agent.id }, data: { visibility: 'PUBLIC' } });
-    await expect(M.startChat(null, { agentRef: agent.id }, userCtx(stranger.id)))
+    await expect(M.startChat(null, { agentRef: agent.id, appRef: app.id }, userCtx(stranger.id)))
       .rejects.toMatchObject({ name: 'AgentNotFoundError' });
     expect(await subsFor(agent.id)).toEqual([]);
   });
 
   it('a chat that fails after the gate leaves no license (provisioned in the chat transaction)', async () => {
     // The Agent is reachable, but it has no conversation of this name.
-    await expect(M.startChat(null, { agentRef: agent.id, conversationName: 'nope' }, userCtx(member.id)))
-      .rejects.toThrow();
+    // #5407 review (Bindi P3): an App member (endUser), so the start passes identification and the gate and fails only
+    // at the conversation lookup; an org READER with no App membership would be refused before the gate.
+    await expect(M.startChat(null, { agentRef: agent.id, appRef: app.id, conversationName: 'nope' }, userCtx(endUser.id)))
+      .rejects.toThrow("Conversation not found in agent's system memory.");
     expect(await subsFor(agent.id)).toEqual([]);
   });
 });
@@ -244,7 +246,7 @@ describe('#1581: App-minted users through createAppUser + startAgentSession', ()
 
   async function mintedSession(appId: string, externalId: string) {
     const user = await M.createAppUser({}, { externalId }, appKey(appId));
-    const started = await M.startAgentSession({}, { agentId: agent.id, externalUserId: externalId }, appKey(appId));
+    const started = await M.startAgentSession({}, { agentRef: agent.id, externalUserId: externalId }, appKey(appId));
     const sessionId: string = started.sessionId ?? started.session?.id ?? started.id;
     return { user, sessionId };
   }
@@ -298,8 +300,8 @@ describe('#1581 review: two concurrent first chats for the same user both comple
     // #4046: this subscription-race control reaches the App as an org CONTRIBUTOR.
     await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgA.id, userId: member.id } }, data: { role: 'CONTRIBUTOR' } });
     const results = await Promise.allSettled([
-      M.startChat(null, { agentRef: agent.id }, userCtx(member.id)),
-      M.startChat(null, { agentRef: agent.id }, userCtx(member.id)),
+      M.startChat(null, { agentRef: agent.id, appRef: app.id }, userCtx(member.id)),
+      M.startChat(null, { agentRef: agent.id, appRef: app.id }, userCtx(member.id)),
     ]);
     expect(results.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled']);
     expect(await subsFor(agent.id)).toEqual([member.id]);
@@ -333,7 +335,7 @@ describe('#1585 review: a stale membership in a dead tenant\'s App does not bloc
     await db.appMember.create({ data: { appId: deadApp.id, userId: stranger.id, role: 'member' } });
     // Org deletion deliberately leaves the App row intact.
     await db.organization.update({ where: { id: deadOrg.id }, data: { deletedAt: new Date() } });
-    await expect(M.startChat(null, { agentRef: agent.id }, userCtx(stranger.id)))
+    await expect(M.startChat(null, { agentRef: agent.id, appRef: deadApp.id }, userCtx(stranger.id)))
       .rejects.toMatchObject({ name: 'AgentNotFoundError' });
     expect(await subsFor(agent.id)).toEqual([]);
   });
@@ -355,16 +357,16 @@ describe('#1585 review: the gate and the anchors agree on which Apps carry the r
   }
 
   it("Atilla's case: a dead owner's personal App carries nothing, so its member is refused (no unanchored path)", async () => {
-    await deadOwnerApp(stranger.id);
-    await expect(M.startChat(null, { agentRef: agent.id }, userCtx(stranger.id)))
+    const personal = await deadOwnerApp(stranger.id);
+    await expect(M.startChat(null, { agentRef: agent.id, appRef: personal.id }, userCtx(stranger.id)))
       .rejects.toMatchObject({ name: 'AgentNotFoundError' });
     expect(await subsFor(agent.id)).not.toContain(stranger.id);
   });
 
   it("#4046: PUBLIC visibility and a dead owner's App do not admit an App-less start", async () => {
     await db.agent.update({ where: { id: agent.id }, data: { visibility: 'PUBLIC' } });
-    await deadOwnerApp(stranger.id);
-    await expect(M.startChat(null, { agentRef: agent.id }, userCtx(stranger.id)))
+    const personal = await deadOwnerApp(stranger.id);
+    await expect(M.startChat(null, { agentRef: agent.id, appRef: personal.id }, userCtx(stranger.id)))
       .rejects.toMatchObject({ name: 'AgentNotFoundError' });
   });
 });
@@ -418,7 +420,9 @@ describe('#1585 review: a carrier App that appears after anchor selection is fen
     }, { timeout: 20_000 });
     await h1IsHeld;
 
-    const chat = M.startChat(null, { agentRef: agent.id }, userCtx(stranger.id));
+    // #5394: the start names App A (which the org ADMIN takes part in); the chat is then reachable only through App X,
+    // the carrier that appears after anchor selection, so the in-transaction coverage retry is still what is pinned.
+    const chat = M.startChat(null, { agentRef: agent.id, appRef: app.id }, userCtx(stranger.id));
     try {
       await waitForLockWaitersOfType(db, 'advisory', 1); // the chat waits on H1
       releaseH1();
@@ -456,7 +460,7 @@ describe('#1573: startChat waits for an in-flight revocation of its read right',
     await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgA.id, userId: member.id } }, data: { role: 'CONTRIBUTOR' } });
     const holder = await holdRevocation({ kind: 'org', id: orgA.id }, (tx) =>
       tx.orgMember.updateMany({ where: { organizationId: orgA.id, userId: member.id }, data: { deletedAt: new Date() } }));
-    const chat = M.startChat(null, { agentRef: agent.id }, userCtx(member.id));
+    const chat = M.startChat(null, { agentRef: agent.id, appRef: app.id }, userCtx(member.id));
     try {
       await waitForLockWaitersOfType(db, 'advisory', 1);
     } finally {
@@ -470,7 +474,7 @@ describe('#1573: startChat waits for an in-flight revocation of its read right',
   it('an App end user whose App membership is being removed is refused after the removal commits', async () => {
     const holder = await holdRevocation({ kind: 'app', id: app.id }, (tx) =>
       tx.appMember.delete({ where: { appId_userId: { appId: app.id, userId: endUser.id } } }));
-    const chat = M.startChat(null, { agentRef: agent.id }, userCtx(endUser.id));
+    const chat = M.startChat(null, { agentRef: agent.id, appRef: app.id }, userCtx(endUser.id));
     try {
       await waitForLockWaitersOfType(db, 'advisory', 1);
     } finally {

@@ -54,7 +54,7 @@ describe('#3456 S1/S2: node-less branches are listed and marked', () => {
   });
 
   it('S1: the root lists findings (no node) and ops (node-backed), each naming the memory', async () => {
-    const page = await segs({ memoryIds: [M.id], parentLoc: '' });
+    const page = await segs({ memoryRefs: [M.id], parentLoc: '' });
     expect(page.items).toEqual([
       { segment: 'findings', hasNode: false, memoryId: M.id },
       { segment: 'ops', hasNode: true, memoryId: M.id },
@@ -64,7 +64,7 @@ describe('#3456 S1/S2: node-less branches are listed and marked', () => {
   });
 
   it('S2: under findings, both children are node-backed', async () => {
-    const page = await segs({ memoryIds: [M.id], parentLoc: 'findings' });
+    const page = await segs({ memoryRefs: [M.id], parentLoc: 'findings' });
     expect(page.items).toEqual([
       { segment: 'flaky-ci', hasNode: true, memoryId: M.id },
       { segment: 'slow-db', hasNode: true, memoryId: M.id },
@@ -72,8 +72,8 @@ describe('#3456 S1/S2: node-less branches are listed and marked', () => {
   });
 
   it('lists one level only: no grandchildren, and a leaf has no segments below it', async () => {
-    expect(names(await segs({ memoryIds: [M.id], parentLoc: 'ops' }))).toEqual(['alpha']);
-    expect(names(await segs({ memoryIds: [M.id], parentLoc: 'ops:alpha' }))).toEqual([]);
+    expect(names(await segs({ memoryRefs: [M.id], parentLoc: 'ops' }))).toEqual(['alpha']);
+    expect(names(await segs({ memoryRefs: [M.id], parentLoc: 'ops:alpha' }))).toEqual([]);
   });
 });
 
@@ -84,7 +84,7 @@ describe('#3456 S3: sibling order (ruling 0217)', () => {
     await mk('ops:a');
     await mk('ops:c:x');
     await mk('ops:z', { seq: 0 });
-    const page = await segs({ memoryIds: [M.id], parentLoc: 'ops' });
+    const page = await segs({ memoryRefs: [M.id], parentLoc: 'ops' });
     expect(names(page)).toEqual(['z', 'b', 'a', 'c']);
     expect(page.items.map((i: any) => i.hasNode)).toEqual([true, true, true, false]);
   });
@@ -92,7 +92,7 @@ describe('#3456 S3: sibling order (ruling 0217)', () => {
   it('equal positions fall back to name', async () => {
     await mk('p:b', { seq: 2 });
     await mk('p:a', { seq: 2 });
-    expect(names(await segs({ memoryIds: [M.id], parentLoc: 'p' }))).toEqual(['a', 'b']);
+    expect(names(await segs({ memoryRefs: [M.id], parentLoc: 'p' }))).toEqual(['a', 'b']);
   });
 });
 
@@ -103,14 +103,14 @@ describe('#3456 S4: paging', () => {
 
   it('default page is 20, says more exists, and the continuation returns every segment exactly once', async () => {
     const seen: string[] = [];
-    let page = await segs({ memoryIds: [M.id], parentLoc: '' });
+    let page = await segs({ memoryRefs: [M.id], parentLoc: '' });
     expect(page.items.length).toBe(20);
     expect(page.hasMore).toBe(true);
     expect(page.endCursor).toEqual(expect.any(String));
     seen.push(...names(page));
     let guard = 0;
     while (page.hasMore && guard++ < 10) {
-      page = await segs({ memoryIds: [M.id], parentLoc: '', after: page.endCursor });
+      page = await segs({ memoryRefs: [M.id], parentLoc: '', after: page.endCursor });
       seen.push(...names(page));
     }
     expect(seen.length).toBe(45);
@@ -120,21 +120,21 @@ describe('#3456 S4: paging', () => {
 
   it('a limit over the cap is served at the cap, never refused; 0 and negatives become 1', async () => {
     for (let i = 0; i < 210; i++) await mk(`big${String(i).padStart(3, '0')}`);
-    expect((await segs({ memoryIds: [M.id], parentLoc: '', limit: 100000 })).items.length).toBe(200);
-    expect((await segs({ memoryIds: [M.id], parentLoc: '', limit: 0 })).items.length).toBe(1);
-    expect((await segs({ memoryIds: [M.id], parentLoc: '', limit: -5 })).items.length).toBe(1);
+    expect((await segs({ memoryRefs: [M.id], parentLoc: '', limit: 100000 })).items.length).toBe(200);
+    expect((await segs({ memoryRefs: [M.id], parentLoc: '', limit: 0 })).items.length).toBe(1);
+    expect((await segs({ memoryRefs: [M.id], parentLoc: '', limit: -5 })).items.length).toBe(1);
   });
 
   it('pages across positioned and unpositioned rows without a repeat or a skip', async () => {
     for (let i = 0; i < 6; i++) await mk(`o:s${i}`, { seq: 10 - i });
     for (let i = 0; i < 6; i++) await mk(`o:t${i}`);
     await mk('o:u:deep');
-    const all = names(await segs({ memoryIds: [M.id], parentLoc: 'o', limit: 200 }));
+    const all = names(await segs({ memoryRefs: [M.id], parentLoc: 'o', limit: 200 }));
     expect(all).toEqual(['s5', 's4', 's3', 's2', 's1', 's0', 't0', 't1', 't2', 't3', 't4', 't5', 'u']);
     const got: string[] = [];
     let after: string | null = null;
     for (let i = 0; i < 20; i++) {
-      const p: any = await segs({ memoryIds: [M.id], parentLoc: 'o', limit: 4, after });
+      const p: any = await segs({ memoryRefs: [M.id], parentLoc: 'o', limit: 4, after });
       got.push(...names(p));
       if (!p.hasMore) break;
       after = p.endCursor;
@@ -147,7 +147,7 @@ describe('#3456 S6 and the findNodes defaults', () => {
   it('S6: a branch made only of soft-deleted nodes is not listed', async () => {
     await mk('old:x', { deletedAt: new Date() });
     await mk('keep:x');
-    expect(names(await segs({ memoryIds: [M.id], parentLoc: '' }))).toEqual(['keep']);
+    expect(names(await segs({ memoryRefs: [M.id], parentLoc: '' }))).toEqual(['keep']);
   });
 
   it('a branch made only of comment or system-type nodes is not listed; a deleted node does not make hasNode true', async () => {
@@ -156,7 +156,7 @@ describe('#3456 S6 and the findNodes defaults', () => {
     await mk('h', { deletedAt: new Date() });
     await mk('h:child');
     await mk('real');
-    const page = await segs({ memoryIds: [M.id], parentLoc: '' });
+    const page = await segs({ memoryRefs: [M.id], parentLoc: '' });
     expect(page.items).toEqual([
       { segment: 'h', hasNode: false, memoryId: M.id },
       { segment: 'real', hasNode: true, memoryId: M.id },
@@ -169,20 +169,20 @@ describe('#3456 S6 and the findNodes defaults', () => {
     await mk('a_b:c');
     await mk('axb:c');
     await mk('a%b:c');
-    expect(names(await segs({ memoryIds: [M.id], parentLoc: 'findings:auth' }))).toEqual(['oauth']);
-    expect(names(await segs({ memoryIds: [M.id], parentLoc: 'a_b' }))).toEqual(['c']);
-    expect(names(await segs({ memoryIds: [M.id], parentLoc: 'a%b' }))).toEqual(['c']);
-    expect(names(await segs({ memoryIds: [M.id], parentLoc: 'a' }))).toEqual([]);
-    expect(names(await segs({ memoryIds: [M.id], parentLoc: '' })).sort()).toEqual(['a%b', 'a_b', 'axb', 'findings'].sort());
+    expect(names(await segs({ memoryRefs: [M.id], parentLoc: 'findings:auth' }))).toEqual(['oauth']);
+    expect(names(await segs({ memoryRefs: [M.id], parentLoc: 'a_b' }))).toEqual(['c']);
+    expect(names(await segs({ memoryRefs: [M.id], parentLoc: 'a%b' }))).toEqual(['c']);
+    expect(names(await segs({ memoryRefs: [M.id], parentLoc: 'a' }))).toEqual([]);
+    expect(names(await segs({ memoryRefs: [M.id], parentLoc: '' })).sort()).toEqual(['a%b', 'a_b', 'axb', 'findings'].sort());
   });
 
   it('parity: the set of top segments equals the first segments of every loc findNodes returns for the same memory', async () => {
     for (const l of ['x:1', 'x:2:3', 'y', 'z:q:r', 'a_b:c', 'plain']) await mk(l);
     await mk('gone:1', { deletedAt: new Date() });
     await mkComment('cm:1');
-    const fn = await findNodes({ filter: { memoryIds: [M.id] }, limit: 200 });
+    const fn = await findNodes({ filter: { memoryRefs: [M.id] }, limit: 200 });
     const expected = [...new Set<string>(fn.hits.map((h: any) => (h.node.loc as string).split(':')[0]))].sort();
-    expect(names(await segs({ memoryIds: [M.id], parentLoc: '', limit: 200 })).sort()).toEqual(expected);
+    expect(names(await segs({ memoryRefs: [M.id], parentLoc: '', limit: 200 })).sort()).toEqual(expected);
   });
 });
 
@@ -192,7 +192,7 @@ describe('#3456 S8: several memories', () => {
     await mk('alpha');
     await mk('notes:x', {}, M2.id);
     await mk('beta', {}, M2.id);
-    const page = await segs({ memoryIds: [M.id, M2.id], parentLoc: '', limit: 200 });
+    const page = await segs({ memoryRefs: [M.id, M2.id], parentLoc: '', limit: 200 });
     const byMem = (id: string) => page.items.filter((i: any) => i.memoryId === id).map((i: any) => [i.segment, i.hasNode]);
     expect(byMem(M.id)).toEqual([['notes', true], ['alpha', true]]);
     expect(byMem(M2.id)).toEqual([['beta', true], ['notes', false]]);
@@ -209,25 +209,25 @@ describe('#3456 S5/S7: no existence oracle, never the default scope', () => {
 
   it('S5: an unreadable memory, an empty memory and a missing one give the identical empty page', async () => {
     const empty = { items: [], hasMore: false, endCursor: null };
-    expect(await segs({ memoryIds: [M.id], parentLoc: '' }, stranger())).toEqual(empty);
-    expect(await segs({ memoryIds: [M2.id], parentLoc: '' }, stranger())).toEqual(empty);
-    expect(await segs({ memoryIds: [generateId()], parentLoc: '' }, stranger())).toEqual(empty);
-    expect(await segs({ memoryIds: ['seg-org:seg/nowhere'], parentLoc: '' }, stranger())).toEqual(empty);
-    expect(await segs({ memoryIds: [M2.id], parentLoc: '' })).toEqual(empty); // admin, empty readable memory
-    expect(await segs({ memoryIds: [M.id], parentLoc: 'no:such' })).toEqual(empty); // parent with nothing below
+    expect(await segs({ memoryRefs: [M.id], parentLoc: '' }, stranger())).toEqual(empty);
+    expect(await segs({ memoryRefs: [M2.id], parentLoc: '' }, stranger())).toEqual(empty);
+    expect(await segs({ memoryRefs: [generateId()], parentLoc: '' }, stranger())).toEqual(empty);
+    expect(await segs({ memoryRefs: ['seg-org:seg/nowhere'], parentLoc: '' }, stranger())).toEqual(empty);
+    expect(await segs({ memoryRefs: [M2.id], parentLoc: '' })).toEqual(empty); // admin, empty readable memory
+    expect(await segs({ memoryRefs: [M.id], parentLoc: 'no:such' })).toEqual(empty); // parent with nothing below
   });
 
   it('S7: naming only an unreadable memory never falls back to the memories the caller can read', async () => {
     // The admin can read both; the stranger can read neither, so use a mixed ask: the readable one is named
     // alongside an unresolvable ref, and the unresolvable ref adds nothing and widens nothing.
-    const mixed = await segs({ memoryIds: [M.id, generateId()], parentLoc: '' });
+    const mixed = await segs({ memoryRefs: [M.id, generateId()], parentLoc: '' });
     expect(new Set(mixed.items.map((i: any) => i.memoryId))).toEqual(new Set([M.id]));
-    const onlyBad = await segs({ memoryIds: [generateId()], parentLoc: '' });
+    const onlyBad = await segs({ memoryRefs: [generateId()], parentLoc: '' });
     expect(onlyBad.items).toEqual([]);
   });
 
   it('an omitted or empty memoryIds is refused with BAD_USER_INPUT, before any read', async () => {
-    await expect(segs({ memoryIds: [], parentLoc: '' })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+    await expect(segs({ memoryRefs: [], parentLoc: '' })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     await expect(segs({ parentLoc: '' })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
   });
 });
@@ -235,9 +235,9 @@ describe('#3456 S5/S7: no existence oracle, never the default scope', () => {
 describe('#3456 input validation', () => {
   it('a malformed parent loc and a foreign cursor are refused, without echoing the value', async () => {
     for (const bad of [':a', 'a:', 'a::b']) {
-      await expect(segs({ memoryIds: [M.id], parentLoc: bad })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+      await expect(segs({ memoryRefs: [M.id], parentLoc: bad })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     }
-    const err = await segs({ memoryIds: [M.id], parentLoc: '', after: 'not-a-cursor' }).catch((e: any) => e);
+    const err = await segs({ memoryRefs: [M.id], parentLoc: '', after: 'not-a-cursor' }).catch((e: any) => e);
     expect(err.extensions.code).toBe('BAD_USER_INPUT');
     expect(String(err.message)).not.toContain('not-a-cursor');
   });
@@ -246,13 +246,13 @@ describe('#3456 input validation', () => {
 describe('#3586 review folds', () => {
   it('a memory named more than once (same id repeated) is read once: each row once, and paging returns every row once', async () => {
     await mk('a'); await mk('b'); await mk('c');
-    const once = await segs({ memoryIds: [M.id], parentLoc: '' });
-    const rep = await segs({ memoryIds: [M.id, M.id, M.id], parentLoc: '' });
+    const once = await segs({ memoryRefs: [M.id], parentLoc: '' });
+    const rep = await segs({ memoryRefs: [M.id, M.id, M.id], parentLoc: '' });
     expect(rep.items).toEqual(once.items);
     const seen: string[] = [];
     let after: string | null = null;
     for (let i = 0; i < 5; i++) {
-      const pg: any = await segs({ memoryIds: [M.id, M.id], parentLoc: '', limit: 2, after });
+      const pg: any = await segs({ memoryRefs: [M.id, M.id], parentLoc: '', limit: 2, after });
       seen.push(...names(pg));
       if (!pg.hasMore) break;
       after = pg.endCursor;
@@ -263,30 +263,30 @@ describe('#3586 review folds', () => {
   it('the same memory named by id and by its URN is read once', async () => {
     await mk('a'); await mk('b');
     const m = await db.memory.findUniqueOrThrow({ where: { id: M.id } });
-    const page = await segs({ memoryIds: [M.id, (m as any).urn], parentLoc: '' });
+    const page = await segs({ memoryRefs: [M.id, (m as any).urn], parentLoc: '' });
     expect(names(page)).toEqual(['a', 'b']);
   });
 
   it('a parent loc with an astral-plane character keeps the first character of each segment', async () => {
     await mk('𝕏:alpha'); await mk('𝕏:beta:deep');
-    const page = await segs({ memoryIds: [M.id], parentLoc: '𝕏' });
+    const page = await segs({ memoryRefs: [M.id], parentLoc: '𝕏' });
     expect(page.items.map((i: any) => [i.segment, i.hasNode])).toEqual([['alpha', true], ['beta', false]]);
   });
 
   it('a cursor Postgres could not take (int4 overflow, NUL) is a refused cursor, not an internal error', async () => {
     const enc = (v: unknown[]) => Buffer.from(JSON.stringify(v), 'utf8').toString('base64url');
     for (const bad of [[M.id, 2147483648, 'a'], [M.id, -2147483649, 'a'], [M.id, null, 'a\u0000b'], ['m\u0000', 1, 'a']]) {
-      await expect(segs({ memoryIds: [M.id], parentLoc: '', after: enc(bad) })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+      await expect(segs({ memoryRefs: [M.id], parentLoc: '', after: enc(bad) })).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
     }
   });
 
   it('a system-type node that sorts first under the prefix does not become a segment (first probe)', async () => {
     await mk('0sys:x', { nodeType: 'system' });
     await mk('real');
-    expect(names(await segs({ memoryIds: [M.id], parentLoc: '' }))).toEqual(['real']);
+    expect(names(await segs({ memoryRefs: [M.id], parentLoc: '' }))).toEqual(['real']);
     await mk('p:0sys', { nodeType: 'system' });
     await mk('p:real');
-    expect(names(await segs({ memoryIds: [M.id], parentLoc: 'p' }))).toEqual(['real']);
+    expect(names(await segs({ memoryRefs: [M.id], parentLoc: 'p' }))).toEqual(['real']);
   });
 });
 
@@ -300,10 +300,10 @@ describe('#2836: chat-message is a default exclusion for segments', () => {
     await msg('0chat:messages:001');
     await msg('0chat:messages:002', 2);
     await mk('real');
-    expect(names(await segs({ memoryIds: [M.id], parentLoc: '' }))).toEqual(['real']);
+    expect(names(await segs({ memoryRefs: [M.id], parentLoc: '' }))).toEqual(['real']);
     await msg('p:0msgs:001');
     await mk('p:real');
-    expect(names(await segs({ memoryIds: [M.id], parentLoc: 'p' }))).toEqual(['real']);
+    expect(names(await segs({ memoryRefs: [M.id], parentLoc: 'p' }))).toEqual(['real']);
   });
 
   it('recursive leg: message-only and message-rooted branches after an eligible one; siblings, record and hasNode controls', async () => {
@@ -320,7 +320,7 @@ describe('#2836: chat-message is a default exclusion for segments', () => {
     await mk('withnode:x');
     await mk('zz-rec', { nodeType: 'record' });
 
-    const root = await segs({ memoryIds: [M.id], parentLoc: '' });
+    const root = await segs({ memoryRefs: [M.id], parentLoc: '' });
     expect(root.items).toEqual([
       { segment: 'doc', hasNode: true, memoryId: M.id },
       { segment: 'mixed', hasNode: false, memoryId: M.id },
@@ -328,19 +328,19 @@ describe('#2836: chat-message is a default exclusion for segments', () => {
       { segment: 'withnode', hasNode: false, memoryId: M.id },
       { segment: 'zz-rec', hasNode: true, memoryId: M.id },
     ]);
-    expect(names(await segs({ memoryIds: [M.id], parentLoc: 'team-chat' }))).toEqual([]);
-    expect(names(await segs({ memoryIds: [M.id], parentLoc: 'mixed' }))).toEqual(['note']);
+    expect(names(await segs({ memoryRefs: [M.id], parentLoc: 'team-chat' }))).toEqual([]);
+    expect(names(await segs({ memoryRefs: [M.id], parentLoc: 'mixed' }))).toEqual(['note']);
 
     // Parity with findNodes' unqualified read of the same memory.
-    const fn = await findNodes({ filter: { memoryIds: [M.id] }, limit: 200 });
+    const fn = await findNodes({ filter: { memoryRefs: [M.id] }, limit: 200 });
     const expected = [...new Set<string>(fn.hits.map((h: any) => (h.node.loc as string).split(':')[0]))].sort();
     expect(names(root).sort()).toEqual(expected);
   });
 
   it('an explicit chat-message read is still findNodes\' job: the messages exist and stay readable there', async () => {
     await msg('team-chat:messages:001');
-    const fn = await findNodes({ filter: { memoryIds: [M.id], nodeType: 'chat-message' }, limit: 10 });
+    const fn = await findNodes({ filter: { memoryRefs: [M.id], nodeType: 'chat-message' }, limit: 10 });
     expect(fn.hits.map((h: any) => h.node.loc)).toEqual(['team-chat:messages:001']);
-    expect(names(await segs({ memoryIds: [M.id], parentLoc: '' }))).toEqual([]);
+    expect(names(await segs({ memoryRefs: [M.id], parentLoc: '' }))).toEqual([]);
   });
 });

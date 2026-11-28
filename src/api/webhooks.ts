@@ -27,6 +27,7 @@ import { mintAppRun, RunLaunchDeniedError, consumeActionTicket } from '../jobs/a
 import { assertUrlAllowed } from '../lib/webFetch.js';
 import { respondInternalFault } from '../lib/internalFault.js';
 import { bootPromptRefusalCode } from '../lib/bootPrompt/refusal.js';
+import { requireOwnerRefOf } from '../lib/owner.js';
 
 const HPT_DEFAULT_TTL = process.env.WEBHOOK_TOKEN_TTL ?? '90d';
 const CALLBACK_TIMEOUT_MS = 10_000;
@@ -129,7 +130,7 @@ async function handleWebhook(db: PrismaClient, req: Request, res: Response): Pro
 
   try {
     const run = await mintAppRun(db, {
-      organizationId: webhook.organizationId,
+      owner: { organizationId: webhook.organizationId }, // #5077: a webhook is an organization's until F3b
       appId: webhook.appId,
       agentId: webhook.agentId,
       userId: webhook.userId,
@@ -162,8 +163,9 @@ async function handleWebhook(db: PrismaClient, req: Request, res: Response): Pro
     }
     // #3689 (gate R2): a hook whose trigger names no Agent, or whose Agent's boot prompt cannot be served, is refused with
     // the boot-prompt code (cor:agt:040:07 / 040:10), not answered as an internal fault. 409: the trigger's own setup
-    // conflicts with launching, so a retry cannot succeed. The body carries the code only, as a denial's does.
-    const refusal = bootPromptRefusalCode(err);
+    // conflicts with launching, so a retry cannot succeed. The body carries the code only, as a denial's does. #3920: only a
+    // refusal of the `run` surface is the trigger's own; a boot-prompt refusal built for another surface is an unexpected error here.
+    const refusal = bootPromptRefusalCode(err, 'run');
     if (refusal) {
       res.status(409).json({ error: refusal });
       return;
@@ -204,7 +206,7 @@ export async function dispatchRunCallback(db: PrismaClient, run: AppRun): Promis
     return;
   }
 
-  const ticket = await consumeActionTicket(db, run.organizationId, run.appId, 'comm.outbound', run.id);
+  const ticket = await consumeActionTicket(db, requireOwnerRefOf(run), run.appId, 'comm.outbound', run.id);
   if (!ticket) {
     console.warn(`[webhook] run ${run.id}: callback skipped — no comm.outbound ticket`);
     await record('skipped:no-ticket');

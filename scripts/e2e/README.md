@@ -11,7 +11,7 @@ scripts/e2e/stack.sh down charles
 
 `up` builds this checkout, creates an empty Postgres 17/pgvector database,
 uses `pre-push.sql` → Prisma schema push → `post-push.sql`, seeds it and waits
-for server health. The seed verifies the HNSW index, generated `nodes.tsv`
+for server readiness (`GET /ready`, #3021: a stack whose first startup failed never counts as up; `/health` stays liveness only). The seed verifies the HNSW index, generated `nodes.tsv`
 and ownership/class CHECK constraints. It refuses a populated DB. To reset,
 use `down` then `up`; restarting an initialized stack refuses explicitly before
 Prisma or signing-key generation. The guard checks the public schema used by
@@ -73,8 +73,40 @@ answering` unless a later probe succeeds. Only the disposable instance is touche
 
 The first slice includes server and DB. Run a local portal as described below;
 MinIO, NATS, external-provider mocks, git-source fixtures and automated browser
-suites are not part of this slice. Mail, LLM spend and headless workers are off.
+suites are not part of this slice. Mail and LLM spend are off, and so are the headless workers unless you opt in (see
+"Run worker and the script-node fixture" below).
 No CI wiring or production snapshots are used.
+
+## Run worker and the script-node fixture
+
+By default no AppRun executes on a stack (`DISABLE_RUN_WORKER` and `DISABLE_SCHEDULER` are `true`): a triggered run stays
+`PENDING`. To exercise the run path, start a FRESH stack with the worker on:
+
+```bash
+E2E_RUN_WORKER=true ./scripts/e2e/stack.sh up <worker> <api-port> <portal-port>
+```
+
+Only the exact value `true` counts; every other value leaves the default. It switches the run worker only: the scheduler
+stays off, so no schedule fires and cadence is out of scope. The stack still holds no LLM key, mail or tool URL, so an LLM
+node fails for want of an AI config instead of spending. The flag applies from first boot, like the passkey switches.
+
+The script-node fixture flows (the `<org>:flows` memory and the App's one write grant, #4624) are seeded only on that stack: the seed,
+its `--check` and `stack.sh check` all read the container's `DISABLE_RUN_WORKER` (`false` only for `E2E_RUN_WORKER=true`), so the default stack
+holds no flows memory and verifies green, and a worker stack holds it and verifies green too (#4753).
+
+On a worker stack each org seeds a synthetic `<org>:flows` memory with two entry flows. A script node makes one run-tool call with no model hop
+(`hadron_create_node`, an in-process write), so these run without any AI config. Both run through the product's own path:
+`triggerAppRun` as an org admin (name the agent, e.g. the coordinator: the App has two) resolves the principal and consent,
+and the write is authorized by the App's write grant on the `runs` prefix, not by the fixture.
+
+| Entry node | Expected after the run |
+| --- | --- |
+| `hrn:node:<org>:flows:flows:script-write` | run `COMPLETED`, node `runs:script-write-result` present in `<org>:flows` |
+| `hrn:node:<org>:flows:flows:script-refused` | run `FAILED` with `TOOL_FAILED` (`no write access to this memory`), nothing written under `denied:` |
+
+With no bus the sweep executes pending runs every 60 seconds, so allow about a minute plus the run itself after `triggerAppRun`.
+With the flag unset the same trigger leaves the run `PENDING` and nothing is written. `src/test/e2eScriptFlow.test.ts`
+runs these two flows through the real executor.
 
 ## Fixture inventory
 
@@ -147,12 +179,13 @@ has one `hdr_app_*` credential. Existing fixture IDs and content are determinist
 allocate their own user IDs (and fresh-user handle).
 Credentials are freshly random on every new stack.
 
-`up` prints raw credentials **once at the end** after health and inventory
+`up` prints raw credentials **once at the end** after readiness and inventory
 checks. Only hashes are stored in DB, with raw values in a stack-scoped
 credential volume for check scripts. Seed and application logs do not print
 the raw credentials. Capture the final output privately if needed; `down`
-removes the credential volume. Signing and encryption keys are also randomly generated inside each fresh
-app launch, so a JWT from one stack does not authenticate to another. These
+removes the credential volume. Signing, encryption and App-secret root keys (`JWT_SECRET`, `HADRON_ENCRYPTION_KEY`, `SECRET_ROOT_KEY`, #4747) are also randomly generated inside each fresh
+app launch, so a JWT from one stack does not authenticate to another, and App secrets can be stored on a fresh stack with no manual change. The root key is
+never logged and never a development, test or production value; it is safe per launch because a stack's database is empty when it starts. These
 fixtures belong only in this local environment.
 
 ## Sign-in simulation limits
@@ -222,7 +255,7 @@ Use a separate browser profile, or log out between identities. The fixture proxy
 Consequently, every peer that can reach the disposable Incus QA bridge can use
 these synthetic logins; loopback publication does not isolate that private bridge.
 Use this stack only for disposable synthetic data, never on a public interface.
-The server and internal proxy are supervised together; published health and login
+The server and internal proxy are supervised together; published readiness (`/ready`) and login
 are verified before credentials are printed and again by `check`. `check` tests the handoff redemption, authenticated API identities and MCP
 initialize/tools discovery for a user and an App key; independent QA must also exercise the
 rendered portal and concurrent stacks before calling the issue done.

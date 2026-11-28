@@ -4,11 +4,15 @@
 # Returns 1 when the name is already in use (recorded state, or a live Incus instance of that name).
 refuse_existing_stack() {
   local state=$1 name=$2 instances
-  if [ -e "$state" ] || [ -L "$state" ]; then echo "stack name already in use; refusing (not created by this run)" >&2; return 1; fi
+  # #2628: each refusal names the path or instance that blocks the run. None advises removing anything: this harness
+  # holds no authority over state or instances it did not create, so the operator checks ownership by hand.
+  if [ -e "$state" ] || [ -L "$state" ]; then
+    echo "stack state already exists: $state; refusing (not created by this run; manual ownership check required)" >&2; return 1
+  fi
   command -v incus >/dev/null 2>&1 || { echo "Incus is required for owned diagnosis stacks" >&2; return 1; }
   instances=$(incus list --format csv -c n) || { echo "cannot inspect Incus; refusing" >&2; return 1; }
   if grep -qxF "$name" <<< "$instances"; then
-    echo "instance name already in use; refusing (not created by this run)" >&2; return 1
+    echo "Incus instance $name already exists with no stack state at $state; refusing (foreign or unverified instance; manual ownership check required)" >&2; return 1
   fi
   return 0
 }
@@ -68,7 +72,21 @@ acquire_stack_reservation() {
   DIAG_STATE=$1 DIAG_PROJECT=$2
   DIAG_LOCK="$DIAG_STATE.diagnose-lock"
   mkdir -p -- "$(dirname -- "$DIAG_STATE")" || return 1
-  (umask 077; mkdir -- "$DIAG_LOCK") || { echo "diagnosis stack already reserved" >&2; return 1; }
+  if ! (umask 077; mkdir -- "$DIAG_LOCK"); then
+    # #4607 BLIND F1: only an existing lock is a held reservation. Any other failure (permissions, a read-only or full
+    # filesystem) is reported as such, after mkdir's own line, so nobody goes looking for a reservation that never existed.
+    # #4607 BLIND delta: only a reservation DIRECTORY (not a symlink) is a reservation; any other entry is described
+    # as observed, never attributed to another run.
+    if [ -d "$DIAG_LOCK" ] && ! [ -L "$DIAG_LOCK" ]; then
+      # #4607 BLIND delta 2: an observed directory says only that it exists, never whose it is.
+      echo "diagnosis stack already reserved: a reservation directory exists at $DIAG_LOCK; refusing (its owner is not known here; a reservation is never taken over by age or PID; manual check required)" >&2
+    elif [ -e "$DIAG_LOCK" ] || [ -L "$DIAG_LOCK" ]; then
+      echo "could not create the diagnosis reservation $DIAG_LOCK: the path is occupied by something that is not a reservation directory; refusing (manual check required)" >&2
+    else
+      echo "could not create the diagnosis reservation $DIAG_LOCK (see the error above); refusing" >&2
+    fi
+    return 1
+  fi
   DIAG_RUN_TOKEN=$(node -e "process.stdout.write(require('crypto').randomUUID())") || { rmdir -- "$DIAG_LOCK"; return 1; }
   if ! printf '%s\n' "$DIAG_RUN_TOKEN" > "$DIAG_LOCK/owner"; then rm -f -- "$DIAG_LOCK/owner"; rmdir -- "$DIAG_LOCK"; return 1; fi
   if ! refuse_existing_stack "$DIAG_STATE" "$DIAG_PROJECT"; then release_stack_reservation; return 1; fi
@@ -90,6 +108,38 @@ stack_owned() {
   grep -qxF "$DIAG_PROJECT" <<< "$instances" || return 1
   marker=$(incus config get "$DIAG_PROJECT" user.hadron-diagnose) || return 1
   [ "$marker" = "$DIAG_RUN_TOKEN" ] || return 1
+}
+
+# explain_stack_ownership_failure <state-dir> <instance-name>: why stack_owned refused, for the end-of-run line (#2628).
+# It reads the same facts stack_owned does and changes nothing, and names which check failed. Missing state proves only
+# that the path is absent now, not that nothing was created (#4607 BLIND F2), so that line claims no more than that.
+# It never advises removing anything, and tolerates missing arguments so the rest of the EXIT trap always runs.
+explain_stack_ownership_failure() {
+  local state=${1:-} name=${2:-the stack instance} prefix='stack ownership unverified; refusing capture/teardown'
+  if ! reservation_owned; then
+    # #4607 BLIND F3: a lost reservation is its own case, whatever the state marker says. #4607 BLIND delta: name the
+    # reservation only when its path is known, and point at the state only when it exists.
+    local lost="this run no longer holds its reservation ${DIAG_LOCK:-}"
+    [ -n "${DIAG_LOCK:-}" ] || lost="this run's reservation path is unknown"
+    if [ -L "$state" ] && ! [ -e "$state" ]; then
+      # #4607 BLIND delta 2: a dangling state symlink has no target to inspect; say so instead.
+      echo "$prefix: $lost, and the stack state path $state is a dangling symlink; capture and teardown skipped (manual check required)" >&2
+    elif [ -e "$state" ]; then
+      echo "$prefix; inspect private state: $state ($lost; manual ownership check required)" >&2
+    else
+      echo "$prefix: $lost, and no stack state found at $state; capture and teardown skipped (manual check required)" >&2
+    fi
+  elif [ -L "$state" ] && ! [ -e "$state" ]; then
+    # #4670 (#4638 BLIND delta): with a valid reservation a dangling state symlink must not reach the marker branch below,
+    # which would send the operator to inspect a target that does not exist.
+    echo "$prefix: the stack state path $state is a dangling symlink; capture and teardown skipped (manual check required)" >&2
+  elif ! [ -e "$state" ] && ! [ -L "$state" ]; then
+    echo "$prefix: no stack state found at $state, so ownership cannot be verified; capture and teardown skipped (if an Incus instance named $name exists, check it by hand)" >&2
+  elif [ "$(cat "$state/diagnose-owner" 2>/dev/null)" != "${DIAG_RUN_TOKEN:-}" ]; then
+    echo "$prefix; inspect private state: $state (the owner marker at $state/diagnose-owner is missing, unreadable or not this run's token, which does not show who created this state; manual ownership check required)" >&2
+  else
+    echo "$prefix; inspect private state: $state (this run's state, but the Incus instance $name is missing, unreadable or not marked by this run; manual ownership check required)" >&2
+  fi
 }
 
 # purge_snapshots: heap snapshots hold real values, so they are deleted from the stack host and the deletion is verified.

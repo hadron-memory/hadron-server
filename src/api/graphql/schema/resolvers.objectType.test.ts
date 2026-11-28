@@ -26,49 +26,49 @@ beforeEach(async () => {
 
 describe('Node.objectType — collection discriminator', () => {
   it('createNode persists objectType (orthogonal to nodeType) and reads it back', async () => {
-    const n = await createNode({ memoryId: memId, loc: 'c.letta', name: 'Letta', nodeType: 'record', objectType: 'competitor' });
+    const n = await createNode({ memoryRef: memId, loc: 'c.letta', name: 'Letta', nodeType: 'record', objectType: 'competitor' });
     expect(n.objectType).toBe('competitor');
     expect(n.nodeType).toBe('record');
   });
 
   it('findNodes filters by objectType (browse)', async () => {
-    await createNode({ memoryId: memId, loc: 'c.letta', name: 'Letta', objectType: 'competitor' });
-    await createNode({ memoryId: memId, loc: 'c.mem0', name: 'Mem0', objectType: 'competitor' });
-    await createNode({ memoryId: memId, loc: 'i.trend', name: 'Trend', objectType: 'insight' });
-    await createNode({ memoryId: memId, loc: 'plain', name: 'Plain' }); // no objectType
-    const res = await findNodes({ filter: { memoryIds: [memId], objectType: 'competitor' } });
+    await createNode({ memoryRef: memId, loc: 'c.letta', name: 'Letta', objectType: 'competitor' });
+    await createNode({ memoryRef: memId, loc: 'c.mem0', name: 'Mem0', objectType: 'competitor' });
+    await createNode({ memoryRef: memId, loc: 'i.trend', name: 'Trend', objectType: 'insight' });
+    await createNode({ memoryRef: memId, loc: 'plain', name: 'Plain' }); // no objectType
+    const res = await findNodes({ filter: { memoryRefs: [memId], objectType: 'competitor' } });
     expect(locs(res)).toEqual(['c.letta', 'c.mem0']);
   });
 
   it('objectType composes with a keyword query (filter-then-rank)', async () => {
-    await createNode({ memoryId: memId, loc: 'c.letta', name: 'Letta memory', objectType: 'competitor' });
-    await createNode({ memoryId: memId, loc: 'i.memtrend', name: 'memory trend', objectType: 'insight' });
-    const res = await findNodes({ query: 'memory', mode: 'keyword', filter: { memoryIds: [memId], objectType: 'competitor' } });
+    await createNode({ memoryRef: memId, loc: 'c.letta', name: 'Letta memory', objectType: 'competitor' });
+    await createNode({ memoryRef: memId, loc: 'i.memtrend', name: 'memory trend', objectType: 'insight' });
+    const res = await findNodes({ query: 'memory', mode: 'keyword', filter: { memoryRefs: [memId], objectType: 'competitor' } });
     expect(locs(res)).toEqual(['c.letta']);
   });
 
   it('updateNode objectType:null clears it', async () => {
-    await createNode({ memoryId: memId, loc: 'c.x', name: 'X', objectType: 'competitor' });
-    const upd = await updateNode({ memoryId: memId, loc: 'c.x', objectType: null });
+    await createNode({ memoryRef: memId, loc: 'c.x', name: 'X', objectType: 'competitor' });
+    const upd = await updateNode({ memoryRef: memId, loc: 'c.x', objectType: null });
     expect(upd.objectType).toBeNull();
-    expect(locs(await findNodes({ filter: { memoryIds: [memId], objectType: 'competitor' } }))).toEqual([]);
+    expect(locs(await findNodes({ filter: { memoryRefs: [memId], objectType: 'competitor' } }))).toEqual([]);
   });
 
   it('updateNode preserves objectType when omitted', async () => {
-    await createNode({ memoryId: memId, loc: 'c.y', name: 'Y', objectType: 'competitor' });
-    await updateNode({ memoryId: memId, loc: 'c.y', description: 'touched' });
-    const res = await findNodes({ filter: { memoryIds: [memId], objectType: 'competitor' } });
+    await createNode({ memoryRef: memId, loc: 'c.y', name: 'Y', objectType: 'competitor' });
+    await updateNode({ memoryRef: memId, loc: 'c.y', description: 'touched' });
+    const res = await findNodes({ filter: { memoryRefs: [memId], objectType: 'competitor' } });
     expect(locs(res)).toEqual(['c.y']);
   });
 
   it('a node revision versions objectType, and restore recovers it', async () => {
-    const n = await createNode({ memoryId: memId, loc: 'c.z', name: 'Z', objectType: 'competitor' });
+    const n = await createNode({ memoryRef: memId, loc: 'c.z', name: 'Z', objectType: 'competitor' });
     // Retype the collection — the pre-edit state is snapshotted.
-    await updateNode({ memoryId: memId, loc: 'c.z', objectType: 'insight' });
+    await updateNode({ memoryRef: memId, loc: 'c.z', objectType: 'insight' });
     const rev = await db.nodeRevision.findFirst({ where: { nodeId: n.id }, orderBy: { revNo: 'desc' } });
     expect(rev?.objectType).toBe('competitor'); // captured, not lost
-    await (resolvers.Mutation as any).restoreNodeRevision(null, { revisionId: rev!.id }, admin());
+    await (resolvers.Mutation as any).restoreNodeRevision(null, { nodeRevRef: rev!.id }, admin());
     // Back to the competitor collection.
-    expect(locs(await findNodes({ filter: { memoryIds: [memId], objectType: 'competitor' } }))).toEqual(['c.z']);
+    expect(locs(await findNodes({ filter: { memoryRefs: [memId], objectType: 'competitor' } }))).toEqual(['c.z']);
   });
 });

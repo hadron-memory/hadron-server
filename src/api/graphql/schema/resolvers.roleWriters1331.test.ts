@@ -12,8 +12,16 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
+import { assertRoleWritersForNodes, RoleWriterLevelError } from '../../../lib/nodeRoleWriters.js';
 import { lockMemoryConfigExclusive } from '../../../lib/governedRole.js';
 import { waitForLockWaiters } from '../../../test/lockWait.js';
+
+// Pass-through spy on the bulk writer-level check, so a test can tell that a door CALLED it (blind review, #4613): with the
+// OWNER level built, no supported level separates a managing caller from the extraction gate, so the call itself is the pin.
+vi.mock('../../../lib/nodeRoleWriters.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../lib/nodeRoleWriters.js')>();
+  return { ...actual, assertRoleWritersForNodes: vi.fn(actual.assertRoleWritersForNodes) };
+});
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -45,9 +53,9 @@ const node = (loc: string, extra: Record<string, unknown> = {}) => db.node.creat
   data: { id: generateId(), memoryId, loc, name: loc, content: 'body', ...extra },
 });
 const create = (u: { id: string }, input: Record<string, unknown>, roles: Context['roles'] = []) =>
-  resolvers.Mutation.createNode(null, { input: { memoryId, name: String(input.loc), content: 'x', ...input } }, as(u, roles));
+  resolvers.Mutation.createNode(null, { input: { memoryRef: memoryId, name: String(input.loc), content: 'x', ...input } }, as(u, roles));
 const update = (u: { id: string }, loc: string, input: Record<string, unknown>, roles: Context['roles'] = []) =>
-  resolvers.Mutation.updateNode(null, { input: { memoryId, loc, ...input } }, as(u, roles));
+  resolvers.Mutation.updateNode(null, { input: { memoryRef: memoryId, loc, ...input } }, as(u, roles));
 const state = async (loc: string) => db.node.findFirst({ where: { memoryId, loc } });
 const revisions = (id: string) => db.nodeRevision.count({ where: { nodeId: id } });
 
@@ -143,14 +151,14 @@ describe('writers=ADMIN on a role (acceptance 1, 2)', () => {
   it('the review door obeys a writer level on role "review" (the cor:acl:130:07 scenario)', async () => {
     await rule('review', { writers: 'ADMIN' });
     expect(await code(resolvers.Mutation.createReviewNode(null, {
-      input: { memoryId, loc: 'rv1', name: 'check', content: 'x', role: 'review' },
+      input: { memoryRef: memoryId, loc: 'rv1', name: 'check', content: 'x', role: 'review' },
     }, as(contrib)))).toBe(REFUSED);
     expect(await code(resolvers.Mutation.createReviewNode(null, {
-      input: { memoryId, loc: 'rv2', name: 'check', content: 'x', role: 'review' },
+      input: { memoryRef: memoryId, loc: 'rv2', name: 'check', content: 'x', role: 'review' },
     }, as(admin)))).toBe('OK');
     // the existing review's role cannot be cleared by the member through the door either
     expect(await code(resolvers.Mutation.updateReviewNode(null, {
-      input: { memoryId, loc: 'rv2', role: null },
+      input: { memoryRef: memoryId, loc: 'rv2', role: null },
     }, as(contrib)))).toBe(REFUSED);
   });
 });
@@ -168,12 +176,12 @@ describe('every writer path honors the level (the inventory)', () => {
     await node('p1', { role: 'policy', content: 'alpha' });
     await node('o1', { content: 'alpha' });
     await resolvers.Mutation.searchReplaceInNodes(null, {
-      input: { memoryIds: [memoryId], fields: ['content'], oldText: 'alpha', newText: 'beta', dryRun: false },
+      input: { memoryRefs: [memoryId], fields: ['content'], oldText: 'alpha', newText: 'beta', dryRun: false },
     }, as(contrib)).catch(() => null);
     expect((await state('p1'))!.content).toBe('alpha');
     expect((await state('o1'))!.content).toBe('beta');
     await resolvers.Mutation.searchReplaceInNodes(null, {
-      input: { memoryIds: [memoryId], fields: ['content'], oldText: 'alpha', newText: 'beta', dryRun: false },
+      input: { memoryRefs: [memoryId], fields: ['content'], oldText: 'alpha', newText: 'beta', dryRun: false },
     }, as(admin));
     expect((await state('p1'))!.content).toBe('beta');
   });
@@ -205,7 +213,7 @@ describe('every writer path honors the level (the inventory)', () => {
     const n = await node('p1', { role: 'policy' });
     await update(admin, 'p1', { content: 'v2' });
     const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: n.id } });
-    expect(await code(resolvers.Mutation.restoreNodeRevision(null, { revisionId: rev.id }, as(contrib)))).not.toBe('OK');
+    expect(await code(resolvers.Mutation.restoreNodeRevision(null, { nodeRevRef: rev.id }, as(contrib)))).not.toBe('OK');
     expect((await state('p1'))!.content).toBe('v2');
   });
 
@@ -230,11 +238,12 @@ describe('ALL, OWNER, and the user-owned audience', () => {
     expect(await code(create(contrib, { loc: 'a1', role: 'open' }))).toBe('OK');
   });
 
-  it('OWNER is not read as ALL: it fails closed with a typed refusal, for everyone', async () => {
+  it('OWNER is built (#1333) and not read as ALL: the owning party writes, a reader does not', async () => {
     await rule('vault', { writers: 'OWNER' });
-    expect(await code(create(contrib, { loc: 'v1', role: 'vault' }))).toBe('ROLE_WRITERS_UNSUPPORTED');
-    expect(await code(create(admin, { loc: 'v2', role: 'vault' }))).toBe('ROLE_WRITERS_UNSUPPORTED');
-    expect(await state('v1')).toBeNull();
+    expect(await code(create(contrib, { loc: 'v1', role: 'vault' }))).toBe('OK');
+    expect(await code(create(admin, { loc: 'v2', role: 'vault' }))).toBe('OK');
+    expect(await code(create(reader, { loc: 'v3', role: 'vault' }))).not.toBe('OK');
+    expect(await state('v3')).toBeNull();
   });
 
   it('a user-owned memory: the owning user is the ADMIN audience', async () => {
@@ -244,7 +253,7 @@ describe('ALL, OWNER, and the user-owned audience', () => {
     const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: owned.id } });
     await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role: 'policy', writers: 'ADMIN' } });
     expect(await code(resolvers.Mutation.createNode(null, {
-      input: { memoryId: owned.id, loc: 'u1', name: 'u1', content: 'x', role: 'policy' },
+      input: { memoryRef: owned.id, loc: 'u1', name: 'u1', content: 'x', role: 'policy' },
     }, as(contrib)))).toBe('OK');
   });
 });
@@ -267,20 +276,53 @@ describe('bulk operations judge every node they carry or remove', () => {
 
   it('extractParentNodeToMemory with move removes the subtree from the source: each role is judged there (a copy is not)', async () => {
     // The move gate already limits the caller to people who manage the memory, so the
-    // ADMIN level adds nothing for them; what it adds is that an unsupported level
-    // (OWNER) is never read as ALL.
+    // ADMIN level adds nothing for them; an OWNER-level role (#1333) is judged as the owning party,
+    // which a managing org ADMIN is in. The ADMIN level is what a manager always meets.
     await rule('vault', { writers: 'OWNER' });
     await node('keep');
     await node('tree');
     await node('tree:leaf', { role: 'vault' });
     const parentRef = (await state('tree'))!.id;
-    expect(await code(resolvers.Mutation.extractParentNodeToMemory(null, {
-      parentRef, targetUrn: 'rw-org::extracted-move', move: true,
-    }, as(admin)))).toBe('ROLE_WRITERS_UNSUPPORTED');
-    expect((await state('tree:leaf'))!.deletedAt).toBeNull();
+    const judged = vi.mocked(assertRoleWritersForNodes);
+    judged.mockClear();
     expect(await code(resolvers.Mutation.extractParentNodeToMemory(null, {
       parentRef, targetUrn: 'rw-org::extracted-copy', move: false,
     }, as(admin)))).toBe('OK');
+    // A copy removes nothing from the source, so the source's roles are not judged for it.
+    expect(judged.mock.calls.filter(([, , nodes]) => nodes.some((n) => n.role === 'vault'))).toHaveLength(0);
+    judged.mockClear();
+    expect(await code(resolvers.Mutation.extractParentNodeToMemory(null, {
+      parentRef, targetUrn: 'rw-org::extracted-move', move: true,
+    }, as(admin)))).toBe('OK');
+    expect((await state('tree:leaf'))!.deletedAt).not.toBeNull();
+    // A move removes the subtree: the descendant's OWNER-level role is judged in the memory it LEAVES. Dropping that check
+    // changes no result for a managing admin, so the call itself is what this pin holds.
+    const moveCalls = judged.mock.calls.filter(([, , nodes, memoryIds]) =>
+      nodes.some((n) => n.role === 'vault') && memoryIds.from === memoryId);
+    expect(moveCalls.length).toBeGreaterThan(0);
+    // The move uses the WRITE path: the check is not asked in preview mode (the fifth argument carries no preview flag).
+    for (const call of moveCalls) expect((call[4] as { preview?: boolean } | undefined)?.preview).not.toBe(true);
+  });
+
+  it('a refusal from the source check on a move is the door\'s answer and leaves the source subtree intact (blind review, #4613)', async () => {
+    // No supported level separates a managing caller from the extraction gate, so the refusal is injected at the one place
+    // the door asks: the bulk writer-level check. The door must surface it as itself, not swallow it or carry on.
+    await rule('vault', { writers: 'OWNER' });
+    await node('keep');
+    await node('tree');
+    await node('tree:leaf', { role: 'vault' });
+    const parentRef = (await state('tree'))!.id;
+    const judged = vi.mocked(assertRoleWritersForNodes);
+    judged.mockImplementationOnce(async (_tx, _principal, nodes) => {
+      if (nodes.some((n) => n.role === 'vault')) throw new RoleWriterLevelError('vault', 'vault', 'before', 'OWNER');
+    });
+    expect(await code(resolvers.Mutation.extractParentNodeToMemory(null, {
+      parentRef, targetUrn: 'rw-org::extracted-refused', move: true,
+    }, as(admin)))).toBe(REFUSED);
+    // Nothing moved: the leaf is live in the source, and nothing landed in a new memory.
+    expect((await state('tree:leaf'))!.deletedAt).toBeNull();
+    expect((await state('tree'))!.deletedAt).toBeNull();
+    expect(await db.memory.count({ where: { urn: { contains: 'extracted-refused' } } })).toBe(0);
   });
 });
 

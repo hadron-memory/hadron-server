@@ -18,6 +18,7 @@ import { createTestableMcpServer } from '../../../mcp/server.js';
 import { buildSchema, defaultFieldResolver, graphql } from 'graphql';
 import { typeDefs } from './typeDefs.js';
 import { publishNodeWritten } from '../../../lib/events/nodeWritten.js';
+import { encryptWithSecret } from '../../../test/encryptMemoryWithSecret.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/events/nodeWritten.js', async (importOriginal) => ({
@@ -56,9 +57,9 @@ describe('explicit recovery reads', () => {
     const graph = await Q.recoveryEdges({}, { memoryRef: memoryId }, ctx());
     expect(graph.total).toBe(1);
     expect(graph.items.every((edge: any) => edge.source.id !== removed.id && edge.target.id !== removed.id)).toBe(true);
-    const inventory = await Q.findNodes({}, { ...search, filter: { memoryIds: [memoryId], includeDeleted: true, contentScope: 'COMMENTS' }, sort: 'loc', limit: 1 }, ctx());
+    const inventory = await Q.findNodes({}, { ...search, filter: { memoryRefs: [memoryId], includeDeleted: true, contentScope: 'COMMENTS' }, sort: 'loc', limit: 1 }, ctx());
     expect(inventory.hits.map((hit: any) => hit.node.id)).toEqual([live.id]);
-    const both = await Q.findNodes({}, { ...search, filter: { memoryIds: [memoryId], includeDeleted: true, contentScope: 'BOTH', nodeType: 'comment' }, sort: 'loc', limit: 1 }, ctx());
+    const both = await Q.findNodes({}, { ...search, filter: { memoryRefs: [memoryId], includeDeleted: true, contentScope: 'BOTH', nodeType: 'comment' }, sort: 'loc', limit: 1 }, ctx());
     expect(both.hits.map((hit: any) => hit.node.id)).toEqual([live.id]);
     const mcp = createTestableMcpServer({ userId: writerId, roles: [], clientId: `user:${writerId}` });
     expect(await mcp.callTool('hadron_get_recovery_node', { nodeRef: removed.id })).toMatchObject({ isError: true });
@@ -306,7 +307,7 @@ describe('single-node restore', () => {
       held(); await gate;
     }, { timeout: 15_000 });
     await holding;
-    const conversion = M.encryptMemory({}, { memoryRef: memoryId, dataKey: Buffer.alloc(32, 37).toString('base64') }, ctx()).then(
+    const conversion = encryptWithSecret({}, { memoryRef: memoryId, dataKey: Buffer.alloc(32, 37).toString('base64') }, ctx()).then(
       (value: any) => ({ value, error: undefined }), (error: any) => ({ value: undefined, error }));
     let restoration: Promise<any>;
     try {

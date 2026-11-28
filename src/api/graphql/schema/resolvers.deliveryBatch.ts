@@ -12,12 +12,13 @@
 import type { Prisma } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
 import { withAuthorizedTx } from './authorizedTx.js';
-import { mayStillDriveWorkerApp } from '../../../lib/teamAttention.js';
+import { mayStillDriveWorkerApp, lapsedResumeDecision, tryResumeOwnLapsedSessionInTx, type ResumeRefusalReason } from '../../../lib/ownWorkerSessions.js';
 import { ownsSession, appPrincipalMayWriteSession } from '../../../lib/sessionOwnership.js';
 import { isSessionLive, loadLastEventBySession } from '../../../lib/sessionActivity.js';
 import { loadApp, taskError, type TaskApp } from './resolvers.agentTask.js';
 import { currentActor } from '../../../lib/requestActor.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { resolveWorkerRef } from '../../../lib/entityRef/workerRef.js';
 import { appKeyCaller, refuseSessionBound, requireKeyScope } from '../../../lib/appKeyScopes/scopes.js';
 import { lockAuthorityAnchors, type AuthorityAnchor } from '../../../lib/auth/authorityAnchors.js';
@@ -26,7 +27,8 @@ import { keyHostId, recordHostKeyUse, recordHostKeyUseApart, type HostKey } from
 import { liveCaller } from '../../../lib/tickers/liveCaller.js';
 import { batchProofPayload, loadDeliveryBatches, loadDeliveryChannelPolicy } from '../../../lib/tickers/deliveryBatch.js';
 import { signBatchProof, type BatchProof } from '../../../lib/tickers/wakeProof.js';
-import { acknowledgeBatchProofs, type BatchAck } from '../../../lib/tickers/acknowledge.js';
+import { acknowledgeBatchProofs, type BatchAck, type BatchThrough } from '../../../lib/tickers/acknowledge.js';
+import { resolveChannelRefId } from '../../../lib/entityRef/channelRef.js';
 
 const appAnchors = (app: TaskApp): AuthorityAnchor[] => [
   { kind: 'app', id: app.id },
@@ -64,7 +66,8 @@ export async function batchKeyEntry(ctx: Context, appRef: string): Promise<{ app
   try {
     const { id } = await resolveAppRef(ctx.db, appRef);
     app = id === key.appId ? await loadApp(ctx, id) : null;
-  } catch {
+  } catch (e) {
+    if (!isAppRefResolutionFailure(e)) throw e;
     app = null;
   }
   if (!app || app.deletedAt || app.uninstalledAt) throw taskError('APP_NOT_FOUND', 'App not found.');
@@ -89,14 +92,39 @@ export async function batchKeyEntry(ctx: Context, appRef: string): Promise<{ app
   };
 }
 
+/**
+ * #5000: a session past its idle window is LAPSED, not ended (cor:agt:020:03, :13): its holder's own read resumes it
+ * with the same id. `resume` says how this call treats one: 'check' (the entry check, no write) admits it when the
+ * lock-free verdict says the read would resume it, and 'in-tx' (the locked pass of the read itself) resumes it inside
+ * the read's transaction. A refusal is SESSION_NOT_LIVE carrying `reason`, a code naming the failed condition.
+ */
+export type BatchResume = 'check' | 'in-tx';
+
+const batchNotLive = (reason: ResumeRefusalReason) =>
+  taskError('SESSION_NOT_LIVE', reason === 'DORMANT'
+    ? 'Session is DORMANT: nothing has driven it for longer than its App\'s dormancy threshold, so no read resumes it. Its holder starts a new session for this worker.'
+    : `Session is not live and was not resumed (${reason}).`, { reason });
+
 /** R57: identity comes from the validated request binding, never a requested worker or an admin role. */
-export async function ownBatchSession(ctx: Context, expectedAppId?: string, lock = false) {
+export async function ownBatchSession(ctx: Context, expectedAppId?: string, lock = false, resume?: BatchResume) {
   if (!ctx.sessionId || ctx.sessionBindingRefused || ctx.impersonation) throw taskError('SESSION_NOT_FOUND', 'Session not found.');
   const initial = await ctx.db.session.findUnique({ where: { id: ctx.sessionId } });
   if (!initial || initial.deletedAt || !ownsSession(ctx, initial)) throw taskError('SESSION_NOT_FOUND', 'Session not found.');
   if (expectedAppId && initial.appId !== expectedAppId) throw taskError('APP_NOT_FOUND', 'App not found.');
+  // Lock order, one for every path here: authority anchors (withAuthorizedTx, before this runs), then the caller's
+  // app_members row, then the App (shared) and the Worker, then the Session. An 'in-tx' resume takes the Worker row
+  // FOR UPDATE, so it runs AFTER the app_members lock and BEFORE the Worker SHARE below: it must never be an upgrade of
+  // a SHARE this transaction already holds, and never put the Worker ahead of the authority row (#5000, blind P2).
+  if (resume === 'in-tx' && !lock) throw new Error('ownBatchSession: an in-tx resume needs the lock pass');
   if (lock) {
     if (ctx.userId && initial.appId) await ctx.db.$queryRaw`SELECT user_id FROM app_members WHERE app_id = ${initial.appId} AND user_id = ${ctx.userId} FOR SHARE`;
+    if (resume === 'in-tx' && !initial.endedAt) {
+      const before = await loadLastEventBySession(ctx.db as never, [initial.id]);
+      if (!isSessionLive(initial, before.get(initial.id), new Date())) {
+        const refused = await tryResumeOwnLapsedSessionInTx(ctx, ctx.db as unknown as Prisma.TransactionClient, initial.id);
+        if (refused) throw batchNotLive(refused);
+      }
+    }
     // Existing session protocol: authority/App, then Worker, then Session. End/rebind that wins is re-read below.
     if (initial.workerId) await ctx.db.$queryRaw`SELECT id FROM workers WHERE id = ${initial.workerId} FOR SHARE`;
     await ctx.db.$queryRaw`SELECT id FROM sessions WHERE id = ${initial.id} FOR SHARE`;
@@ -111,7 +139,12 @@ export async function ownBatchSession(ctx: Context, expectedAppId?: string, lock
     }
   }
   const events = await loadLastEventBySession(ctx.db as never, [session.id]);
-  if (!isSessionLive(session, events.get(session.id), new Date())) throw taskError('SESSION_NOT_LIVE', 'Session is not live.');
+  if (!isSessionLive(session, events.get(session.id), new Date())) {
+    // 'check' names why the read would not resume it; every other call keeps the plain refusal it always had.
+    if (resume !== 'check') throw taskError('SESSION_NOT_LIVE', 'Session is not live.');
+    const decision = await lapsedResumeDecision(ctx, session.id);
+    if (decision.verdict !== 'OK') throw batchNotLive(decision.reason);
+  }
   const worker = session.workerId ? await ctx.db.worker.findUnique({ where: { id: session.workerId } }) : null;
   if (!worker || worker.retiredAt || worker.appId !== session.appId) throw taskError('WORKER_NOT_FOUND', 'Worker not found.');
   if (!(await mayStillDriveWorkerApp(ctx, worker.appId))) throw taskError('APP_NOT_FOUND', 'App not found.');
@@ -119,9 +152,9 @@ export async function ownBatchSession(ctx: Context, expectedAppId?: string, lock
 }
 
 async function selfBatches(ctx: Context, a: { appRef: string; workerRefs?: string[] | null }) {
-  const initial = await ownBatchSession(ctx);
+  const initial = await ownBatchSession(ctx, undefined, false, 'check');
   let appId: string;
-  try { appId = (await resolveAppRef(ctx.db, a.appRef)).id; } catch { throw taskError('APP_NOT_FOUND', 'App not found.'); }
+  try { appId = (await resolveAppRef(ctx.db, a.appRef)).id; } catch (e) { if (!isAppRefResolutionFailure(e)) throw e; throw taskError('APP_NOT_FOUND', 'App not found.'); }
   if (appId !== initial.session.appId) throw taskError('APP_NOT_FOUND', 'App not found.');
   const app = await loadApp(ctx, appId);
   if (!app || app.deletedAt || app.uninstalledAt) throw taskError('APP_NOT_FOUND', 'App not found.');
@@ -133,7 +166,7 @@ async function selfBatches(ctx: Context, a: { appRef: string; workerRefs?: strin
   }
   let noTeamStamp: string | null = null;
   const result = await withAuthorizedTx(ctx, appAnchors(app), async () => undefined, async (tx, txCtx) => {
-    const { session, worker } = await ownBatchSession(txCtx, app.id, true);
+    const { session, worker } = await ownBatchSession(txCtx, app.id, true, 'in-tx');
     if (worker.id !== initial.worker.id) throw taskError('WORKER_NOT_FOUND', 'Worker not found.');
     const now = new Date();
     const page = await loadDeliveryBatches({ ctx: txCtx, app, hostId: null, workerIds: [worker.id], now });
@@ -210,6 +243,17 @@ async function currentBatchChannels(
 }
 
 /**
+ * #5080: `through[].channelRef` is an id or a chat-root node URN. Each is resolved to the channel id the proof names
+ * (`resolveChannelRefId`); a ref that names nothing keeps its own text as the id, which no batch contains, so it gets
+ * the same "not in this delivery batch" refusal as a channel that is not in the batch (cor:api:140:02), echoing the
+ * caller's own ref.
+ */
+async function throughFromRefs(db: Context['db'], through: Array<{ channelRef: string; seq: number }> | null | undefined): Promise<BatchThrough[] | undefined> {
+  if (!through || through.length === 0) return undefined;
+  return Promise.all(through.map(async (t) => ({ channelId: (await resolveChannelRefId(db, t.channelRef)) ?? t.channelRef, seq: t.seq, ref: t.channelRef })));
+}
+
+/**
  * Acknowledge typed batches (cor:agt:080:16/:17). Only the key the id names, with the authority re-derived INSIDE the
  * transaction (after the worker's wake lock) under the App's anchor: both scopes held now, the key still the same host,
  * the host's registration live, and the worker still one of its registered workers. Records the use like a read does.
@@ -218,7 +262,7 @@ async function currentBatchChannels(
 export const deliveryBatchMutations = {
   acknowledgeDeliveryBatches: async (
     _: unknown,
-    a: { batchIds: string[]; through?: Array<{ channelId: string; seq: number }> | null },
+    a: { batchIds: string[]; through?: Array<{ channelRef: string; seq: number }> | null },
     requestCtx: Context,
   ) => recordingBatchRefusal(requestCtx, async () => {
     const key = appKeyCaller(requestCtx);
@@ -228,8 +272,9 @@ export const deliveryBatchMutations = {
       if (!ctx) throw taskError('SESSION_NOT_FOUND', 'Session not found.');
       const own = await ownBatchSession(ctx);
       if (a.through?.length && a.batchIds.length !== 1) throw taskError('BAD_USER_INPUT', 'through applies to exactly one batch.');
+      const through = await throughFromRefs(requestCtx.db, a.through);
       return acknowledgeBatchProofs({ ctx, requester: { sessionId: own.session.id },
-        acks: a.batchIds.map(proof => ({ proof, ...(a.through?.length ? { through: a.through } : {}) })),
+        acks: a.batchIds.map(proof => ({ proof, ...(through ? { through } : {}) })),
         mayAckBatch: async (p, tx, txCtx) => {
           if (p.appId !== own.session.appId || p.workerId !== own.worker.id || p.hostId !== null) return false;
           try {
@@ -258,7 +303,8 @@ export const deliveryBatchMutations = {
         return { acknowledged: 0, unchanged: 0 };
       });
     }
-    const acks: BatchAck[] = a.batchIds.map((proof) => ({ proof, ...(a.through && a.through.length > 0 ? { through: a.through } : {}) }));
+    const through = await throughFromRefs(requestCtx.db, a.through);
+    const acks: BatchAck[] = a.batchIds.map((proof) => ({ proof, ...(through ? { through } : {}) }));
     return acknowledgeBatchProofs({
       ctx: requestCtx,
       requester: { appKeyId: key.appKeyId },

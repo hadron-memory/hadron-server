@@ -1,5 +1,5 @@
 /**
- * #1200 (Holger's ruling A, 2026-10-24): `updateNode(memoryId:, loc:)` means
+ * #1200 (Holger's ruling A, 2026-10-24): `updateNode(memoryRef:, loc:)` means
  * "the node I found there". The loc path anchors the write on the PROBED node's
  * id, exactly as the id path does, so when the probed node moves away and a
  * replacement takes its address between the probe and the write the write is
@@ -52,7 +52,7 @@ let adminId: string;
 const ctx = (): Context => ({ db, roles: ['ADMIN'], userId: adminId, clientId: `user:${adminId}` });
 
 async function seed(loc: string, name = 'before') {
-  return resolvers.Mutation.createNode({}, { input: { memoryId, loc, name } as never }, ctx());
+  return resolvers.Mutation.createNode({}, { input: { memoryRef: memoryId, loc, name } as never }, ctx());
 }
 
 async function expectCode(p: Promise<unknown>, code: string): Promise<GraphQLError> {
@@ -70,7 +70,7 @@ async function expectCode(p: Promise<unknown>, code: string): Promise<GraphQLErr
 /** The update under test, reached at the core so both selector shapes are drivable. */
 async function update(input: Record<string, unknown>, targetNodeId?: string) {
   const { writeNodeCore } = await import('./resolvers.mutation.node.js');
-  return writeNodeCore(input as never, ctx(), 'update', { authoring: attestedAuthoring(null), ...(targetNodeId ? { targetNodeId } : {}) });
+  return writeNodeCore(input as never, ctx(), 'update', { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: attestedAuthoring(null), ...(targetNodeId ? { targetNodeId } : {}) });
 }
 
 beforeEach(async () => {
@@ -96,7 +96,7 @@ const replaceAtLock = (originalId: string, loc: string) => {
     await db.node.update({ where: { id: originalId }, data: { loc: `${loc}:moved` } });
     const replacement = await resolvers.Mutation.createNode(
       {},
-      { input: { memoryId, loc, name: 'replacement' } as never },
+      { input: { memoryRef: memoryId, loc, name: 'replacement' } as never },
       ctx(),
     );
     out.replacementId = replacement.id;

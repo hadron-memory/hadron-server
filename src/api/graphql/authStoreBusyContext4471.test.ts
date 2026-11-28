@@ -2,7 +2,7 @@
  * #4471 BLIND P2-1 — the 503 asserted through REAL Apollo, not the mapping in isolation.
  *
  * The unit tests in formatError.test.ts prove the mapping restores the typed code; this pin
- * builds the server exactly as server.ts does (expressMiddleware from @apollo/server/express4,
+ * builds the server exactly as server.ts does (expressMiddleware from @as-integrations/express4,
  * `formatError: formatGraphQLError`) and throws the typed fault from the CONTEXT BUILDER — the
  * middleware's real surface, where Apollo would otherwise wrap it as an untyped
  * INTERNAL_SERVER_ERROR over a context-failure 500. What must reach the wire: HTTP 503 (the
@@ -18,7 +18,7 @@ import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { ApolloServer } from '@apollo/server';
-import { expressMiddleware } from '@apollo/server/express4';
+import { expressMiddleware } from '@as-integrations/express4';
 import { Prisma } from '../../generated/prisma/index.js';
 import {
   AUTH_STORE_BUSY_MESSAGE,
@@ -92,15 +92,12 @@ describe('a busy store in the Apollo context builder (#4471)', () => {
     // The domain prose, never Apollo's "Context creation failed" decoration of it.
     expect(wire.message).toBe(AUTH_STORE_BUSY_MESSAGE);
     expect(wire.message).not.toMatch(/Context creation failed/i);
-    // Exactly the typed extensions. `http.status` is ON the wire by design: it is the
-    // graphql-over-http channel that makes the response 503 (#1303's mechanism), and it
-    // carries no driver detail — the BLIND P3 asked whether it leaks; the answer is that
-    // it is the mechanism, pinned here rather than filtered.
-    expect(wire.extensions).toEqual({
+    // Exactly the fixed fields (#4591). Apollo consumes `extensions.http` to set the 503 above,
+    // and the formatter no longer copies it back onto the wire.
+    expect(wire.extensions).toStrictEqual({
       code: 'AUTH_STORE_BUSY',
       retryable: true,
       reason: 'POOL_WAIT',
-      http: { status: 503 },
     });
     expect(text).not.toMatch(/P2024|Timed out fetching/i);
   });
@@ -117,11 +114,10 @@ describe('a busy store in the Apollo context builder (#4471)', () => {
     expect(body.errors).toHaveLength(1);
     const wire = body.errors[0];
     expect(wire.message).toBe(AUTH_STORE_UNREACHABLE_MESSAGE);
-    expect(wire.extensions).toEqual({
+    expect(wire.extensions).toStrictEqual({
       code: 'AUTH_STORE_BUSY',
       retryable: true,
       reason: 'STORE_UNREACHABLE',
-      http: { status: 503 },
     });
     // The host:port from the driver message never reaches the wire.
     expect(text).not.toMatch(/P1001|Can't reach|127\.0\.0\.1/i);

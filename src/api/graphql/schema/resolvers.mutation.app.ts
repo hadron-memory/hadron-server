@@ -1,3 +1,5 @@
+import { softDeleteChatToolConnections, dispatchChatToolTeardown, type ChatToolTeardown } from '../../../lib/chatToolTeardown.js';
+import { requireOwnerHeadroom } from '../../../lib/ownerLimits/gate.js';
 import { endHeldGrants } from '../../../lib/grants/departure.js';
 import { markNewInstallPayload } from './installationPayload.js';
 import { requireInstructedAct, sameActPrincipal, type StaffActAdmission, type ActInstruction, type ActAdmission } from '../../../lib/auth/instructedAct.js';
@@ -7,7 +9,7 @@ import { assertPositiveSessionTimeout } from '../../../lib/sessionTimeout.js';
 import { appendMemberRemovedEvent, appendMemberSetEvent, appendStaffingInstructionClaim, staffingActActor, staffingInstruction, eventActor } from '../../../lib/agentTasks/events.js';
 import type { Prisma } from '../../../generated/prisma/index.js';
 import { loadOfferedMemberRoles } from '../../../lib/memberRoles.js';
-import { requireAppKeyIssuer, lockAppKeyManagerMemberships } from './appKeyManagement.js';
+import { requireAppKeyIssuer, lockAppKeyManagerMemberships, newAppKeyMaterial, createAppKeyRow } from './appKeyManagement.js';
 import { detachAppOwnerMemories } from '../../../controller/operations/detachAppOwnerMemories.js';
 // appMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
 import {
@@ -54,6 +56,7 @@ import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
+import { derivedSlugBase, nextFreeDerivedSlug } from '../../../lib/derivedSlug.js';
 import { parsePolicyLink } from '@hadron-memory/access-control';
 import { GraphQLError } from 'graphql';
 import { uninstallApp, reinstallApp, locateForDelete } from './appInstallState.js';
@@ -75,6 +78,7 @@ import {
   requireReadableAgent,
   requirePersonalAppAgentInstall,
   assertAppNotUninstalled,
+  assertNameNotBlank,
 } from './resolvers.helpers.js';
 import { findOrCreateAppClassMemory } from './chat-scope.js';
 // Spec 049 Phase 4 — the App's default Channel, created with the App.
@@ -287,9 +291,8 @@ async function removeAppMemberWithAdmission(
   // #764 + #816 review: appRef/userRef accept id / URN / (user) handle /
   // email. #4142 (S6 chunk F) dropped the deprecated appId/userId aliases:
   // the refs are required. Evaluate the ROLE gate BEFORE resolving the
-  // target user, so an
-  // unauthorized caller can't turn user resolution into an existence
-  // oracle. A role-authorized caller may remove anyone; everyone else may
+  // target user, so an unauthorized caller can't turn user resolution into
+  // an existence oracle. A role-authorized caller may remove anyone; everyone else may
   // remove ONLY themselves — and a self-only caller's target resolution
   // maps any miss to the same Forbidden, with the resolved id required to
   // be the caller, so an unknown handle/email is indistinguishable from a
@@ -359,6 +362,14 @@ async function removeAppMemberWithAdmission(
     } },
   );
   return true;
+}
+
+/** The App a cascade reuses for a dependency Agent in an organization (one per pair). The headroom pre-count (#5016) and the install loop read it through here, so the two cannot drift. */
+async function findExistingDependencyApp(db: Context['db'], organizationId: string, agentId: string) {
+  return db.app.findFirst({
+    where: { organizationId, appAgents: { some: { agentId } }, deletedAt: null },
+    select: { id: true },
+  });
 }
 
 export const appMutations = {
@@ -512,7 +523,15 @@ export const appMutations = {
       // namespace is an org domain OR the bare user handle for a user-owned App.
       // #574: shared slugify.
       //
-      const appSlug = deriveSlugFromName(urn ?? name);
+      // #5203 S3: with no `urn` supplied the slug is DERIVED from the name and never refuses the create
+      // (hrn:node:hadronmemory.com:specs:cor:urn:010:01). It skips a reserved word and any App row holding the URN on
+      // the active index (`uninstalled_at IS NULL`, the scope of apps_urn_active_uniq), live or deleted, so a deleted
+      // holder is never reclaimed. A supplied `urn` keeps today's answers below.
+      if (urn == null) assertNameNotBlank(name, 'App');
+      const appSlug = urn != null
+        ? deriveSlugFromName(urn)
+        : await nextFreeDerivedSlug(derivedSlugBase(name), async (candidate) =>
+          (await ctx.db.app.count({ where: { urn: `${namespace}:${candidate}`, uninstalledAt: null } })) > 0);
       const appUrn = `${namespace}:${appSlug}`;
 
       // 009-install-agent-flow: agentRef is required (typeDef gate). Resolve the
@@ -600,7 +619,7 @@ export const appMutations = {
         personalSubscription = !isOwnAgent;
       }
 
-      // Hard-delete a soft-deleted collision so the URN can be reused
+      // Hard-delete a soft-deleted collision so the URN can be reused (a supplied `urn` only, #5203 S3)
       // (same pattern as createAgent/createMemory).
       //
       // Spec 021 FR-027: App.urn is no longer globally unique — the
@@ -609,9 +628,9 @@ export const appMutations = {
       // active row via `findFirst` with the active-row filter so
       // uninstalled history rows sharing the same URN don't surface
       // here.
-      const existing = await ctx.db.app.findFirst({
+      const existing = urn != null ? await ctx.db.app.findFirst({
         where: { urn: appUrn, uninstalledAt: null },
-      });
+      }) : null;
       if (existing) {
         if (existing.deletedAt) {
           // #974 / cor:agt:020:02: a soft-deleted App keeps reserving all of
@@ -623,13 +642,18 @@ export const appMutations = {
           await assertNoWorkers(ctx.db, existing.id, appUrn, 'reclaim');
           // #1468 — the delete cascades the App's memories: refused while one
           // is a stamped corpus still holding a spec.
-          await ctx.db.$transaction(async (tx) => {
+          const reclaimTeardowns = await ctx.db.$transaction(async (tx) => {
             await assertNoInstallMemories(tx, existing.id, appUrn);
             await detachAppOwnerMemories(tx, [existing.id]);
             const doomed = await tx.memory.findMany({ where: { appId: existing.id }, select: { id: true } });
             await assertNoMintedCorpusCascade(tx, doomed.map((m) => m.id), 'reclaim the App URN over');
+            // #4828: an App soft-deleted BEFORE its deletion tore its tool registrations down still holds live connection rows, which this
+            // hard delete would cascade away silently; collect them first, ask their tools after the commit. Rows already torn down return nothing.
+            const torn = await softDeleteChatToolConnections(tx, { appId: existing.id }, ctx.userId ?? ctx.clientId ?? null);
             await tx.app.delete({ where: { id: existing.id } });
+            return torn;
           });
+          dispatchChatToolTeardown(reclaimTeardowns);
         } else {
           // #2785: typed, like the memory collision (#2819); a plain Error is
           // masked as INTERNAL_SERVER_ERROR (cor:api:260:01). Names only the
@@ -650,6 +674,14 @@ export const appMutations = {
       // gate re-runs on txCtx: org ADMIN and the #1584 license plan, or the
       // personal owner eligibility rule, including current org membership.
       const licensedAgentIds = [resolvedAgentId, ...selectedImports.map((imp) => imp.importedAgentId)];
+      // #5016: a cascading install adds the App itself plus each dependency that has no App in the organization yet (the loop below reuses
+      // one that has). A personal App never cascades. The main transaction asks for all of them at once; each dependency's own
+      // transaction asks for its one App again, so a call racing in between cannot overshoot.
+      const newDependencyApps = resolvedOrgId
+        ? await Promise.all([...new Set(selectedImports.map((imp) => imp.importedAgentId))].map(async (agentId) =>
+          (await findExistingDependencyApp(ctx.db, resolvedOrgId, agentId)) ? 0n : 1n,
+        )).then((xs) => xs.reduce<bigint>((a, b) => a + b, 0n))
+        : 0n;
       const createdApp = await withAuthorizedTx(
         ctx,
         [
@@ -682,6 +714,7 @@ export const appMutations = {
             await ensureAgentOrgGrant(tx, resolvedOrgId!, id);
           }
           if (personalSubscription) await ensureAgentSubscription(tx, ctx.userId!, resolvedAgentId);
+        await requireOwnerHeadroom(tx, { owner: resolvedOrgId ? { organizationId: resolvedOrgId } : { userId: ownerUserId! }, key: 'apps', amount: 1n + newDependencyApps, caller: ctx.userId ? { userId: ctx.userId } : null });
         const app = await tx.app.create({
           data: {
             organizationId: resolvedOrgId,
@@ -789,14 +822,7 @@ export const appMutations = {
           // Reuse an existing App for the same (org, dep agent) — one App per
           // (org, Agent) pair (v1 doesn't support per-bundle namespacing of
           // dep installations, per spec User Story 3 acceptance scenario 4).
-          const existingDepApp = await ctx.db.app.findFirst({
-            where: {
-              organizationId: resolvedOrgId,
-              appAgents: { some: { agentId: imp.importedAgentId } },
-              deletedAt: null,
-            },
-            select: { id: true },
-          });
+          const existingDepApp = await findExistingDependencyApp(ctx.db, resolvedOrgId, imp.importedAgentId);
           if (existingDepApp) continue;
 
           // Derive a sensible URN for the dep's App. Use the imported
@@ -824,13 +850,16 @@ export const appMutations = {
               // castings and recycle their permanently-reserved names.
               await assertNoWorkers(ctx.db, depCollision.id, depUrn, 'reclaim');
               // #1468 — same cascade rule as the parent App branch.
-              await ctx.db.$transaction(async (tx) => {
+              const depTeardowns = await ctx.db.$transaction(async (tx) => {
                 await assertNoInstallMemories(tx, depCollision.id, depUrn);
                 await detachAppOwnerMemories(tx, [depCollision.id]);
                 const doomed = await tx.memory.findMany({ where: { appId: depCollision.id }, select: { id: true } });
                 await assertNoMintedCorpusCascade(tx, doomed.map((m) => m.id), 'reclaim the App URN over');
+                const torn = await softDeleteChatToolConnections(tx, { appId: depCollision.id }, ctx.userId ?? ctx.clientId ?? null); // #4828, as above
                 await tx.app.delete({ where: { id: depCollision.id } });
+                return torn;
               });
+              dispatchChatToolTeardown(depTeardowns);
             } else {
               depUrn = `${depUrn}:${imp.importedAgentId.slice(-8)}`;
             }
@@ -851,6 +880,7 @@ export const appMutations = {
             },
             async (tx) => {
               if (depAutoGrant) await ensureAgentOrgGrant(tx, resolvedOrgId, imp.importedAgentId);
+              await requireOwnerHeadroom(tx, { owner: { organizationId: resolvedOrgId }, key: 'apps', caller: ctx.userId ? { userId: ctx.userId } : null });
               const cascaded = await tx.app.create({
                 data: {
                   organizationId: resolvedOrgId,
@@ -1153,7 +1183,7 @@ export const appMutations = {
       // #3997 (cor:sec:010:01 "a secret never outlives its owner"): its App-owned secrets go in the SAME transaction, each
       // with a DELETE event, and the owner's tombstone (the durable start of the one-year event retention, R25) is written
       // when the App has events. The BEFORE DELETE trigger on `apps` covers the hard-delete paths (account erasure, URN reclaim).
-      await withAuthorizedTx(
+      const teardowns = await withAuthorizedTx(
         ctx,
         [
           { kind: 'app', id: resolvedId },
@@ -1174,7 +1204,7 @@ export const appMutations = {
           });
           // #3690: an App that HOLDS a grant (another App's grantee) is a holder that went: those grants end here, after the apps FOR
           // UPDATE lock. Its OWN grants allow nothing already (the live check reads `apps.deleted_at`) and cascade at the reclaim.
-          if (deleted.count > 0) await endHeldGrants(tx, 'app', resolvedId);
+          if (deleted.count > 0) await endHeldGrants(tx, 'app', resolvedId, 'APP_DELETED');
           if (deleted.count > 0) {
             const actor = secretActorOf(ctx);
             const secrets = await tx.secret.findMany({ where: { ownerType: 'app', ownerId: resolvedId }, select: { id: true, name: true } });
@@ -1185,13 +1215,18 @@ export const appMutations = {
             await tx.$executeRaw`INSERT INTO secret_owner_tombstones (owner_type, owner_id)
               SELECT 'app', ${resolvedId} WHERE EXISTS (SELECT 1 FROM secret_events WHERE owner_type = 'app' AND owner_id = ${resolvedId})
               ON CONFLICT DO NOTHING`;
+            // #4828 (cor:dmo:080:04): the App's Telegram bot and the Slack workspaces it is the default App of go in the same transaction;
+            // the tools are asked to drop their side after the commit. An App already deleted returns nothing here, so a repeat asks nothing.
+            return softDeleteChatToolConnections(tx, { appId: resolvedId }, ctx.userId ?? ctx.clientId ?? null);
           }
+          return [] as ChatToolTeardown[];
         },
         // #3974: Uninstalled → Deleted while uninstalled (cor:dmo:050:21), by id only. resolveAppRef never reaches an uninstalled row by URN, but one uninstalled between the resolve and the lock must not be admitted for a URN either (§10 F1).
         { lockMode: 'exclusive', allowUninstalledApp: isEntityId(ref), afterLock: async (tx) => {
           await tx.$queryRaw`SELECT id FROM apps WHERE id = ${resolvedId} FOR UPDATE`;
         } },
       );
+      dispatchChatToolTeardown(teardowns);
       return true;
     },
 
@@ -1477,10 +1512,8 @@ export const appMutations = {
       const app = await ctx.db.app.findUniqueOrThrow({ where: { id: resolvedAppId } });
       // #3277: minting is person-only (hrn:node:hadronmemory.com:specs:cor:dmo:050:12, ruling 0098 A).
       await requireAppKeyIssuer(ctx, app, 'app-key.mint');
-      // Raw key format: hdr_app_<64 hex chars> (256 bits of entropy)
-      const rawKey = APP_KEY_PREFIX + randomBytes(32).toString('hex');
-      const keyHash = hashAppKey(rawKey);
-      const keyPreview = rawKey.slice(0, 12) + '...' + rawKey.slice(-4);
+      // Raw key format: hdr_app_<64 hex chars> (256 bits of entropy); #5259: one writer, shared with joinAgentTeamHost.
+      const material = newAppKeyMaterial();
       const appKey = await withAuthorizedTx(
         ctx,
         [{ kind: 'app', id: resolvedAppId }, ...(app.organizationId
@@ -1493,20 +1526,12 @@ export const appMutations = {
           }
           await requireAppKeyIssuer(txCtx, current, 'app-key.mint');
         },
-        (tx) => tx.appKey.create({
-          data: {
-            appId: resolvedAppId,
-            keyHash,
-            keyPreview,
-            label: label ?? null,
-            createdBy: ctx.userId ?? null,
-          },
-        }),
+        (tx) => createAppKeyRow(tx, { appId: resolvedAppId, label: label ?? null, createdBy: ctx.userId ?? null, material }),
         { afterLock: async (tx) => {
           await lockAppKeyManagerMemberships(tx, ctx, app);
         } },
       );
-      return { key: appKey, rawKey };
+      return { key: appKey, rawKey: material.rawKey };
     },
 
     /**
@@ -1521,8 +1546,9 @@ export const appMutations = {
       if (!key) {
         // A worker session never learns whether the key exists; a person keeps the not-found answer of before.
         if (await callerIsWorkerSession(ctx)) throw authorizationDenied();
-        await ctx.db.appKey.findUniqueOrThrow({ where: { id }, include: { app: true } });
-        throw authorizationDenied();
+        // #5266: typed, as grantAppKeyScope answers it; judged before any write, and it never quotes the id (#5225). The raw
+        // findUniqueOrThrow this replaces reached the wire as INTERNAL_SERVER_ERROR.
+        throw new GraphQLError('App key not found.', { extensions: { code: 'APP_KEY_NOT_FOUND' } });
       }
       const target = key;
       let admission: ActAdmission = await admitAppManagement(ctx, target.app, authorizationDenied, instruction, undefined, true);
@@ -1680,7 +1706,7 @@ export const appMutations = {
       // user — collapse both to NOT_FOUND. If present, return it
       // unchanged when already revoked; descendants are still traversed.
       if (!row) {
-        throw new GraphQLError(`UserApiKey ${id} not found.`, {
+        throw new GraphQLError('UserApiKey not found.', {
           extensions: { code: 'NOT_FOUND' },
         });
       }
@@ -1729,7 +1755,7 @@ export const appMutations = {
         { lockMode: 'exclusive' },
       );
       if (!row) {
-        throw new GraphQLError(`UserApiKey ${id} not found.`, { extensions: { code: 'NOT_FOUND' } });
+        throw new GraphQLError('UserApiKey not found.', { extensions: { code: 'NOT_FOUND' } });
       }
       if (hidden && !row.revokedAt) {
         throw new GraphQLError('Only a revoked API key can be hidden; revoke it first.', {
@@ -1795,7 +1821,7 @@ export const appMutations = {
         { lockMode: 'exclusive' },
       );
       if (!record) {
-        throw new GraphQLError(`UserApiKey ${id} not found.`, { extensions: { code: 'NOT_FOUND' } });
+        throw new GraphQLError('UserApiKey not found.', { extensions: { code: 'NOT_FOUND' } });
       }
       return record;
     },

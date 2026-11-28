@@ -12,7 +12,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
-import type { Context } from './resolvers.helpers.js';
+import { canOpenMemoryRecordById, type Context } from './resolvers.helpers.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -69,11 +69,27 @@ describe('#4140 SDL: the old names are gone', () => {
 });
 
 describe('#4140 updateMemory(ref, orgRef) and updateOrganization(ref)', () => {
+  it('#4218: the SDL documents orgRef as PK or URN on the resolved id, the transfer refusal, and the manage-scoped org miss', () => {
+    const doc = (buildSchema(typeDefs).getType('Mutation') as GraphQLObjectType).getFields().updateMemory!.description ?? '';
+    expect(doc).toMatch(/fully-qualified URN/);
+    expect(doc).toMatch(/RESOLVED organization id/);
+    expect(doc).toContain('USE_TRANSFER_MEMORY_OWNERSHIP');
+    expect(doc).toContain('transferMemoryOwnership');
+    expect(doc).toMatch(/may manage the memory, an organization that\s+does not exist answers ORGANIZATION_NOT_FOUND/);
+    expect(doc).toMatch(/cannot read the\s+memory gets its concealed MEMORY_NOT_FOUND/);
+    expect(doc).toMatch(/can read\s+it but may not manage it gets the ordinary authorization denial/);
+    expect(doc).not.toMatch(/must equal/i);
+  });
   it('ref accepts a PK and a URN; the memory\'s OWN org by URN or PK is a no-op', async () => {
     const m = await knowledge(orgA, 'mem');
     for (const ref of [m.id, m.urn]) {
       for (const orgRef of [orgA.id, orgA.urn]) {
-        expect((await M.updateMemory({}, { ref, orgRef, description: `d-${orgRef.length}` }, ctxOf(admin.id))).id).toBe(m.id);
+        // #4218: a no-op orgRef must not swallow the rest of the call: the description really round-trips.
+        const description = `d-${ref.length}-${orgRef.length}`;
+        const updated = await M.updateMemory({}, { ref, orgRef, description }, ctxOf(admin.id));
+        expect(updated.id).toBe(m.id);
+        expect(updated.description).toBe(description);
+        expect((await db.memory.findUniqueOrThrow({ where: { id: m.id } })).description).toBe(description);
       }
     }
   });
@@ -91,6 +107,16 @@ describe('#4140 updateMemory(ref, orgRef) and updateOrganization(ref)', () => {
     const missing = await refusal(M.updateMemory({}, { ref: generateId(), orgRef: 'no-such-org.example' }, ctxOf(stranger.id)));
     expect(codeOf(outsider)).toBe('MEMORY_NOT_FOUND');
     expect(codeOf(missing)).toBe('MEMORY_NOT_FOUND');
+  });
+  it('#4218: a readable non-manager gets the ordinary authorization denial, never the org lookup or the concealed answer, as the SDL says', async () => {
+    const m = await knowledge(orgA, 'readable');
+    // The precondition that makes this the readable-non-manager case, not the concealed one.
+    expect(await canOpenMemoryRecordById(ctxOf(member.id), m.id)).toBe(true);
+    const denied = await refusal(M.updateMemory({}, { ref: m.id, orgRef: 'no-such-org.example', description: 'must-not-land' }, ctxOf(member.id)));
+    // Brooks (blind, #4692): pin the exact denial, not a set of not-X codes.
+    expect(codeOf(denied)).toBe('FORBIDDEN');
+    // ...and the refused call wrote nothing.
+    expect((await db.memory.findUniqueOrThrow({ where: { id: m.id } })).description).not.toBe('must-not-land');
   });
   it('updateOrganization ref accepts a PK and a URN, and the ADMIN gate is on the resolved org', async () => {
     for (const ref of [orgA.id, orgA.urn]) {
@@ -122,7 +148,7 @@ describe('#4140 createAgent(orgRef, systemMemoryRef)', () => {
     for (const r of refs) {
       const e = await refusal(M.createAgent({}, { orgRef: orgA.id, name: 'X', systemMemoryRef: r }, ctxOf(admin.id)));
       expect(codeOf(e)).toBe('MEMORY_NOT_FOUND');
-      expect(e.message).toBe(`MEMORY_NOT_FOUND: ${r}`);
+      expect(e.message).toBe('MEMORY_NOT_FOUND: nothing found for the given ref.');
       expect(e.message).not.toContain(hidden.id);
       answers.push(e.message.replace(r, '<ref>'));
     }
@@ -180,7 +206,7 @@ describe('#4140 updateAgent(systemMemoryRef)', () => {
     for (const r of [hidden.urn, gone.urn, `${orgA.urn}:never-existed`]) {
       const e = await refusal(M.updateAgent({}, { ref: a.id, systemMemoryRef: r }, ctxOf(admin.id)));
       expect(codeOf(e)).toBe('MEMORY_NOT_FOUND');
-      expect(e.message).toBe(`MEMORY_NOT_FOUND: ${r}`);
+      expect(e.message).toBe('MEMORY_NOT_FOUND: nothing found for the given ref.');
     }
   });
   it('first attach on a USER-owned agent is the owner\'s act BEFORE resolution: an admitted platform ADMIN sees the exact FORBIDDEN for existing, missing and relative refs', async () => {
@@ -227,7 +253,7 @@ describe('#4140 LOCAL F1: an unreadable AMBIGUOUS legacy alias is indistinguisha
     const without = await refusal(M.createAgent({}, { orgRef: orgA.id, name: 'Amb', systemMemoryRef: claim }, ctxOf(admin.id)));
     expect(codeOf(withAlias)).toBe('MEMORY_NOT_FOUND');
     expect(withAlias.message).toBe(without.message);
-    expect(withAlias.message).toBe(`MEMORY_NOT_FOUND: ${claim}`);
+    expect(withAlias.message).toBe('MEMORY_NOT_FOUND: nothing found for the given ref.');
   });
   it('updateAgent first attach: same answer with and without the foreign aliases', async () => {
     const a = await brainless('AmbAttach');

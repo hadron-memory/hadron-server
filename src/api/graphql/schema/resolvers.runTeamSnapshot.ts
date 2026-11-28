@@ -1,6 +1,5 @@
 import { GraphQLError } from 'graphql';
 import { isId } from '../../../lib/entityRef/shape.js';
-import { AppNotFoundError, AmbiguousLegacyUrnError } from '../../../lib/entityRef/errors.js';
 import { assertFullyQualifiedUrn, parseUrnInput } from '../../../lib/urn.js';
 import { pageTake } from '../pageBounds.js';
 /** #3350 / ruling 0112 amended: one automation's team snapshot grant, never an App-wide permission. */
@@ -8,6 +7,7 @@ import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { managesApp } from '../../../lib/auth/appManagement.js';
 import { requirePersonAsThemselves, requirePersonOnlyAct } from '../../../lib/auth/personAsThemselves.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import type { Context } from './resolvers.js';
 import type { ActInstruction } from '../../../lib/auth/instructedAct.js';
@@ -32,7 +32,8 @@ async function appOf(ctx: Context, ref: string) {
     try { assertFullyQualifiedUrn(ref, 'app'); parseUrnInput(ref); } catch { throw denied(); }
   }
   try { id = (await resolveAppRef(ctx.db, ref)).id; } catch (e) {
-    if (e instanceof AppNotFoundError || e instanceof AmbiguousLegacyUrnError) throw denied();
+    // #4893: the shared resolution list — malformed and ambiguous join the unknown App.
+    if (isAppRefResolutionFailure(e)) throw denied();
     throw e; // A database or programming fault is not an authorization refusal.
   }
   const app = await ctx.db.app.findFirst({ where: { id, deletedAt: null, uninstalledAt: null }, select: APP_SELECT });

@@ -2,7 +2,7 @@ import { resolveAppInstallation, listAppInstallations } from '../../../lib/appIn
 /**
  * Spec 049 Phase 5 — the register's read + write surface (D-2026-09-13-007).
  *
- * `registerEntry(ref)` / `registerEntries(filter, orgId, …)` follow §8.6: a
+ * `registerEntry(ref)` / `registerEntries(filter, orgRef, …)` follow §8.6: a
  * row is returned to a caller who may read its Channel's host memory or is on
  * the row's owner side; a filter naming a foreign Channel or attendee returns
  * the same empty page as a nonexistent one. Mutations go through the owner
@@ -25,6 +25,7 @@ import {
   resolveOrgScope,
 } from './resolvers.helpers.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
+import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { resolveChannelRefId } from '../../../lib/entityRef/channelRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
@@ -65,7 +66,7 @@ async function readableEntry(ctx: Context, ref: string): Promise<RegisterEntry |
 async function writableEntry(ctx: Context, ref: string): Promise<RegisterEntry> {
   if (ctx.impersonation) throw forbiddenError();
   const row = await readableEntry(ctx, ref);
-  if (!row) throw new GraphQLError(`No match for registerEntryRef "${ref}".`, { extensions: { code: 'NOT_FOUND' } });
+  if (!row) throw new GraphQLError('No match for registerEntryRef.', { extensions: { code: 'NOT_FOUND' } });
   await requireRegisterOwnerWrite(ctx, row);
   return row;
 }
@@ -109,17 +110,24 @@ export const registerQueries = {
           attendee = { workerId: id };
           appId = w.appId;
         }
-      } catch {
+      } catch (e) {
+        // #4893/#2975: only a name-resolution failure is the empty answer; a database fault propagates.
+        if (!refNamesNothing(e, { ambiguousNamesNothing: true })) throw e;
         return [];
       }
     } else if (agentRef?.trim() && appRef?.trim()) {
-      try {
-        const [{ id: agentId }, { id: resolvedAppId }] = await Promise.all([resolveAgentRef(ctx.db, agentRef), resolveAppRef(ctx.db, appRef)]);
-        attendee = { agentId, appId: resolvedAppId };
-        appId = resolvedAppId;
-      } catch {
-        return [];
-      }
+      // #4893/#2975: only a name-resolution failure is the empty answer; a database fault
+      // propagates — even when the OTHER arm failed to resolve, so the two are settled
+      // separately and a fault always wins the fold (#4948: Promise.all settles
+      // with the first rejection, letting a malformed arm mask a faulting one).
+      // The settled pair is named `agentArm`/`appArm` so it cannot shadow the `app` row read below.
+      const [agentArm, appArm] = await Promise.allSettled([resolveAgentRef(ctx.db, agentRef), resolveAppRef(ctx.db, appRef)]);
+      const fault = [agentArm, appArm].find((r): r is PromiseRejectedResult =>
+        r.status === 'rejected' && !refNamesNothing(r.reason, { ambiguousNamesNothing: true }));
+      if (fault) throw fault.reason;
+      if (agentArm.status === 'rejected' || appArm.status === 'rejected') return [];
+      attendee = { agentId: agentArm.value.id, appId: appArm.value.id };
+      appId = appArm.value.id;
     } else {
       throw new GraphQLError('Pass workerRef, or agentRef with appRef.', { extensions: { code: 'BAD_USER_INPUT' } });
     }
@@ -136,19 +144,19 @@ export const registerQueries = {
     _: unknown,
     {
       filter,
-      orgId,
+      orgRef,
       limit,
       offset,
     }: {
       filter?: { ownerRef?: string | null; channelRef?: string | null; attendeeRef?: string | null } | null;
-      orgId?: string | null;
+      orgRef?: string | null;
       limit?: number | null;
       offset?: number | null;
     },
     ctx: Context,
   ) => {
     const empty = { items: [] as RegisterEntry[], total: 0 };
-    const scope = await resolveOrgScope(ctx, orgId);
+    const scope = await resolveOrgScope(ctx, orgRef);
     if (!scope) return empty;
     const and: Prisma.RegisterEntryWhereInput[] = [{ deletedAt: null }, await readableRegisterWhere(ctx)];
     if (scope.scopedOrgId) {
@@ -159,10 +167,13 @@ export const registerQueries = {
       let ownerWhere: Prisma.RegisterEntryWhereInput | null = null;
       try {
         ownerWhere = { appId: (await resolveAppRef(ctx.db, ref)).id };
-      } catch {
+      } catch (appErr) {
+        // #4893/#2975: only a name-resolution failure falls through to the org arm; a fault propagates.
+        if (!refNamesNothing(appErr, { ambiguousNamesNothing: true })) throw appErr;
         try {
           ownerWhere = { organizationId: (await resolveOrgRef(ctx.db, ref)).id };
-        } catch {
+        } catch (orgErr) {
+          if (!refNamesNothing(orgErr, { ambiguousNamesNothing: true })) throw orgErr;
           return empty;
         }
       }
@@ -217,17 +228,21 @@ async function readableAttendee(
   }
   if (!attendee) {
     if (!appRef?.trim()) return null;
-    try {
-      const [{ id: agentId }, { id: resolvedAppId }] = await Promise.all([resolveAgentRef(ctx.db, attendeeRef), resolveAppRef(ctx.db, appRef)]);
-      // An Agent-in-App attendee EXISTS only as a live install — the same
-      // rule resolveRegister's attendeeColumns applies (Codex P1 on PR #1168).
-      const install = await resolveAppInstallation(ctx.db,resolvedAppId,agentId);
-      if (!install) return null;
-      attendee = { agentId, appId: resolvedAppId };
-      appId = resolvedAppId;
-    } catch {
-      return null;
-    }
+    // #4893/#2975: a name-resolution failure on either arm is the door's null; a database
+    // fault propagates even when the other arm also failed to resolve (#4948).
+    // `agentArm`/`appArm`, not `agent`/`app` — the settled pair used to shadow
+    // the `app` row read below it.
+    const [agentArm, appArm] = await Promise.allSettled([resolveAgentRef(ctx.db, attendeeRef), resolveAppRef(ctx.db, appRef)]);
+    const fault = [agentArm, appArm].find((r): r is PromiseRejectedResult =>
+      r.status === 'rejected' && !refNamesNothing(r.reason, { ambiguousNamesNothing: true }));
+    if (fault) throw fault.reason;
+    if (agentArm.status === 'rejected' || appArm.status === 'rejected') return null;
+    // An Agent-in-App attendee EXISTS only as a live install — the same
+    // rule resolveRegister's attendeeColumns applies (Codex P1 on PR #1168).
+    const install = await resolveAppInstallation(ctx.db, appArm.value.id, agentArm.value.id);
+    if (!install) return null;
+    attendee = { agentId: agentArm.value.id, appId: appArm.value.id };
+    appId = appArm.value.id;
   }
   if (!attendee || !appId) return null;
   const app = await ctx.db.app.findFirst({ where: { id: appId, deletedAt: null }, select: { id: true, organizationId: true, ownerUserId: true } });
@@ -316,10 +331,10 @@ export const readStateMutations = {
     ctx: Context,
   ) => {
     const resolved = await readableAttendee(ctx, attendeeRef, appRef);
-    if (!resolved) throw new GraphQLError(`No match for attendeeRef "${attendeeRef}".`, { extensions: { code: 'NOT_FOUND' } });
+    if (!resolved) throw new GraphQLError('No match for attendeeRef.', { extensions: { code: 'NOT_FOUND' } });
     await requireReadStateDriver(ctx, resolved.attendee, resolved.appId);
     const channel = await registeredChannel(ctx, resolved.attendee, channelRef);
-    if (!channel) throw new GraphQLError(`No match for channelRef "${channelRef}".`, { extensions: { code: 'NOT_FOUND' } });
+    if (!channel) throw new GraphQLError('No match for channelRef.', { extensions: { code: 'NOT_FOUND' } });
     if (!Number.isInteger(seq) || seq < 0) throw new GraphQLError('seq must be a non-negative integer.', { extensions: { code: 'BAD_USER_INPUT' } });
     // A cursor past the watermark could never be corrected downward (every
     // later write is GREATEST) and would suppress attention until the Channel

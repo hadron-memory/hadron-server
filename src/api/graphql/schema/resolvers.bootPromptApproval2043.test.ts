@@ -279,7 +279,7 @@ describe('#2043 S6 — an outside approval ends when its node enters the placed 
     const node = await plain(f.agentMem.id);
     expect(await runAsActor({ workerId: f.worker.id, agentId: null }, () => codeOf(approve(node.id, ctxOf(f.admin.id))))).toBe('NO_ERROR');
     expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).approvalHash).not.toBeNull();
-    await M.updateNode(null, { input: { id: node.id, role: 'boot-prompt' } }, ctxOf(f.admin.id));
+    await M.updateNode(null, { input: { ref: node.id, role: 'boot-prompt' } }, ctxOf(f.admin.id));
     await ended(node.id);
   });
 
@@ -299,7 +299,7 @@ describe('#2043 S6 — an outside approval ends when its node enters the placed 
     const node = await plain(f.install.id);
     expect(await runAsActor({ workerId: f.worker.id, agentId: null }, () => codeOf(approve(node.id, ctxOf(f.admin.id))))).toBe('NO_ERROR');
     expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).approvalHash).not.toBeNull();
-    await M.updateNode(null, { input: { id: node.id, role: 'boot-prompt' } }, ctxOf(f.admin.id));
+    await M.updateNode(null, { input: { ref: node.id, role: 'boot-prompt' } }, ctxOf(f.admin.id));
     await ended(node.id);
   });
 
@@ -335,7 +335,7 @@ describe('#2043 S6 — an outside approval ends when its node enters the placed 
     const f = await fixture();
     const placed = await bootSource(f.agentMem.id);
     await approve(placed.id, ctxOf(f.admin.id));
-    await M.updateNode(null, { input: { id: placed.id, name: 'Renamed' } }, ctxOf(f.admin.id));
+    await M.updateNode(null, { input: { ref: placed.id, name: 'Renamed' } }, ctxOf(f.admin.id));
     expect((await db.node.findUniqueOrThrow({ where: { id: placed.id } })).approvalHash).not.toBeNull();
     const group = await bootSource(f.group.id, 'boot:stays');
     await approve(group.id, ctxOf(f.writer.id));

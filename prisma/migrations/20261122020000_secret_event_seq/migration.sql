@@ -1,0 +1,13 @@
+-- #4875 (F8 of #4814): a monotonic per-row sequence on secret_events, so events written in one transaction (which can share an `at`
+-- millisecond: the column is timestamp(3), and the UUIDv7 ids are random inside one millisecond) have a recoverable order. Reads order (at, seq).
+--
+-- Schema-additive, and the previous image runs against it (it never names the column, and the default fills its inserts). It is NOT
+-- free: BIGSERIAL is a volatile default (nextval), so PostgreSQL rewrites the whole heap under ACCESS EXCLUSIVE and writes it to WAL. The
+-- rewrite fires no row trigger (secret_event_append_only is an UPDATE/DELETE row trigger, and no event row is updated), and it fills every
+-- existing row from the sequence in physical order, so among ties that predate this migration the order is arbitrary and nothing claims
+-- otherwise. Cost: the table is young (App secrets shipped with migration 20261114120000, 8 days before this one) and holds one small
+-- row per secret act, so the rewrite is a short pause; its size was NOT measured in production (no production read was granted). A
+-- nullable `seq` with a catalog-only SET DEFAULT would skip the rewrite, but old rows would sort NULLs-first under `seq desc` and the
+-- Prisma column would no longer be a plain autoincrement; the reviewers can rule if the table is large. Indexes are unchanged: (at) still
+-- leads, and a tie sorts in memory.
+ALTER TABLE "secret_events" ADD COLUMN "seq" BIGSERIAL NOT NULL;

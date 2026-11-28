@@ -116,7 +116,7 @@ subscriber read stops the pass, as a failed `dueWakes` read does.
   so a re-offer never names the same task twice to the same receiver. A stall
   `ALARM` or a `CHILD_FINISHED` (#1704) is delivered the same way. An alarm
   names its task and its stall rule, which the script reads from the alarm
-  itself with `agentTeamEvents(taskId, alarmsOnly)`, paging by the last event
+  itself with `agentTeamEvents(taskRef, alarmsOnly)`, paging by the last event
   read until the exact id turns up or the history ends (the history is oldest
   first and keeps acknowledged alarms, George's #2160 P2). If a page fails, the
   cursor stalls or 50 pages pass, the wake is held. If that read fails, the
@@ -327,6 +327,16 @@ local/SSH/unknown host holds, even if all returned terminal rows look valid.
 A reused handle needs a known different incarnation. Failed or partial lists,
 unknown identities, and a still-present
 old incarnation (even disconnected or unwritable) remain held.
+
+**Identity across handles (#2362).** Nothing in Orca's `terminal list` contract or its
+source is available here to show that an incarnation keeps one handle for life (a live
+sample of 116 rows on 2026-11-21 had unique handles and unique incarnations, which shows
+no aliasing today and proves nothing about the contract). So absence is judged against
+the whole listing, not the prior handle: a row under ANY handle that names the old
+incarnation, or any row whose incarnation is empty or unknown, keeps the receipt held.
+Only a complete census in which every row has a known, different incarnation proves the
+old one gone. This is conservative: it can hold a worker longer, never replace early.
+The at-least-once notification limitation and the no-retirement-ack rule are unchanged.
 
 Before replacement, the script checks the inventory and current incarnation
 again and applies the normal composer, draft, timing and idle rules. It keeps

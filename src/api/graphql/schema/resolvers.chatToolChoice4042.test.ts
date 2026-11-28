@@ -49,7 +49,6 @@ beforeEach(async () => {
   await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
   await createDbAgentOrgGrant(db, org.id, agent.id);
   for (const [loc, data, content] of [
-    ['conversations', null, null],
     ['conversations:main', { stageOrder: ['s1'] }, null],
     ['conversations:main:s1', {}, 'prompt main/s1'],
   ] as const) {
@@ -127,7 +126,7 @@ describe('(b) chatToolChoiceFor(provider, model): the pure unsaved-pair decision
 
 describe('(c) chatEffectiveToolChoice(chatId)', () => {
   const asMember = (extra: Partial<Context> = {}) => ctx(member, extra);
-  const start = (args: Record<string, unknown> = {}, c: Context = asMember()) => M.startChat(null, { agentRef: agent.id, scope: 'shared', ...args }, c);
+  const start = (args: Record<string, unknown> = {}, c: Context = asMember()) => M.startChat(null, { agentRef: agent.id, appRef: app.id, scope: 'shared', ...args }, c);
   const effective = (chatId: string, c: Context = asMember()) => Q.chatEffectiveToolChoice(null, { chatId }, c);
 
   it('default branch: a chat on `default` returns the decision of the config the walk lands on, at Agent, Org and Host level', async () => {
@@ -178,9 +177,14 @@ describe('(c) chatEffectiveToolChoice(chatId)', () => {
 
   it('no-App chat: an Agent chat with no App still gets the walk\'s decision', async () => {
     await cfg({ agentId: agent.id }, 'default', 'anthropic', 'claude-fable-5-2');
-    await db.appAgent.delete({ where: { appId_agentId: { appId: app.id, agentId: agent.id } } }); // no installed App: the org manager's chat is App-less
+    // #5394: before, the org manager's start with no installed App provisioned an App-less (knowledge) home. That route is
+    // retired: the same start now names the App, which no longer installs the Agent, and is refused as an unknown Agent.
+    // The App-less chat is the retained pre-#5394 row: started under the App, then given the shape that route wrote.
     const { chatId } = await start({ scope: 'private' }, ctx(admin));
+    await db.appAgent.delete({ where: { appId_agentId: { appId: app.id, agentId: agent.id } } }); // no installed App
     const node = await chatNodeByLocOrThrow(db, chatId);
+    await db.memory.update({ where: { id: node.memoryId }, data: { class: 'knowledge', userId: null, appId: null, visibility: 'ORGANIZATION' } });
+    expect(await code(start({ scope: 'private' }, ctx(admin))), 'the retired no-App route').toBe('AgentNotFoundError');
     expect((await db.memory.findUniqueOrThrow({ where: { id: node.memoryId } })).appId).toBeNull();
     expect(await effective(chatId, ctx(admin))).toBe('AUTO');
   });
@@ -222,6 +226,16 @@ describe('(c) chatEffectiveToolChoice(chatId)', () => {
     // the turn's own resolution refuses the same state (drift guard for the host-refusal branch)
     await expect(Q.resolveAIConfig(null, { name: 'default', appRef: mine.id }, ctx(admin))).rejects.toThrow();
     await cfg({ appId: mine.id }, 'default', 'anthropic', 'claude-opus-5-5');
+    expect(await ask()).toBe('AUTO');
+  });
+
+  it('#5075: in a person\'s App with an organization Agent, the publisher organization\'s `default` decides nothing (null); the Agent\'s own still does', async () => {
+    await cfg({ organizationId: org.id }, 'default', 'anthropic', 'claude-sonnet-5-5');
+    const mine = await db.app.create({ data: { ownerUserId: member.id, name: 'Mine5075', urn: `member-${generateId()}:mine5075` } });
+    await db.appAgent.create({ data: { appId: mine.id, agentId: agent.id } });
+    const ask = () => effectiveChatToolChoice(db, { appId: mine.id, agentId: agent.id, storedChoice: null });
+    expect(await ask()).toBeNull();
+    await cfg({ agentId: agent.id }, 'default', 'anthropic', 'claude-opus-5-5');
     expect(await ask()).toBe('AUTO');
   });
 

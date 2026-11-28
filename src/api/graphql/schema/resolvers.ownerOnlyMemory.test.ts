@@ -326,7 +326,7 @@ describe('private/personal access is owner-only', () => {
     const mine = (await resolvers.Query.memories(null, {}, asOwner())).items;
     expect(mine.map((m: any) => m.id)).toContain(mem.id);
     // owner can write a node (READER role notwithstanding — it's their memory)
-    const node = await resolvers.Mutation.createNode(null, { input: { memoryId: mem.id, loc: 'micromentor.repo.note', name: 'note' } } as any, asOwner());
+    const node = await resolvers.Mutation.createNode(null, { input: { memoryRef: mem.id, loc: 'micromentor.repo.note', name: 'note' } } as any, asOwner());
     expect(node.loc).toBe('micromentor.repo.note');
     // owner sees its nodes
     const nodes = await listNodes({}, asOwner());
@@ -341,7 +341,7 @@ describe('private/personal access is owner-only', () => {
     const nodes = await listNodes({}, asOther());
     expect(nodes.some((n: any) => n.memoryId === mem.id)).toBe(false);
     await expect(
-      resolvers.Mutation.createNode(null, { input: { memoryId: mem.id, loc: 'micromentor.repo.hack', name: 'h' } } as any, asOther()),
+      resolvers.Mutation.createNode(null, { input: { memoryRef: mem.id, loc: 'micromentor.repo.hack', name: 'h' } } as any, asOther()),
     ).rejects.toThrow('MEMORY_NOT_FOUND');
   });
 
@@ -349,7 +349,7 @@ describe('private/personal access is owner-only', () => {
     const mem = await createPrivate();
     await expect(resolvers.Query.memory(null, { ref: mem.id }, asAdmin())).resolves.toBeNull();
     await expect(
-      resolvers.Mutation.createNode(null, { input: { memoryId: mem.id, loc: 'micromentor.repo.adminedit', name: 'x' } } as any, asAdmin()),
+      resolvers.Mutation.createNode(null, { input: { memoryRef: mem.id, loc: 'micromentor.repo.adminedit', name: 'x' } } as any, asAdmin()),
     ).rejects.toThrow('MEMORY_NOT_FOUND');
   });
 
@@ -365,7 +365,7 @@ describe('private/personal access is owner-only', () => {
       const app = await db.app.create({
         data: { id: generateId(), organizationId: org.id, urn: `micromentor:${memoryClass}-app`, name: `${memoryClass}-app` },
       });
-      const input = { oldText: 'cat', newText: 'dog', nodeIds: [node.id], fields: ['content'] };
+      const input = { oldText: 'cat', newText: 'dog', nodeRefs: [node.id], fields: ['content'] };
       await expect(resolvers.Mutation.searchReplaceInNodes(
         {}, { input } as never, ctx({ userId: admin.id, roles: ['OWNER'], appId: app.id }),
       )).rejects.toThrow();
@@ -410,12 +410,12 @@ describe('MemoryShare boundary (U8)', () => {
   it('a personal memory can be shared; a private memory cannot', async () => {
     const personal = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'sharable', memoryClass: 'personal' } as any, asOwner());
     // personal: share accepted
-    const share = await resolvers.Mutation.createMemoryShare(null, { memoryId: personal.id, granteeId: other.id, role: 'writer' } as any, asOwner());
+    const share = await resolvers.Mutation.createMemoryShare(null, { memoryRef: personal.id, granteeRef: other.id, role: 'writer' } as any, asOwner());
     expect(share).toBeTruthy();
     // private: share rejected (class-not-shareable)
     const priv = await createPrivate('locked');
     await expect(
-      resolvers.Mutation.createMemoryShare(null, { memoryId: priv.id, granteeId: other.id, role: 'writer' } as any, asOwner()),
+      resolvers.Mutation.createMemoryShare(null, { memoryRef: priv.id, granteeRef: other.id, role: 'writer' } as any, asOwner()),
     ).rejects.toThrow();
   });
 });
@@ -442,7 +442,7 @@ describe('myMemories — active-org scope (#463)', () => {
     // Active org A: category (1) — the caller's OWN personal memories always
     // show, independent of the active org. So BOTH personalA and the org-B
     // personalB appear (they're user-owned, not org-owned).
-    const scoped = (await resolvers.Query.memories(null, { orgId: org.id }, asOwner())).items.map((m: any) => m.id);
+    const scoped = (await resolvers.Query.memories(null, { orgRef: org.id }, asOwner())).items.map((m: any) => m.id);
     expect(scoped).toContain(personalA.id);
     expect(scoped).toContain(personalB.id);
 
@@ -450,7 +450,7 @@ describe('myMemories — active-org scope (#463)', () => {
     const strangerOrg = await db.organization.create({
       data: { id: generateId(), name: 'stranger', urn: `stranger-${generateId()}` },
     });
-    expect(await resolvers.Query.memories(null, { orgId: strangerOrg.id }, asOwner())).toEqual({ items: [], total: 0 });
+    expect(await resolvers.Query.memories(null, { orgRef: strangerOrg.id }, asOwner())).toEqual({ items: [], total: 0 });
   });
 
   it('active org shows the org own + subscribed memories, but not another member org own memory', async () => {
@@ -462,7 +462,7 @@ describe('myMemories — active-org scope (#463)', () => {
     await db.orgMember.create({ data: { organizationId: bKnowledge.org.id, userId: owner.id, role: 'READER' } });
 
     // Active org = A: A's own memory (2) is in; B's own memory is NOT.
-    const scoped = (await resolvers.Query.memories(null, { orgId: aKnowledge.org.id }, asOwner())).items.map((m: any) => m.id);
+    const scoped = (await resolvers.Query.memories(null, { orgRef: aKnowledge.org.id }, asOwner())).items.map((m: any) => m.id);
     expect(scoped).toContain(aKnowledge.graph.id);
     expect(scoped).not.toContain(bKnowledge.graph.id);
   });

@@ -14,6 +14,7 @@ import { ensureChannelWithRoot } from '../../../lib/channels.js';
 import { APP_KEY_PREFIX, hashAppKey } from '../../../middleware/auth.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { resolvers, type Context } from './resolvers.js';
+import { joinHostForKey } from '../../../test/agentTeamHost.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -63,6 +64,7 @@ beforeEach(async () => {
   const mk = async (label: string, hostId: string) => {
     const raw = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
     const k = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4), label }, select: { id: true } });
+    await joinHostForKey(db, k.id, hostId);
     await M.grantAppKeyScope({}, { id: k.id, scope: 'host:operate', hostId }, ctx(manager.id));
     await M.registerHost({}, { input: { appRef: app.id, label: label, pollIntervalSeconds: 60, workers: [{ worker: worker.id, family: 'claude' }] } }, hostCtx(k.id));
     return k;
@@ -202,7 +204,11 @@ describe('one summary post per run, only when something changed (cor:agt:020:14 
     await db.$transaction((tx) => insertSweepRun(tx, app.id, 'orca1', ok.run));
     expect(await postPendingSweepSummaries(db, new Date(Date.now() + 60_000))).toBe(1);
     expect(await posts()).toHaveLength(1);
-  });
+    // #4866: the cost is the scan over the 600 unpostable rows (setup about 10 ms, the run insert about 3 ms, the scan about
+    // 1.3 s idle), so the default 5 s left 3.8x headroom idle and about 1.2x under 12 parallel copies of this file plus 32
+    // busy CPUs (4.3 s worst of 12 runs): a loaded CI shard could miss it once. 30 s keeps the assertion, and its 600 rows,
+    // exactly as they are; the sibling 520-App test below already carries 60 s for the same reason.
+  }, 30_000);
   it('520 unpostable Apps sharing the cap do not starve one deliverable run across ticks (#4255 Clark F4, multi-App)', async () => {
     const x = Math.floor(Math.random() * 1_000_000);
     await db.app.createMany({ data: Array.from({ length: 520 }, (_, i) => ({ organizationId: org.id, name: `NoChat${i}`, urn: `${org.urn}:nc${x}-${i}` })) });

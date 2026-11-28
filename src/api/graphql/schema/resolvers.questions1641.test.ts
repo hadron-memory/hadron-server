@@ -16,6 +16,7 @@ import { questionDataSchema, questionLogDataSchema, type AnswerEntry, type Quest
 import { canonicalQuestionJson, questionName, renderQuestion, renderQuestionAbstract, renderQuestionLog } from '../../../lib/questions/render.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
 import { resolvers, type Context } from './resolvers.js';
+import { encryptWithSecret } from '../../../test/encryptMemoryWithSecret.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -61,28 +62,12 @@ const ask = (logRef: string, input: Record<string, unknown> = simple(), userId =
 /** The question's stored row. */
 const rowOf = (id: string) => db.node.findUniqueOrThrow({ where: { id } });
 
-/**
- * Append an answer-list entry CONSISTENTLY (data, rendered content, name and
- * abstract together, with a fingerprint refresh), standing in for the answer
- * door until S3 ships it (S3 deletes this helper). A real door write, minus
- * the door.
- */
-async function writeAnswerForTest(id: string, entry: Partial<AnswerEntry> & Pick<AnswerEntry, 'by'>): Promise<void> {
-  const row = await rowOf(id);
-  const d = questionDataSchema.parse(row.data);
-  const full: AnswerEntry = { kind: 'answer', key: null, text: null, reason: null, at: '2026-10-06T21:00:00.000Z', via: 'portal', ...entry };
-  const answers = [...d.answers, full];
-  const next: QuestionData = { ...d, answers, status: full.kind === 'answer' ? 'answered' : 'open' };
-  await db.node.update({
-    where: { id },
-    data: {
-      name: questionName(next), abstract: renderQuestionAbstract(next), content: renderQuestion(next),
-      data: next as never, revisionContentHash: 'refresh',
-    },
-  });
-}
-/** Answer the question with option `key` as `by`. */
-const answerAsS2 = (id: string, key: string, by: string) => writeAnswerForTest(id, { kind: 'answer', key, by });
+/** Answer the question with option `key` as `by`, through the real answer door (#4427). */
+const answerAs = async (id: string, key: string, by: string) =>
+  M.answerQuestion(null, { ref: id, input: { optionKey: key }, expectedRevision: (await rowOf(id)).revSeq }, as(by));
+/** Take the standing answer back as `by`, through the real take-back door (#4427). */
+const retractAs = async (id: string, by: string) =>
+  M.retractQuestionAnswer(null, { ref: id, expectedRevision: (await rowOf(id)).revSeq }, as(by));
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -271,10 +256,11 @@ describe('the App owner arm under concurrent revocation (#1690 review: Rook P3-1
       userId: holger.id, organizationId: orgId, appId: app.id, userMemoryOfAgentId: agent.id,
     } });
     await db.memoryShare.create({ data: { memoryId: personal.id, granteeId: reader.id, grantorId: holger.id, role: 'writer' } });
-    // Refused by the class guard and concealed; without the guard this create would succeed.
+    // Refused by the class guard; without the guard this create would succeed. #5389: the share now grants read, so the
+    // refusal is the plain QUESTION_FORBIDDEN rather than the concealed missing-memory answer.
     expect(await codeOf(M.createQuestionLog(null,
       { memoryRef: personal.id, loc: 'questions', defaultDeciders: [holger.id] }, as(reader.id))))
-      .toMatch(/^MEMORY_NOT_FOUND/);
+      .toMatch(/^QUESTION_FORBIDDEN/);
     expect(await db.node.count({ where: { memoryId: personal.id, role: 'question.log' } })).toBe(0);
   });
 });
@@ -466,11 +452,11 @@ describe('amendQuestion (§6.2, §7; #4426)', () => {
   it('after an answer, only a decider amends; answered options stay; the tier is never lowered', async () => {
     const log = await createLog();
     const d = await ask(log.row.id, simple({ tier: 'SIGNED' }));
-    await answerAsS2(d.row.id, 'yes', holger.id);
+    await answerAs(d.row.id, 'yes', holger.id);
     const view = await Q.question(null, { ref: d.row.id }, as());
     expect(D.state(view, {}, as())).toBe('ANSWERED_UNCONFIRMED');
     const amend = (input: Record<string, unknown>, userId = writer.id) =>
-      M.amendQuestion(null, { ref: d.row.id, input, expectedRevision: 1, reason: 'clarify' }, as(userId));
+      (async () => M.amendQuestion(null, { ref: d.row.id, input, expectedRevision: (await rowOf(d.row.id)).revSeq, reason: 'clarify' }, as(userId)))();
     expect(await codeOf(amend({ title: 'x' }))).toBe('QUESTION_NOT_DECIDER');
     expect(await codeOf(amend({ options: [{ key: 'no', label: 'No' }], recommendation: { key: 'no', reason: 'r' } }, holger.id))).toBe('QUESTION_ANSWER_IMMUTABLE');
     expect(await codeOf(amend({ tier: 'APPROVED' }, holger.id))).toBe('QUESTION_TIER_TOO_LOW');
@@ -515,22 +501,22 @@ describe('withdrawQuestion (§7)', () => {
   it('acceptance 7: once ever answered, a decider only; a decider withdraws a DECIDED question (no supersession)', async () => {
     const log = await createLog();
     const d = await ask(log.row.id);
-    await answerAsS2(d.row.id, 'yes', holger.id);
+    await answerAs(d.row.id, 'yes', holger.id);
     expect(D.state(await Q.question(null, { ref: d.row.id }, as()), {}, as())).toBe('DECIDED');
-    expect(await codeOf(M.withdrawQuestion(null, { ref: d.row.id, reason: 'r', expectedRevision: 1 }, as(writer.id)))).toBe('QUESTION_NOT_DECIDER');
-    const w = await M.withdrawQuestion(null, { ref: d.row.id, reason: 'r', expectedRevision: 1 }, as(holger.id));
+    expect(await codeOf(M.withdrawQuestion(null, { ref: d.row.id, reason: 'r', expectedRevision: (await rowOf(d.row.id)).revSeq }, as(writer.id)))).toBe('QUESTION_NOT_DECIDER');
+    const w = await M.withdrawQuestion(null, { ref: d.row.id, reason: 'r', expectedRevision: (await rowOf(d.row.id)).revSeq }, as(holger.id));
     expect(D.state(w, {}, as())).toBe('WITHDRAWN');
   });
 
   it('a retraction does not undo "ever answered": the asker still cannot withdraw', async () => {
     const log = await createLog();
     const d = await ask(log.row.id);
-    await answerAsS2(d.row.id, 'yes', holger.id);
-    await writeAnswerForTest(d.row.id, { kind: 'retraction', by: holger.id, at: '2026-10-06T22:00:00.000Z' });
+    await answerAs(d.row.id, 'yes', holger.id);
+    await retractAs(d.row.id, holger.id);
     expect(D.state(await Q.question(null, { ref: d.row.id }, as()), {}, as())).toBe('OPEN');
-    expect(await codeOf(M.withdrawQuestion(null, { ref: d.row.id, reason: 'r', expectedRevision: 1 }, as(writer.id)))).toBe('QUESTION_NOT_DECIDER');
+    expect(await codeOf(M.withdrawQuestion(null, { ref: d.row.id, reason: 'r', expectedRevision: (await rowOf(d.row.id)).revSeq }, as(writer.id)))).toBe('QUESTION_NOT_DECIDER');
     // The amend gate reads the same rule: after a retraction the asker still cannot amend.
-    expect(await codeOf(M.amendQuestion(null, { ref: d.row.id, input: { title: 'Ship it?' }, expectedRevision: 1, reason: 'r' }, as(writer.id)))).toBe('QUESTION_NOT_DECIDER');
+    expect(await codeOf(M.amendQuestion(null, { ref: d.row.id, input: { title: 'Ship it?' }, expectedRevision: (await rowOf(d.row.id)).revSeq, reason: 'r' }, as(writer.id)))).toBe('QUESTION_NOT_DECIDER');
   });
 });
 
@@ -554,7 +540,7 @@ describe('setQuestionLogDeciders (Q6) and purgeUnansweredQuestion (Q8)', () => {
     const log = await createLog();
     const d = await ask(log.row.id);
     const answered = await ask(log.row.id);
-    await answerAsS2(answered.row.id, 'yes', holger.id);
+    await answerAs(answered.row.id, 'yes', holger.id);
     expect(await codeOf(M.purgeUnansweredQuestion(null, { ref: d.row.id, reason: 'spam' }, as(admin.id)))).toBe('QUESTION_FORBIDDEN');
     expect(await codeOf(M.purgeUnansweredQuestion(null, { ref: answered.row.id, reason: 'x' }, as(platformAdmin.id, { roles: ['ADMIN'] })))).toBe('QUESTION_ANSWERED');
     expect(await M.purgeUnansweredQuestion(null, { ref: d.row.id, reason: 'spam' }, as(platformAdmin.id, { roles: ['ADMIN'] }))).toBe(true);
@@ -599,12 +585,12 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
   it('createNode / updateNode refuse the question family (ROLE_GOVERNED); updateNodeData too', async () => {
     const log = await createLog();
     const d = await ask(log.row.id);
-    expect(await codeOf(M.createNode(null, { input: { memoryId: memory.id, loc: 'x', name: 'x', role: 'question' } }, as()))).toBe('ROLE_GOVERNED');
-    expect(await codeOf(M.createNode(null, { input: { memoryId: memory.id, loc: 'y', name: 'y', role: 'question.log' } }, as()))).toBe('ROLE_GOVERNED');
-    expect(await codeOf(M.updateNode(null, { input: { id: d.row.id, content: 'x' } }, as()))).toBe('ROLE_GOVERNED');
-    expect(await codeOf(M.updateNode(null, { input: { id: d.row.id, role: null } }, as()))).toBe('ROLE_GOVERNED');
+    expect(await codeOf(M.createNode(null, { input: { memoryRef: memory.id, loc: 'x', name: 'x', role: 'question' } }, as()))).toBe('ROLE_GOVERNED');
+    expect(await codeOf(M.createNode(null, { input: { memoryRef: memory.id, loc: 'y', name: 'y', role: 'question.log' } }, as()))).toBe('ROLE_GOVERNED');
+    expect(await codeOf(M.updateNode(null, { input: { ref: d.row.id, content: 'x' } }, as()))).toBe('ROLE_GOVERNED');
+    expect(await codeOf(M.updateNode(null, { input: { ref: d.row.id, role: null } }, as()))).toBe('ROLE_GOVERNED');
     expect(await codeOf(M.updateNodeData(null, { nodeRef: d.row.id, data: { title: 'x' } }, as()))).toBe('ROLE_GOVERNED');
-    const refusal = await errorOf(M.updateNode(null, { input: { id: d.row.id, content: 'x' } }, as()));
+    const refusal = await errorOf(M.updateNode(null, { input: { ref: d.row.id, content: 'x' } }, as()));
     expect(refusal.extensions).toMatchObject({ kind: 'question', strength: 'authority', door: 'amendQuestion', mcpDoor: null });
     expect(refusal.message).toContain('There is no route to suggest');
     // No generic-shaped door mutation exists for the kind.
@@ -614,12 +600,12 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
 
   it('nothing is created in a log\'s code space except by askQuestion', async () => {
     const log = await createLog();
-    expect(await codeOf(M.createNode(null, { input: { memoryId: memory.id, loc: 'questions:QA', name: 'squat' } }, as()))).toBe('QUESTION_CONTAINED');
+    expect(await codeOf(M.createNode(null, { input: { memoryRef: memory.id, loc: 'questions:QA', name: 'squat' } }, as()))).toBe('QUESTION_CONTAINED');
     const other = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'loose', name: 'Loose' } });
     expect(await codeOf(M.moveNode(null, { sourceRef: other.id, targetUrn: `${memory.urn}:questions:QA` }, as()))).toBe('QUESTION_CONTAINED');
     // Deeper descendants are ordinary.
     const d = await ask(log.row.id);
-    expect(await codeOf(M.createNode(null, { input: { memoryId: memory.id, loc: `${d.row.loc}:note`, name: 'note' } }, as()))).toBe('NO_ERROR');
+    expect(await codeOf(M.createNode(null, { input: { memoryRef: memory.id, loc: `${d.row.loc}:note`, name: 'note' } }, as()))).toBe('NO_ERROR');
   });
 
   it('deleteNode (soft, hard, an ancestor recursively), moveNode, mergeNodes refuse QUESTION_CONTAINED', async () => {
@@ -648,9 +634,9 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
     }
     const revs = await db.nodeRevision.findMany({ where: { nodeId: d.row.id } });
     expect(revs).toHaveLength(3);
-    expect(await codeOf(M.deleteNodeRevision(null, { revisionId: revs[0].id }, as()))).toBe('QUESTION_CONTAINED');
+    expect(await codeOf(M.deleteNodeRevision(null, { nodeRevRef: revs[0].id }, as()))).toBe('QUESTION_CONTAINED');
     expect(await codeOf(M.clearNodeHistory(null, { nodeRef: d.row.id }, as()))).toBe('QUESTION_CONTAINED');
-    expect(await codeOf(M.restoreNodeRevision(null, { revisionId: revs[0].id }, as()))).toBe('ROLE_GOVERNED');
+    expect(await codeOf(M.restoreNodeRevision(null, { nodeRevRef: revs[0].id }, as()))).toBe('ROLE_GOVERNED');
     expect(await db.nodeRevision.count({ where: { nodeId: d.row.id } })).toBe(3);
   });
 
@@ -670,15 +656,15 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
     const priv = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'assistant', memoryClass: 'private' }, as(holger.id));
     await M.createQuestionLog(null, { memoryRef: priv.id, loc: 'questions', defaultDeciders: [holger.id] }, as(holger.id));
     const dataKey = Buffer.alloc(32, 7).toString('base64');
-    expect(await codeOf(M.encryptMemory(null, { memoryRef: priv.id, dataKey }, as(holger.id)))).toBe('QUESTION_LOG_ENCRYPTED');
+    expect(await codeOf(encryptWithSecret(null, { memoryRef: priv.id, dataKey }, as(holger.id)))).toBe('QUESTION_LOG_ENCRYPTED');
   });
 
-  it('approval: a log is never approvable, a question not yet (S2), and bulk approval skips both with a receipt', async () => {
+  it('approval: a log is never approvable, an unanswered question is QUESTION_NOT_ANSWERED (#4429), and bulk approval skips both with a receipt', async () => {
     const log = await createLog();
     const d = await ask(log.row.id);
     await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'ordinary', name: 'Ordinary', content: 'x' } });
     expect(await codeOf(M.approveNode(null, { nodeRef: log.row.id }, as(holger.id)))).toBe('QUESTION_LOG_NOT_APPROVABLE');
-    expect(await codeOf(M.approveNode(null, { nodeRef: d.row.id }, as(holger.id)))).toBe('QUESTION_NOT_APPROVABLE');
+    expect(await codeOf(M.approveNode(null, { nodeRef: d.row.id }, as(holger.id)))).toBe('QUESTION_NOT_ANSWERED');
     const bulk = await M.approveMemoryNodes(null, { memoryRef: memory.id }, as());
     expect(bulk).toMatchObject({ skippedQuestionCount: 2, skippedQuestions: ['questions', 'questions:QA'] });
     expect(bulk.approved.map((r: { loc: string }) => r.loc)).toContain('ordinary');
@@ -697,10 +683,10 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
       await messageOf(M.approveNode(null, { nodeRef: log.row.id }, as(holger.id))),
       await messageOf(M.approveNode(null, { nodeRef: d.row.id }, as(holger.id))),
       await messageOf(M.clearNodeHistory(null, { nodeRef: d.row.id }, as())),
-      await messageOf(M.deleteNodeRevision(null, { revisionId: rev.id }, as())),
+      await messageOf(M.deleteNodeRevision(null, { nodeRevRef: rev.id }, as())),
     ];
     expect(msgs[0]).toBe('A question log holds settings, not a question; it is never approved.');
-    expect(msgs[1]).toBe('A question is approved only by one of its deciders, which is not available yet.');
+    expect(msgs[1]).toBe(`${(d.row.data as { code: string }).code} has no standing answer to approve.`);
     expect(msgs[2]).toContain("Clearing a question's history");
     expect(msgs[3]).toContain("Deleting a question's revision");
     for (const m of msgs) expect(m).not.toMatch(/\bdecisions?\b/i);
@@ -711,7 +697,7 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
     const d = await ask(log.row.id);
     await M.amendQuestion(null, { ref: d.row.id, input: { title: 'Title 1' }, expectedRevision: 1, reason: 'r1' }, as(writer.id));
     const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: d.row.id } });
-    const e = await errorOf(M.updateNodeRevision(null, { revisionId: rev.id, revLabel: 'x' }, as()));
+    const e = await errorOf(M.updateNodeRevision(null, { nodeRevRef: rev.id, revLabel: 'x' }, as()));
     expect(e.extensions.code).toBe('QUESTION_CONTAINED');
     expect(e.message).toContain("Editing a question's history");
   });
@@ -867,18 +853,18 @@ describe('#1715 — merge-aware identity: stored ids follow mergeUsers, and no r
 
   it("the survivor is the decider: viewerIsDecider, awaitingMe, and a decider's withdrawal after an answer", async () => {
     const d = await ask((await createLog()).row.id);
-    await answerAsS2(d.row.id, 'yes', holger.id);
+    await answerAs(d.row.id, 'yes', holger.id);
     const survivor = await fresh(2);
-    expect(await codeOf(M.withdrawQuestion(null, { ref: d.row.id, reason: 'r', expectedRevision: 1 }, as(survivor.id)))).toMatch(/^QUESTION_NOT_FOUND|^QUESTION_NOT_DECIDER/);
+    expect(await codeOf(M.withdrawQuestion(null, { ref: d.row.id, reason: 'r', expectedRevision: (await rowOf(d.row.id)).revSeq }, as(survivor.id)))).toMatch(/^QUESTION_NOT_FOUND|^QUESTION_NOT_DECIDER/);
     await merge(holger.id, survivor.id);
     const view = await Q.question(null, { ref: d.row.id }, as(survivor.id));
     expect(await D.viewerIsDecider(view, {}, as(survivor.id))).toBe(true);
-    expect(await codeOf(M.withdrawQuestion(null, { ref: d.row.id, reason: 'merged', expectedRevision: 1 }, as(survivor.id)))).toBe('NO_ERROR');
+    expect(await codeOf(M.withdrawQuestion(null, { ref: d.row.id, reason: 'merged', expectedRevision: (await rowOf(d.row.id)).revSeq }, as(survivor.id)))).toBe('NO_ERROR');
   });
 
   it("an approval the merge moved to the survivor is still a decider's: the question stays DECIDED", async () => {
     const d = await ask((await createLog()).row.id);
-    await answerAsS2(d.row.id, 'yes', holger.id);
+    await answerAs(d.row.id, 'yes', holger.id);
     // Stands in for the approval door (questions are approvable from S2): holger approved revision 1.
     const r = await rowOf(d.row.id);
     await db.node.update({ where: { id: d.row.id }, data: {
@@ -964,7 +950,7 @@ it('old decision-role rows are not questions and a memory writer can edit them',
   expect(Q.question).toBeTypeOf('function');
   expect(await Q.question(null, { ref: node.id }, as(writer.id))).toBeNull();
   expect(await Q.questions(null, { logRef: log.id }, as(writer.id))).toEqual({ items: [], total: 0 });
-  await M.updateNode(null, { input: { id: node.id, name: 'Ordinary editable node' } }, as(writer.id));
+  await M.updateNode(null, { input: { ref: node.id, name: 'Ordinary editable node' } }, as(writer.id));
   expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).name).toBe('Ordinary editable node');
 });
 
@@ -1079,7 +1065,7 @@ describe('#4426 — the list orders and filters by priority', () => {
     const high = await ask(log.row.id, simple({ priority: 'HIGH' }));
     const urgent = await ask(log.row.id, simple({ priority: 'URGENT' }));
     const answeredHigh = await ask(log.row.id, simple({ priority: 'HIGH' }));
-    await answerAsS2(answeredHigh.row.id, 'yes', holger.id);
+    await answerAs(answeredHigh.row.id, 'yes', holger.id);
     const page = await Q.questions(null, { logRef: log.row.id, sort: 'PORTAL_DEFAULT' }, as(reader.id));
     expect(page.items.map((v: any) => v.row.id)).toEqual([urgent, high, answeredHigh, normal, low].map((v) => v.row.id));
     const only = await Q.questions(null, { logRef: log.row.id, priority: ['HIGH', 'LOW'] }, as(reader.id));

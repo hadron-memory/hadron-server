@@ -85,6 +85,10 @@ enum Role {
   ADMIN
   CONTRIBUTOR
   READER
+  /// A platform role only (#5012, Billing A5): a payment service's user, which may write credit grants and
+  /// adjustments (`grantCredits`, `adjustCredits`) and nothing else. Refused as an organization member's,
+  /// a memory subscription's and an invitation's role, and never combined with another role on one user.
+  BILLING
 }
 
 /// Per-App default role assigned to new members when no Agent
@@ -193,6 +197,16 @@ enum AgentType {
 enum AgentLifecycle {
   LONG_LIVED
   SHORT_LIVED
+}
+
+/// #5027 (hrn:node:hadronmemory.com:specs:cor:acl:030:01, D-2026-11-26-008) — where a chat goes when its starter names no
+/// home memory. APP_SHARED: the App's shared memory, found or created as a `shared` chat's is. PERSONAL and PRIVATE: the
+/// caller's own memory of that class in the App (one per class, hrn:node:hadronmemory.com:specs:cor:dmo:060:20). GROUP is
+/// not a value: a group home needs a named memory.
+enum ChatHome {
+  APP_SHARED
+  PERSONAL
+  PRIVATE
 }
 
 /// #4291 (S14 of #4229; decision record run-settings-are-not-worker-identity, settled A) — the generic effort scale
@@ -381,6 +395,7 @@ enum AssetScanStatus {
 ///
 /// Entity spec: hrn:node:hadronmemory.com:specs:cor:dmo:040:01.
 model User {
+  secretChangeRequests SecretChangeRequest[]
   id               String            @id @default(cuid())
   /// Unique username, e.g. "holger"; displayed as `@holger` in UI and node
   /// frontmatter `author` field, and the owner namespace of a user-owned
@@ -464,6 +479,8 @@ model User {
   // App/Agent/Memory). `ownedMemories` above is the personal/private strict
   // owner (Memory.userId) — a DIFFERENT relation from `tenantMemories` here.
   ownedApps                     App[]                       @relation("AppOwner")
+  /// #5077: the runs of the Apps this person owns (`app_runs.owner_user_id`).
+  ownedAppRuns                  AppRun[]                    @relation("AppRunOwner")
   ownedAgents                   Agent[]                     @relation("AgentOwner")
   tenantMemories                Memory[]                    @relation("MemoryTenantOwner")
   agentSubscriptions            AgentSubscription[]         @relation("UserAgentSubscriptions")
@@ -471,6 +488,7 @@ model User {
   // 023-app-shape: per-Memory authorization back-relations.
   memorySharesGranted           MemoryShare[]               @relation("MemorySharesGranted")
   memorySharesByGrantor         MemoryShare[]               @relation("MemorySharesByGrantor")
+  appMemoryLinks                AppMemoryLink[]             @relation("AppMemoryLinksByAttacher")
   memoryMemberships             MemoryMember[]              @relation("MemoryMemberships")
   // 025-oauth-for-mcp: user-level credential + OAuth back-relations.
   userApiKeys                   UserApiKey[]
@@ -487,7 +505,9 @@ model User {
   // #620: revisions this user approved (NodeRevision.approvedBy).
   approvedNodeRevisions         NodeRevision[]              @relation("NodeRevisionApprover")
   // 046-usage-metering: billing attribution back-relation.
-  usageEvents                   UsageEvent[]
+  usageEvents                   UsageEvent[]                  @relation("UsageEventUser")
+  /// #5020: units billed to this person (UsageEvent.billableUserId), apart from `usageEvents` (the work done for them).
+  billedUsageEvents             UsageEvent[]                  @relation("UsageEventBillableUser")
   // #772: the user's placed /app/dashboard widgets (user-scoped layout config).
   dashboardWidgets              DashboardWidget[]
   // #806: the user's SAVED widget configurations (a palette, not a placement).
@@ -502,12 +522,18 @@ model User {
   principal                     Principal?                  @relation("UserPrincipal", fields: [principalId], references: [id], onDelete: SetNull)
   /// #1325 — MemoryConfig templates this user owns (user-owned owner branch).
   memoryConfigTemplates         MemoryConfigTemplate[]      @relation("MemoryConfigTemplateOwnerUser")
+  ownerLimits                   OwnerLimit[]                @relation("OwnerLimitUser")
   /// #1715 — this account's merge into another, if it was merged away.
   mergedInto                    UserMerge?                  @relation("UserMergeSource")
   /// #1715 — accounts merged into this one.
   mergedFrom                    UserMerge[]                 @relation("UserMergeTarget")
+  /// #5014 - this person's credit ledger entries (kept when the person is deleted: the relation restricts).
+  creditLedgerEntries           CreditLedgerEntry[]         @relation("CreditLedgerOwner")
 
-  @@unique([externalAppId, externalId])
+  // #4335: users_external_app_id_external_id_key is a PARTIAL unique (WHERE external_id IS NOT NULL), as migration
+  // 20260519180903 builds it (cor:dmo:040:01's App-provisioned identity key). Prisma cannot model an index predicate and
+  // cannot see a partial index, so declaring it here made every later db push try to re-add it. It is not declared:
+  // prisma/partial-index-invariants.sql (post-push) owns it. Nothing reads the generated externalAppId_externalId key.
   @@map("users")
 }
 
@@ -664,7 +690,7 @@ model DashboardWidgetPreset {
 ///   (an Agent another organization owns).
 /// - Principal: `principalId` points at the row that reserves the organization's name in the namespace it shares
 ///   with user handles.
-/// - Billing: UsageEvent and CreditLedgerEntry rows are attributed to the organization.
+/// - Billing: UsageEvent rows are attributed to the organization; a CreditLedgerEntry belongs to an organization or a person.
 ///
 /// Behaviour: `policy` is the organization's layer of the action-policy chain, an allow-list that is copied into
 /// each run when the run is created, so an edit applies to later runs only. The GitHub App fields let the server
@@ -724,12 +750,14 @@ model Organization {
   exchangeConnections    ExchangeConnection[]
   connectionFlows        ConnectionFlow[]
   slackConnections       SlackConnection[]
+  telegramConnections    TelegramConnection[]
   mcpServers             McpServer[]
   homeAssistantInstances HomeAssistantInstance[]
   resendSender           ResendSender?
   // 046-usage-metering: billing back-relations.
   usageEvents            UsageEvent[]
   creditLedgerEntries    CreditLedgerEntry[]
+  ownerLimits            OwnerLimit[]
   apps                   App[]
   agentOrgGrants         AgentOrgGrant[]
   aiServiceConfigs       AiServiceConfig[]
@@ -934,6 +962,13 @@ model Memory {
   /// chk_memory_class_app_id: class='system' with an app_id ⇔ TRUE.
   isInstallMemory       Boolean @default(false) @map("is_install_memory")
 
+  /// #5183 (hrn:node:hadronmemory.com:specs:cor:dmo:060:20): TRUE only for a personal or private memory `createMemoryInApp` made under the
+  /// one-per-class rule (derived name, the user's own tenancy). It is the limit's marker: the door counts live rows
+  /// carrying it per (app, user, class). Pre-rule memories, attached, session, chat and `linkMemoryToUser` rows stay
+  /// FALSE and never count (R4). Deliberately NOT unique: an account merge may leave one user two holders and must
+  /// never be refused (S9); the door serializes on the caller's `app_members` row instead.
+  appUserMemory         Boolean @default(false) @map("app_user_memory")
+
   /// Globally unique identifier, e.g. "baragaun.com:secureid".
   /// Derived from `org.urn + ":" + slug`.
   urn                  String            @unique
@@ -958,15 +993,6 @@ model Memory {
   /// `properties`/`objectType` are validated against it in the enforcement
   /// phase (a later PR) — free-form until then.
   schema               Json?
-  /// #1591 — legacy whole-corpus flag retained for compatibility. Draft rights
-  /// now belong to each node and end at its first mint; false does not mean
-  /// every node in this memory is minted. Minting still clears this flag.
-  corpusDraft          Boolean           @default(false) @map("corpus_draft")
-  /// #1591 — legacy record of the latest nonempty mint in this memory and its
-  /// actor. Node mint records determine mint state; this stamp confers no
-  /// memory-wide removal protection or draft rights.
-  corpusMintedAt       DateTime?         @map("corpus_minted_at")
-  corpusMintedBy       String?           @map("corpus_minted_by")
   /// Classification tags for search and filtering.
   tags                 String[]
   /// License identifier (e.g. "MIT", "CC-BY-4.0", "proprietary").
@@ -1149,6 +1175,7 @@ model Memory {
   //                 symmetric team membership.
   shares              MemoryShare[]
   memberships         MemoryMember[]
+  appLinks            AppMemoryLink[]
   /// #1325 — this memory's rulebook, at most one row. ABSENT reads as the
   /// empty config: it is materialized on the first rule write, never at memory
   /// creation (there is no shared creation helper to hang that on —
@@ -1160,6 +1187,7 @@ model Memory {
   /// #2883 — automation read grants on this memory.
   automationReadGrants AppAutomationReadGrant[]
   gitMirrorObligations GitMirrorObligation[]
+  nodeTotal           MemoryNodeTotal?
 
   // #723: ONE shared app-class memory per (App, Agent) — the find-or-create key
   // that replaced the deterministic `…:shared` URN. Spans soft-deleted rows (the
@@ -1170,11 +1198,14 @@ model Memory {
   @@index([organizationId])
   @@index([userMemoryOfAgentId])
   @@index([anonymousExpiresAt])
-  @@index([userId])
+  // #4335: memories_user_id_idx is PARTIAL (WHERE user_id IS NOT NULL), as migration 20260519180903 builds it. Prisma
+  // cannot model an index predicate and cannot see a partial index, so declaring it here made every later db push try to
+  // create it again ("already exists"). It is not declared: prisma/partial-index-invariants.sql (post-push) owns it.
   @@index([appId])
   @@index([installOfAgentId])
   @@index([ownerUserId])
   @@index([legacyUrn])
+  @@index([appId, userId, class])
   @@map("memories")
 }
 
@@ -1351,8 +1382,9 @@ enum NodeContentValidationReporterKind {
 ///   - `reference`: pointers to external sources or to other memories, such as papers, URLs and asset references.
 ///   - `system`: an agent's internal configuration, such as conversation designs, stages and topics; usually in
 ///     an Agent's system memory and hidden from end-user search.
-///   `comment` is reserved by the platform for governed feedback (see CommentMeta). The platform also uses
-///   further values of its own, for example `task` and `compiled-boot-prompt`.
+///   `comment` is reserved by the platform for governed feedback (see CommentMeta). The platform also writes
+///   `task`, `chat-message` and `compiled-boot-prompt`. The one list of every value the platform names is
+///   `NODE_TYPES` in `src/lib/nodeTypes.ts` (#909); this comment and the MCP tool descriptions cite it.
 /// - `objectType` names the collection the node is an instance of, in a memory that declares a schema.
 /// - `role` says what the node is for. It is an open string; a small closed subset of its values routes writes
 ///   to that kind's own path. No platform behaviour depends on any other value, apart from the role rules a
@@ -1601,6 +1633,15 @@ model Node {
   /// edit with no user behind it clears it. Null = unknown (nodes edited before
   /// #2176 are not backfilled). No FK, like the audit stamps (hrn:node:hadronmemory.com:specs:cor:dmo:010:01).
   updatedByUserId     String?             @map("updated_by_user_id")
+  /// #5018 (Billing A14, hrn:node:hadronmemory.com:specs:cor:dmo:060:18) — the bytes this node's content, description, data and
+  /// properties take as stored (the ciphertext in an encrypted memory; `data` and `properties` as their jsonb text). Kept by the
+  /// `nodes_record_stored_bytes` trigger, never by a writer, and capped at the Int range. Null means not measured yet (a row
+  /// written before the trigger; the hand-run backfill fills it).
+  storedBytes         Int?                @map("stored_bytes")
+  /// #5018 — the same figure summed over this node's rows in `node_revisions`, kept by the triggers on that table; a node
+  /// starts at 0 and a not-measured (null) node stays null until the backfill. A BigInt, so the client leaves it out of every
+  /// default select (src/integrations/db/client.ts) and only the readers that need it ask.
+  revisionBytes       BigInt?             @map("revision_bytes")
 
   memory                   Memory                        @relation(fields: [memoryId], references: [id], onDelete: Cascade)
   includeReferences        IncludeReference[]
@@ -1754,6 +1795,12 @@ model Edge {
   /// derived from the endpoints + name when not authored (see
   /// `src/lib/edgeLoc.ts`). Mirrors `Node.loc`.
   loc                String
+  /// #2947 (rulings 0153, 0154, hrn:node:hadronmemory.com:specs:cor:api:190:01): whether `loc` was AUTHORED (supplied by a caller) or DERIVED from the
+  /// endpoints and name. RECORDED, never inferred at move time: a move rebases a derived loc and leaves an authored one
+  /// as written, even when an authored loc happens to equal the derivation. `true` is the safe default: a writer that
+  /// does not say is treated as authored, which a move never rewrites. The migration classified existing rows once, by
+  /// derivation shape (see `edgeLocDecodesAsDerived`, `src/lib/edgeLoc.ts`).
+  locAuthored        Boolean           @default(true) @map("loc_authored")
   /// Free-form relationship name (e.g. imports, depends_on, abstract-of).
   /// Optional since spec-037 — `loc` is now the identity. (Was `label`.)
   name               String?
@@ -2169,7 +2216,7 @@ model Session {
 ///   when the event was written, so a request attributed to a lapsed session does not make it live again.
 /// - Rollup: database triggers on this table maintain UsageActivityCell.
 ///
-/// Specs: hrn:node:hadronmemory.com:specs:cor:dmo:080:02, hrn:node:hadronmemory.com:specs:cor:dmo:100:02.
+/// Specs: hrn:node:hadronmemory.com:specs:cor:dmo:080:02, hrn:node:hadronmemory.com:specs:cor:dmo:170:06.
 model UsageEvent {
   id               String    @id @default(cuid())
   type             String
@@ -2205,9 +2252,15 @@ model UsageEvent {
   /// The on-behalf-of user (billing attribution). Nullable — pure-App
   /// service runs have no user. Distinct from the audit `createdBy` string.
   userId           String?   @map("user_id")
-  /// The billable organization. Set on every metered event so ledger
-  /// attribution never needs a join through App.
+  /// The billable organization: set only when the billable account is an organization (the owner of the work,
+  /// hrn:node:hadronmemory.com:specs:cor:dmo:170:05), so ledger attribution never needs a join through App. At most
+  /// one of this and `billableUserId` is set (`chk_usage_event_one_billable`); neither is set for a unit with no
+  /// owner of the work.
   organizationId   String?   @map("organization_id")
+  /// #5020 (Billing A13): the billable person, when the owner of the work is a person (hrn:node:hadronmemory.com:specs:cor:dmo:170:05
+  /// and the person arm of hrn:node:hadronmemory.com:specs:cor:dmo:170:01). Distinct from `userId`, the user the work was
+  /// done for: `aiSpend(userRef:)` reads by this column and never by `userId`. Set null if the user row is deleted.
+  billableUserId   String?   @map("billable_user_id")
   /// LLM provider that served the call — `model` alone is ambiguous
   /// across providers (e.g. claude via anthropic vs bedrock).
   provider         String?
@@ -2217,8 +2270,21 @@ model UsageEvent {
   keyOwnerType     String?   @map("key_owner_type")
   /// Provider cost snapshot in micro-cents (1e-8 USD), computed from the
   /// AiModelPrice row effective at event time. NULL = no price known (or the
-  /// event carries no tokens). Never recomputed — prices change (FR-003).
+  /// unit predates the column). Never recomputed — prices change (FR-003).
   costMicroCents   BigInt?   @map("cost_micro_cents")
+  /// #5021 (hrn:node:hadronmemory.com:specs:cor:dmo:170:06): the AiModelPrice row that priced this unit. Null when
+  /// the unit is unpriced (no row in force or a host-priced provider; a unit with zero tokens still records the row in force, at cost 0) and on every unit recorded before the
+  /// column: it is never filled in by matching effective dates. Price rows are never deleted (the relation restricts).
+  priceRowId       String?   @map("price_row_id")
+  /// #5021 (hrn:node:hadronmemory.com:specs:cor:dmo:170:06): the markup applied to this unit's charge, in basis
+  /// points (2500 = 25%): the price row's own markup, else the fleet-wide `CREDIT_MARKUP_PERCENT` default at the
+  /// moment of recording. Set exactly when the unit meets the debit condition (debits on, the platform's own key, a
+  /// positive cost, a billable organization) and null otherwise. It is written with the unit, before the debit, so a
+  /// debit that then fails leaves a markup and no ledger entry: whether a unit was charged is read from the ledger.
+  markupBasisPoints Int?     @map("markup_basis_points")
+  /// #5021 (gate ruling 9): the AppRun this unit was spent by, written in the same insert. Null for spend outside a
+  /// run and for every unit recorded before the column (no backfill). Set null if the run row is deleted.
+  appRunId         String?   @map("app_run_id")
   /// #1653 / ruling DY-2: whether this event counts as ACTIVITY for its
   /// session's liveness. True only when the session was live AND owned by the
   /// recording principal at write time (`usageEventCountsAsActivity`), so a
@@ -2238,8 +2304,11 @@ model UsageEvent {
   session      Session?      @relation(fields: [sessionId], references: [id], onDelete: SetNull)
   app          App?          @relation(fields: [appId], references: [id], onDelete: SetNull)
   appKey       AppKey?       @relation(fields: [appKeyId], references: [id], onDelete: SetNull)
-  user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  user         User?         @relation("UsageEventUser", fields: [userId], references: [id], onDelete: SetNull)
   organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  billableUser User?         @relation("UsageEventBillableUser", fields: [billableUserId], references: [id], onDelete: SetNull)
+  priceRow     AiModelPrice? @relation(fields: [priceRowId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  appRun       AppRun?       @relation(fields: [appRunId], references: [id], onDelete: SetNull)
 
   @@index([nodeLoc])
   @@index([type])
@@ -2255,8 +2324,14 @@ model UsageEvent {
   @@index([userId, createdAt])
   @@index([memoryId, createdAt])
   @@index([organizationId, createdAt])
+  /// #5020: aiSpend(userRef:) reads a person's billed units, newest first within a window.
+  @@index([billableUserId, createdAt])
   /// #2944: the key-filtered read (usageEvents(appKey:)), newest first within a window.
   @@index([appKeyId, createdAt])
+  /// #5021: cost corrections (A15) select units by their price row.
+  @@index([priceRowId])
+  /// #5021: a run hard delete nulls this FK (SET NULL); without it each delete scans the firehose (#451).
+  @@index([appRunId])
   // #1903: session liveness also needs the PARTIAL index
   // usage_events_session_activity_idx (session_id, created_at) WHERE
   // counts_as_activity. Prisma can't model a partial index, so it lives in
@@ -2370,6 +2445,10 @@ model Agent {
   /// LONG_LIVED Agent that its host reports idle is reset (`worker.reset-context`), at most once an hour. Null (the default)
   /// is no cap. Written by whoever manages the Agent, like `usesTasks`. `chk_agents_context_cap` keeps it at 1 or more.
   contextCap            Int?            @map("context_cap")
+  /// #5027 (hrn:node:hadronmemory.com:specs:cor:acl:030:01) — the home a chat takes when `startChat` names neither
+  /// `memoryRef` nor `scope`. Null (the default) keeps today's behaviour. Written by whoever manages the Agent
+  /// (hrn:node:hadronmemory.com:specs:cor:dmo:050:13), like `usesTasks`.
+  defaultChatHome       ChatHome?       @map("default_chat_home")
   organizationId        String?         @map("organization_id")
   /// User owner of a user-owned Agent (rooted on the bare `<handle>` — #697 v2,
   /// no `@` sigil). The org/owner XOR is ENFORCED — `chk_agent_owner_xor` in
@@ -3569,6 +3648,104 @@ model SlackEventReceipt {
   @@map("slack_event_receipts")
 }
 
+/// One Telegram bot registered for a Hadron App (#597, Telegram phase 2). The bot token is held ENCRYPTED IN THE
+/// TELEGRAM TOOL (hadrontool-telegram), never in core: createTelegramConnection forwards it once and this row keeps
+/// only the identity the tool derived.
+///
+/// Relationships: `organization` is the App's owning organization (an App with no organization, a user-owned App,
+/// cannot have one); `app` is the App the bot belongs to. The tool's own connection id is `toolConnectionId`.
+///
+/// Behaviour:
+/// - Owner: the App, not the organization or a user (one bot per App, so the bot a person messages names the App).
+/// - One active connection per App: the partial unique index `telegram_connections_app_active_uniq` (raw SQL, in the
+///   migration and prisma/post-push.sql); a soft-deleted row never blocks a new one.
+/// - Routing: `toolConnectionId` is unique, so an inbound event resolves to exactly one connection.
+/// - Writes need an ADMIN or OWNER of the App's organization; reads need membership of it.
+///
+/// Decision record: hrn:node:hadronmemory.com:hadron-server:reference:hadrontool-telegram (decision 2).
+model TelegramConnection {
+  id               String    @id @default(cuid())
+  organizationId   String    @map("organization_id")
+  appId            String    @map("app_id")
+  /// The telegramClient dispatch key ('telegram' today).
+  provider         String    @default("telegram")
+  /// The provider tool's connection id: the ops-call handle and the events-ingress routing key.
+  toolConnectionId String    @map("tool_connection_id")
+  /// The bot's Telegram user id, as the tool reports it (a decimal string).
+  botId            String    @map("bot_id")
+  /// The bot's @username without the at sign.
+  botUsername      String    @map("bot_username")
+  displayName      String    @map("display_name")
+  /// 'ACTIVE' | 'ERROR', the tool's connection-status vocabulary.
+  status           String    @default("ACTIVE")
+  /// Error message from the last permanent provider failure.
+  lastError        String?   @map("last_error")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  createdBy        String?   @map("created_by")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+  deletedAt        DateTime? @map("deleted_at")
+  deletedBy        String?   @map("deleted_by")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  app          App          @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@unique([toolConnectionId])
+  @@index([organizationId])
+  @@index([appId])
+  @@map("telegram_connections")
+}
+
+/// The record that one incoming Telegram event has been taken for processing, kept so the same event is not
+/// processed twice (the tool delivers at least once).
+///
+/// Relationships: none by foreign key. `connectionId` is the tool's connection id
+/// (`TelegramConnection.toolConnectionId`); `eventId` is the tool's event id (Telegram's update id for a bot).
+///
+/// Behaviour: the dispatcher inserts a row for (connection, event) first and drops the delivery when that insert
+/// meets the unique key; a consumer that throws deletes its row so the retry runs again. Old rows are swept.
+model TelegramEventReceipt {
+  id           String   @id @default(cuid())
+  connectionId String   @map("connection_id")
+  eventId      String   @map("event_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@unique([connectionId, eventId])
+  @@index([createdAt])
+  @@map("telegram_event_receipts")
+}
+
+/// A durable request to drop one chat tool's side of a connection (Telegram or Slack) once core has deleted its row
+/// (#4847; hrn:node:hadronmemory.com:specs:cor:int:030:03). Recorded in the deleting transaction, attempted after the commit,
+/// retried by a sweep until the tool CONFIRMS, capped after ten attempts with one alarm.
+///
+/// Relationships: none by foreign key, on purpose. A URN reclaim hard-deletes an App and the connection rows cascade away with it;
+/// the intent must outlive them. `connectionId` is the core row it was recorded for (informational only); `toolConnectionId` is the
+/// tool's own handle for the registration, the only thing the tool call needs.
+///
+/// Behaviour: `state` PENDING until the tool answers a success (CONFIRMED) or the tenth attempt fails (CAPPED: one alarm, no more
+/// retries, an operator requeues it). `attempts` counts claims; the wait after attempt n is 5 minutes doubling to at most 6 hours.
+/// A row exists only for a deletion that happened after this table did: older orphans have no intent and are out of scope.
+model ChatToolTeardownIntent {
+  id               String    @id @default(cuid())
+  /// 'telegram' | 'slack'.
+  kind             String
+  /// The client's dispatch key ('telegram' | 'slack' today).
+  provider         String
+  toolConnectionId String    @map("tool_connection_id")
+  connectionId     String?   @map("connection_id")
+  /// 'PENDING' | 'CONFIRMED' | 'CAPPED' (chk_chat_tool_teardown_state, #4945: Prisma cannot model it; post-push.sql and the migration carry it).
+  state            String    @default("PENDING")
+  attempts         Int       @default(0)
+  lastAttemptAt    DateTime? @map("last_attempt_at")
+  confirmedAt      DateTime? @map("confirmed_at")
+  cappedAt         DateTime? @map("capped_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  @@unique([kind, toolConnectionId])
+  @@index([state, lastAttemptAt])
+  @@map("chat_tool_teardown_intents")
+}
+
 /// The server's record of one web-polling job that a headless run started: which run, App, agent and user the
 /// job belongs to, and under which policy. When the polling tool later reports a change, this row decides which
 /// run principal that event may wake.
@@ -3680,7 +3857,7 @@ model McpServer {
   @@map("mcp_servers")
 }
 
-/// One named secret in the platform's secret store, owned by a user, an organization, an App or a memory. A run
+/// One named secret in the platform's secret store, owned by a user, an organization or an App. A run
 /// or a tool that needs a credential names the secret, and the server resolves and decrypts it for that use.
 ///
 /// Relationships: the owner is (`ownerType`, `ownerId`), deliberately without a foreign key. Whether a caller
@@ -3688,13 +3865,14 @@ model McpServer {
 /// App-owned secret keeps its value in SecretVersion rows.
 ///
 /// Behaviour:
-/// - Resolution: a bare name is looked up from the most specific owner to the least: memory, then App, then
-///   user, then organization. The name is unique per owner.
+/// - Resolution: a bare name is looked up from the most specific owner to the least: user, then organization.
+///   App secrets are outside that cascade (hrn:node:hadronmemory.com:specs:cor:sec:020:01). The name is unique
+///   per owner.
 /// - `kind` says what the secret is: `generic` is opaque; `webfetch-auth` is typed, with `metadata`
 ///   `{ type, urlPrefix }`, and is used only for requests under that URL prefix.
 /// - `metadata` is the part that is not secret and may be shown: a reader can see that a secret exists and where
 ///   it applies. `valueEncrypted` is never selected into a read.
-/// - For a user, organization or memory secret the value is in `valueEncrypted`, and a rotation overwrites it.
+/// - For a user or organization secret the value is in `valueEncrypted`, and a rotation overwrites it.
 ///   For an App secret that column is null and the value is the newest SecretVersion (`chk_secret_app_value`).
 ///   `protected` has a meaning only for App secrets.
 /// - Deleting is a hard delete; a run that still names the secret fails visibly.
@@ -3702,7 +3880,7 @@ model McpServer {
 /// Background: #677, #3997.
 model Secret {
   id             String   @id @default(cuid())
-  ownerType      String   @map("owner_type") // 'user' | 'org' | 'app' | 'memory'
+  ownerType      String   @map("owner_type") // 'user' | 'org' | 'app'
   ownerId        String   @map("owner_id")
   /// Cascade-resolution key; unique per owner; lowercase [a-z0-9-], max 64.
   name           String
@@ -3728,8 +3906,19 @@ model Secret {
   /// Plain ids, so an agent's write is attributable to a worker as the grant tables do.
   createdByWorkerId  String? @map("created_by_worker_id")
   createdBySessionId String? @map("created_by_session_id")
-  /// Only meaningful for App rows (`chk_secret_protected_app_only`); the protection ceremony is S4.
+  /// #3999: bumped by trigger `secret_change_revision` (function `hadron_secret_change_revision`) on every UPDATE of
+  /// the row, whatever column changed, so any committed secret touch invalidates earlier staged change requests,
+  /// same-millisecond ones included — deliberately broad; a stale request must never complete.
+  changeRevision Int @default(0) @map("change_revision")
+  /// Only meaningful for App rows (`chk_secret_protected_app_only`). A protected App secret changes only through the
+  /// requester's passkey ceremony (hrn:node:hadronmemory.com:specs:cor:sec:070:02).
   protected      Boolean  @default(false)
+  /// #5335: the owner's consent that a read client's auto-delete mark may delete this secret after its use
+  /// (hrn:node:hadronmemory.com:specs:cor:sec:060:03). Needed only on a protected secret: without it a mark is refused at
+  /// issuance there, and the sweep and the last read delete nothing. On a protected secret it changes only through the
+  /// requester's passkey ceremony (hrn:node:hadronmemory.com:specs:cor:sec:070:02), and turning protection on clears it, so a
+  /// protected secret is armed only by that ceremony. App rows only (`chk_secret_delete_after_use_app_only`).
+  deleteAfterUse Boolean  @default(false) @map("delete_after_use")
   versions       SecretVersion[]
 
   // Hard delete by design (registry-row posture): a deleted secret makes
@@ -3790,8 +3979,8 @@ model HomeAssistantInstance {
 /// Relationships: at most one per Organization, deleted with it.
 ///
 /// Behaviour: the server stores the API key encrypted and write-only. The stateless Resend capability tool
-/// receives the key only for a send that has already been authorized. One sender per organization means the
-/// credential used is never chosen by a model.
+/// receives the key only for a send, or for the read-only domain-status lookup (#4865), each after it has
+/// been authorized. One sender per organization means the credential used is never chosen by a model.
 model ResendSender {
   id              String   @id @default(cuid())
   organizationId  String   @unique(map: "resend_senders_organization_id_uniq") @map("organization_id")
@@ -3871,6 +4060,7 @@ model WaitingListItem {
 /// hrn:node:hadronmemory.com:specs:cor:dmo:050:21. Background (history, not law): the Spec Kit specs
 /// 008-agent-installation, 021 and 023-app-shape.
 model App {
+  secretChangeRequests SecretChangeRequest[]
   id                                String               @id @default(cuid())
   secretAppKeys                     SecretAppKey[]
   /// Display name.
@@ -3949,10 +4139,9 @@ model App {
   /// Null = derived (subscribed workers x (86400 / self-subscribe cadence) x 2).
   wakeDailyBudget                   Int?                 @map("wake_daily_budget")
   /// #3125 S1 (hrn:node:hadronmemory.com:specs:cor:dmo:050:02, hrn:node:hadronmemory.com:specs:cor:dmo:050:20): the App's own JSON object, the App equivalent of `Node.properties`.
-  /// Written whole by whoever manages the App (`setAppProperties`); never a credential. The platform still reads and
-  /// validates one reserved key, `taskIntegrations` (src/lib/appProperties.ts). The law has since retired that
-  /// App-property integration in favour of the intake adapter contract (hrn:node:hadronmemory.com:specs:cor:agt:120:04);
-  /// removing the key's handling is tracked in #4085. NULL = no properties. CHECK: an object when set.
+  /// Written whole by whoever manages the App (`setAppProperties`); never a credential. The platform reads no key of
+  /// it: the `taskIntegrations` handling was retired with the intake adapter contract
+  /// (hrn:node:hadronmemory.com:specs:cor:agt:120:04, #4085), so a leftover value is inert data. NULL = no properties. CHECK: an object when set.
   properties                        Json?                @map("properties")
   /// #3125 S1 (V34): moved by every changing `setAppProperties` write, the optional expected-revision check's counter.
   /// Its own column, not `updatedAt`, which every other App write moves.
@@ -4042,12 +4231,14 @@ model App {
   wakeReservations        AppWakeReservation[]
   agentTeamEvents         AgentTeamEvent[]
   darkWorkerEpisodes      DarkWorkerEpisode[]
-  cadenceEpisodes         CoordinatorCadenceEpisode[]
-  cadenceClocks           CoordinatorCadenceClock[]
+  cadenceEpisodes         LeadCadenceEpisode[]
+  cadenceClocks           LeadCadenceClock[]
   postLimitEpisodes       PostLimitEpisode[]
   startFailingEpisodes    StartFailingEpisode[]
   hostSweepRuns           HostSweepRun[]
   hostSweepEpisodes       HostSweepEpisode[]
+  saturationEpisodes      SaturationEpisode[]
+  teamDarkEpisodes        TeamDarkEpisode[]
   automationAdoptionEvents AutomationAdoptionEvent[]
   /// #2484 — this App's prefix-scoped write grants for its userless runs, and their append-only history.
   memoryWriteGrants       AppMemoryWriteGrant[]
@@ -4057,6 +4248,7 @@ model App {
   automationReadGrantEvents AppAutomationReadGrantEvent[]
   automationTeamSnapshotGrants AppAutomationTeamSnapshotGrant[]
   automationTeamSnapshotGrantEvents AppAutomationTeamSnapshotGrantEvent[]
+  grantSigningSelections GrantSigningSelection[]
   /// #3668 — grants issued in this App, the grants THIS App holds, and the grant events.
   grants                  Grant[]      @relation("GrantApp")
   secretReadClients       SecretReadClient[]
@@ -4072,6 +4264,8 @@ model App {
   /// them). Set by whoever manages the App. Shape: prisma/host-assignment-invariants.sql.
   hostSetupSource         String                 @default("host") @map("host_setup_source")
   hostWorkerAssignments   HostWorkerAssignment[]
+  /// #5259 — the hosts joined to this App (one record per host and its settings).
+  agentTeamHosts          AgentTeamHost[]
   /// #2162 — the context resets of this App's workers.
   contextResets           ContextReset[]
   /// #2022 (S6, hrn:node:hadronmemory.com:specs:cor:agt:090) — the App's stop signals, live and ended.
@@ -4095,6 +4289,7 @@ model App {
   defaultChannel          Channel?                  @relation("AppDefaultChannel", fields: [defaultChannelId], references: [id], onDelete: SetNull)
   keys                    AppKey[]
   members                 AppMember[]
+  memoryLinks             AppMemoryLink[]
   memories                Memory[]                  @relation("AppMemories")
   users                   User[]
   sessions                Session[]
@@ -4111,6 +4306,7 @@ model App {
   automationVersions      AutomationVersion[]
   connectionGrants        ConnectionGrant[]         @relation("AppConnectionGrants")
   slackConnections        SlackConnection[]
+  telegramConnections     TelegramConnection[]
   memoryConfigTemplates   MemoryConfigTemplate[]
 
   @@index([organizationId])
@@ -4122,6 +4318,15 @@ model App {
   @@index([urn])
   @@index([ownerUserId])
   @@index([legacyUrn])
+  /// #4937 (hrn:node:hadronmemory.com:specs:cor:agt:050:31): the App's latest report of whether work exists OUTSIDE Hadron
+  /// (GitHub issues and the like), made by an App manager through `reportExternalTasks`. NULL = never reported, and the
+  /// lead cadence alarm does not exist for such an App. The platform never learns what the external tasks are, and there
+  /// is no staleness rule: the latest report counts however old it is.
+  externalTasksExist                Boolean?             @map("external_tasks_exist")
+  /// When the latest report that CHANGED the answer was made (database clock). NULL until the first report.
+  externalTasksReportedAt           DateTime?            @map("external_tasks_reported_at")
+  /// The user who made that report (a bare id, no relation: the report is a fact, not a membership).
+  externalTasksReportedBy           String?              @map("external_tasks_reported_by")
   @@index([chatbotAiConfigId])
   @@map("apps")
 }
@@ -4516,8 +4721,8 @@ model AppAgent {
 model Worker {
   id                String    @id @default(cuid())
   darkWorkerEpisodes DarkWorkerEpisode[]
-  cadenceEpisodes    CoordinatorCadenceEpisode[]
-  cadenceClock       CoordinatorCadenceClock?
+  cadenceEpisodes    LeadCadenceEpisode[]
+  cadenceClock       LeadCadenceClock?
   postLimitEpisodes PostLimitEpisode[]
   startFailingEpisodes StartFailingEpisode[]
   appId             String    @map("app_id")
@@ -4608,8 +4813,9 @@ model Worker {
   explicitNoTeam Boolean @default(false) @map("explicit_no_team")
   /// #2771 (proposed hrn:node:hadronmemory.com:specs:cor:agt:070:09) — the latest terminal report a HOST made for this worker, built by the server
   /// (`src/lib/workerTerminal.ts`): host {id,label}, status, prompt, reason (a closed code), lastTurnAt, checkedAt,
-  /// reportedAt. Null until a host first reports. A stored report that DECIDES NOTHING: it feeds no `checkStatus`,
-  /// availability, matcher, stall rule or alarm. No screen text is ever stored; `chk_workers_terminal_shape` (in
+  /// reportedAt. Null until a host first reports. A stored report that decides ONE thing (#4933): the platform issues no
+  /// desired-running start for a worker whose agent this host already runs (`src/lib/desiredState/desiredStart.ts`); it feeds no `checkStatus`,
+  /// availability, stall rule or alarm. No screen text is ever stored; `chk_workers_terminal_shape` (in
   /// prisma/host-operation-invariants.sql) allows exactly the keys above, so a write that bypasses the resolver still
   /// cannot store more. Read behind `maySeeWorkerInternals` (hrn:node:hadronmemory.com:specs:cor:dmo:050:11).
   /// #4225 S4a — the object also carries `contextTokens` and `contextMeasuredAt` (the worker's context size as its
@@ -4687,6 +4893,30 @@ model Worker {
   @@index([reportsToWorkerId])
   @@index([bootPromptNodeId])
   @@map("workers")
+}
+
+/// A link from an App to a memory it may read, made with `attachMemoryToApp` (hrn:node:hadronmemory.com:specs:cor:dmo:060:20, "An attached memory").
+///
+/// The memory is unchanged: no column of `memories` records a link. A link reaches the App's key and userless runs for
+/// READ only, and only while the attacher can read the memory in their own right, judged at use (`src/lib/appMemoryLinks.ts`);
+/// a row whose attacher lost read stays here, inert, until detached. One row per (App, memory, attacher).
+///
+/// Relationships: joins App, Memory and the attacher (User); a row goes with a hard-deleted App, memory or attacher, and
+/// `mergeUsers` moves the attacher.
+model AppMemoryLink {
+  appId      String   @map("app_id")
+  memoryId   String   @map("memory_id")
+  attachedBy String   @map("attached_by")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  app      App    @relation(fields: [appId], references: [id], onDelete: Cascade)
+  memory   Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+  attacher User   @relation("AppMemoryLinksByAttacher", fields: [attachedBy], references: [id], onDelete: Cascade)
+
+  @@id([appId, memoryId, attachedBy])
+  @@index([memoryId])
+  @@index([attachedBy])
+  @@map("app_memory_links")
 }
 
 /// A grant by the owner of a personal memory that lets one other user into it, as a reader or as a writer. It is the
@@ -5001,6 +5231,12 @@ model AuthCode {
   /// #1897: the recorded SignIn this code descends from (null = the approving session has no SignIn row, which is
   /// every ordinary sign-in, hrn:node:hadronmemory.com:specs:cor:aut:030:03; never inferred). Immutable, same owner as `userId`.
   signInId      String?   @map("sign_in_id")
+  /// #5125: set when the code is shown on the code page (hrn:node:hadronmemory.com:specs:cor:aut:030:01); null for a
+  /// code delivered by redirect. The code reads `<handle>.<secret>` and `codeHash` covers all of it; the handle alone is
+  /// not a secret, it is what a wrong entry is counted against.
+  entryHandle   String?   @unique @map("entry_handle")
+  /// Wrong entries against `entryHandle`. The fifth also sets `redeemedAt`, so the code is dead for every reader.
+  entryFailures Int       @default(0) @map("entry_failures")
 
   user   User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   client OAuthClient @relation(fields: [clientId], references: [clientId], onDelete: Cascade)
@@ -5292,6 +5528,7 @@ model PasskeyCredential {
   owner             User                       @relation(fields: [ownerId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   signatures        NodeSignature[]
   grantSignatures   GrantSignature[]
+  grantSelectionSignatures GrantSelectionSignature[]
   signIns           SignIn[]
   cancelToken       PasskeyCancelToken?
   notice            PasskeyRegistrationNotice?
@@ -5645,6 +5882,10 @@ model SecretEvent {
   sessionId   String?  @map("session_id")
   runId       String?  @map("run_id")
   at          DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)"))
+  /// #4875: the tiebreak when `at` ties (`at` is timestamp(3), so rows of one transaction can share a millisecond, and a UUIDv7 `id` is random
+  /// inside one millisecond, so it is no insertion order). A bigserial the DDL fills; reads order `(at, seq)`, `at` first. Rows that predate the
+  /// column got arbitrary values among their ties, so nothing reads `seq` as the order of history before #4875.
+  seq         BigInt   @default(autoincrement())
 
   @@index([ownerType, ownerId, at], map: "secret_events_owner_at_idx")
   @@index([secretId, at], map: "secret_events_secret_at_idx")
@@ -5759,6 +6000,11 @@ model AuthHandoffCode {
   signInId        String?   @map("sign_in_id")
   /// #2913: exchange_start (GraphQL origin) only — the ConnectionFlow this nonce belongs to. No FK: the flow outlives the nonce.
   flowId          String?   @map("flow_id")
+  /// #2948: exchange_start (Google providers) only — the account hint the caller verified as their
+  /// own connected address at the start, carried DB-backed to the authorize redirect where it
+  /// becomes Google's login_hint. The hint NEVER rides a URL (only the final Google redirect),
+  /// and the callback ignores it: the connection records the account Google authenticated.
+  loginHint       String?   @map("login_hint")
 
   user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   signIn SignIn? @relation(fields: [signInId, userId], references: [id, userId], onDelete: NoAction, onUpdate: NoAction)
@@ -5850,7 +6096,7 @@ enum AppRunTriggerKind {
 /// webhook, a manual request, an integration event or another run. The row is the run's durable record, and it is
 /// also what allows the run to go on: every action inside the run checks the row again.
 ///
-/// Relationships: one foreign key to an owner, `agentId` to Agent (#3689): every run names an existing Agent, and
+/// Relationships: one foreign key to an owner, `agentId` to Agent (#3689): once the `app_run_agent_required` migration has applied, every run names an existing Agent, and
 /// deleting an Agent row deletes its runs. `organizationId`, `appId`, `userId`, `triggerId` and `parentRunId` are plain
 /// ids, so the database deletes nothing with them. ManualAutomationPin, WebFetchPollBinding and WebFetchEventReceipt
 /// rows point at a run, and so does the record of the prompt a run was served (a foreign key in
@@ -5881,7 +6127,12 @@ enum AppRunTriggerKind {
 /// #538, #832, #1719, #2047, #2438, #2439. Background (history, not law): the Spec Kit specs 040 and 049.
 model AppRun {
   id                   String               @id
-  organizationId       String               @map("organization_id")
+  /// #5077 (Billing F3a): the run's owner is copied from its App when the row is written, never taken from a caller:
+  /// exactly one of `organizationId` and `ownerUserId` is set (`chk_app_run_owner_xor`). `organizationId` has no foreign
+  /// key; `ownerUser` cascades, though account deletion keeps the user row and deletes the runs itself.
+  organizationId       String?              @map("organization_id")
+  ownerUserId          String?              @map("owner_user_id")
+  ownerUser            User?                @relation("AppRunOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
   appId                String               @map("app_id")
   /// #3689 (hrn:node:hadronmemory.com:specs:cor:agt:010:01 rev 45): every run names an existing Agent. The DATABASE
   /// guarantees it: NOT NULL with a foreign key; an Agent hard delete removes its runs (gate R4). Mint refuses an
@@ -5988,11 +6239,21 @@ model AppRun {
   publishedAt          DateTime?            @map("published_at")
   startedAt            DateTime?            @map("started_at")
   finishedAt           DateTime?            @map("finished_at")
+  /// #855: elapsed milliseconds, finished_at - started_at, NULL while either is NULL (PENDING, RUNNING, failed before
+  /// it finished). A STORED GENERATED column that Prisma cannot express: the migration creates it, post-push.sql
+  /// converts the plain column `db push` makes (src/test/integration/855-apprun-duration-resync.test.ts pins the expression and type of both). NEVER written (the database
+  /// refuses a value); read-only here so appRuns can order by it through the same findMany/count pair. BIGINT: an
+  /// INTEGER of milliseconds overflows at 24.8 days. Negative (clock skew) is kept as stored. Left out of every default
+  /// read by the client's global omit (src/integrations/db/client.ts): a BigInt breaks JSON.stringify of a row, and the
+  /// generated column cannot be written back; select it by name when it is needed.
+  durationMs           BigInt?              @map("duration_ms")
   createdAt            DateTime             @default(now()) @map("created_at")
   createdBy            String?              @map("created_by")
 
   webFetchPollBindings  WebFetchPollBinding[]  @relation("WebFetchPollSourceRun")
   webFetchEventReceipts WebFetchEventReceipt[] @relation("WebFetchEventRoutedRun")
+  /// #5021 (gate ruling 9): the usage units spent by this run.
+  usageEvents           UsageEvent[]
 
   @@index([status, publishedAt])
   @@index([appId, createdAt])
@@ -6000,6 +6261,8 @@ model AppRun {
   @@index([agentId])
   @@index([parentRunId]) // spawn completion checks + child listings (plan-spawn)
   @@index([organizationId, createdAt])
+  @@index([ownerUserId, createdAt])
+  @@index([organizationId, durationMs])
   @@map("app_runs")
 }
 
@@ -6078,10 +6341,10 @@ model AgentSchedule {
   @@map("agent_schedules")
 }
 
-/// A usage counter for one App or one organization: how much of one metered action has been used in the current day,
+/// A usage counter for one App, one organization or one person: how much of one metered action has been used in the current day,
 /// and the limit. It is the first of the two quota tiers, the continuous one.
 ///
-/// Relationships: none by foreign key. `scopeKind` (`app` or `org`) and `scopeId` name the owner as plain values. One
+/// Relationships: none by foreign key. `scopeKind` (`app`, `org` or `user`) and `scopeId` name the owner as plain values. One
 /// row per owner, action and window.
 ///
 /// Behaviour:
@@ -6091,6 +6354,8 @@ model AgentSchedule {
 ///   stored `limit` is what is enforced, and it can be changed per row (`setQuotaLimit`); 0 pauses the owner.
 /// - `used` is checked at the launch gate and raised while a run executes. When `resetAt` has passed, the next touch
 ///   sets `used` back to 0 and moves `resetAt` to the next midnight UTC.
+///
+/// A `user` row is a person's shared counter for their Apps: it can be read and set, and is enforced once a person's App can run.
 ///
 /// Rules: hrn:node:hadronmemory.com:specs:cor:acl:050:01, hrn:node:hadronmemory.com:specs:cor:acl:050:04.
 model QuotaCounter {
@@ -6142,15 +6407,18 @@ model ActionTicket {
 /// The price of one AI model from one provider, from a given moment on. The platform uses it to work out what a unit
 /// of model usage cost, and what markup applies when that cost is charged to an organization's credits.
 ///
-/// Relationships: none. UsageEvent rows store the cost that was computed from a price; they do not point at the price
-/// row.
+/// Relationships: a UsageEvent names the row that priced it (`priceRowId`, #5021); the relation restricts, so a
+/// referenced row cannot be deleted.
 ///
 /// Behaviour:
 /// - One row per `provider`, `model`, `tier` and `effectiveAt`. A lookup takes the newest row whose `effectiveAt` is
-///   not after the time of the usage and that is not soft-deleted (`getAiModelPrice`, src/lib/metering/index.ts).
-/// - A price change adds a new row and never edits an old one, so the rate in force at the time of the work stays on
-///   record. A cost stored on a usage event is a snapshot and is never recomputed, which is why soft-deleting a wrong
-///   row is safe.
+///   not after the time of the usage (`getAiModelPrice`, src/lib/metering/index.ts). A row takes effect no sooner
+///   than one price-cache lifetime (60 seconds) after it is written, and an omitted `effectiveAt` is set to that
+///   instant, so every server process switches to it at its effective instant (#5021).
+/// - Rows are kept: a price change adds a new row, and no row is ever changed or deleted, not even by an operator. A
+///   trigger refuses every DELETE and every UPDATE (prisma/ai-model-price-invariants.sql), except that an audit user
+///   id follows a recorded account merge. A wrong row is corrected by a cost correction on each unit it priced, never
+///   by editing or retiring the row (hrn:node:hadronmemory.com:specs:cor:dmo:170:06).
 /// - Prices are in micro-cents (1e-8 USD) per million tokens, separately for input and output. `markupBasisPoints` is
 ///   the markup at this tier (2500 = 25%); null falls back to `CREDIT_MARKUP_PERCENT`.
 /// - `tier` is 1 to 3 and everything resolves tier 1 today. The columns are strings and integers with no enum or
@@ -6158,7 +6426,7 @@ model ActionTicket {
 /// - Managed by a platform admin (`setAiModelPrice`). A model with no price row gets no cost; the call itself is
 ///   never blocked.
 ///
-/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:100:02. Background (history, not law): the Spec Kit spec 046.
+/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:170:06. Background (history, not law): the Spec Kit spec 046.
 model AiModelPrice {
   id                      String    @id
   provider                String
@@ -6188,39 +6456,56 @@ model AiModelPrice {
   deletedAt               DateTime? @map("deleted_at")
   deletedBy               String?   @map("deleted_by")
 
+  usageEvents UsageEvent[]
+
   @@unique([provider, model, tier, effectiveAt])
   @@index([provider, model, tier])
   @@map("ai_model_prices")
 }
 
-/// One entry in an organization's ledger of AI credits: an amount added or taken away. The balance of an organization
-/// is the sum of its entries; no balance is stored anywhere.
+/// One entry in the ledger of AI credits of an organization or a person: an amount added or taken away. The balance of
+/// an account is the sum of its entries; no balance is stored anywhere (hrn:node:hadronmemory.com:specs:cor:dmo:170:01).
 ///
-/// Relationships: belongs to one Organization and is deleted with it. `sourceType` and `sourceId` name where the
-/// entry came from as plain values, for example a UsageEvent or the administrator who granted it.
+/// Relationships: belongs to one owner, an Organization (`organizationId`) or a person (`ownerUserId`), never both
+/// (`chk_credit_ledger_one_owner` is "at most one", so the link to a deleted owner can later be cleared; every writer sets one). It is kept when either is deleted (both relations
+/// restrict, they do not cascade; a deleted person's User row is kept and scrubbed). An account merge moves the
+/// merged-away person's entries to the survivor (the trigger allows that move only along a `user_merges` row). `sourceType` and `sourceId` name where the entry came from as plain values, for example a
+/// UsageEvent or the administrator who granted it.
 ///
 /// Behaviour:
 /// - `kind` is `grant` (a positive amount), `debit` (negative) or `adjustment` (either). `amountMicroCents` is
 ///   signed, in micro-cents (1e-8 USD).
-/// - Grants are written by a platform admin (`grantCredits`) and debits by usage metering (`debitCredits`,
-///   src/lib/metering/index.ts). A debit is written only when `BILLING_DEBIT_ENABLED` is on, and only for usage on
-///   the platform's own provider key (hrn:node:hadronmemory.com:specs:cor:dmo:100:03). No code writes an `adjustment`
-///   today.
-/// - Entries are never edited or reset. A correction is a new `adjustment` entry. Soft-deleting an entry is an
-///   emergency measure for operators only; the balance leaves soft-deleted entries out.
+/// - Grants and adjustments are written by a platform admin (`grantCredits`, `adjustCredits`) and debits by usage
+///   metering (`debitCredits`, src/lib/metering/index.ts). A debit is written only when `BILLING_DEBIT_ENABLED` is
+///   on, and only for usage on the platform's own provider key (hrn:node:hadronmemory.com:specs:cor:dmo:170:07).
+/// - Entries are never edited and never deleted, not even by an operator: a trigger refuses every UPDATE and DELETE
+///   (prisma/credit-ledger-invariants.sql), except that an audit user id follows an account merge. A correction is a new
+///   `adjustment` entry. Soft delete is retired: a CHECK refuses an entry that carries `deletedAt`
+///   (hrn:node:hadronmemory.com:specs:cor:dmo:170:08).
 /// - At most one entry per (`sourceType`, `sourceId`), so a payment notification that arrives twice produces one
-///   entry. Entries with no source are not limited.
-/// - `expiresAt` on a grant is stored and not enforced.
+///   entry; the same pair with another organization, amount or kind is refused. A grant or an adjustment must name
+///   its source (hadron-server#5007); entries with no source (a debit written without one, or a grant written
+///   before #5007) are not limited.
+/// - `expiresAt` on a grant is enforced (hadron-server#5011): spend draws on the soonest-expiring grant first and on
+///   credit that never expires last (hrn:node:hadronmemory.com:specs:cor:dmo:170:11), and once a grant has expired
+///   what is left of it is settled by one `adjustment` entry of minus that amount with the pair (`grant-expiry`,
+///   <grant id>), written by the server once per grant, also when nothing was left
+///   (hrn:node:hadronmemory.com:specs:cor:dmo:170:10; src/lib/metering/settleExpiredGrants.ts).
 ///
-/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:100:04. Background (history, not law): the Spec Kit spec 046.
+/// Rule: hrn:node:hadronmemory.com:specs:cor:dmo:170:08. Background (history, not law): the Spec Kit spec 046.
 model CreditLedgerEntry {
   id               String    @id
-  organizationId   String    @map("organization_id")
+  /// The owning organization; null for a person's entry. At most one of this and `ownerUserId` is set
+  /// (`chk_credit_ledger_one_owner`, prisma/credit-ledger-invariants.sql); the writers set exactly one. It may become null.
+  organizationId   String?   @map("organization_id")
+  /// The owning person; null for an organization's entry (hadron-server#5014).
+  ownerUserId      String?   @map("owner_user_id")
   /// 'grant' | 'debit' | 'adjustment' (validated in src/lib/metering).
   kind             String
   /// Signed micro-cents (1e-8 USD). Grants positive, debits negative.
   amountMicroCents BigInt    @map("amount_micro_cents")
-  /// Grant expiry policy field (no enforcement in Phase 0).
+  /// When a grant expires; enforced by the settlement of hadron-server#5011. Null on debits, adjustments and credit
+  /// that never expires.
   expiresAt        DateTime? @map("expires_at")
   /// Provenance: e.g. ('usage-event', <UsageEvent.id>), ('admin', <userId>),
   /// later ('payment', <processor ref>).
@@ -6234,14 +6519,92 @@ model CreditLedgerEntry {
   deletedAt        DateTime? @map("deleted_at")
   deletedBy        String?   @map("deleted_by")
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  owner        User?         @relation("CreditLedgerOwner", fields: [ownerUserId], references: [id], onDelete: Restrict, onUpdate: Restrict)
 
-  // Idempotency for at-least-once payment webhooks (hadrontool-billing):
+  // Idempotency for at-least-once payment webhooks (a payment service):
   // one ledger row per (sourceType, sourceId); NULL-source rows unaffected
   // (Postgres unique treats NULLs as distinct).
   @@unique([sourceType, sourceId])
   @@index([organizationId, createdAt])
+  @@index([ownerUserId, createdAt])
+  // #5011: the partial index credit_ledger_entries_expiring_grants_idx (organization_id, expires_at) WHERE expires_at
+  // IS NOT NULL lives in prisma/post-push.sql and migration 20261125140000 (Prisma cannot model a partial index); #5014 adds
+  // its owner_user_id twin credit_ledger_entries_person_expiring_grants_idx (migration 20261125170000).
   @@map("credit_ledger_entries")
+}
+
+/// How much of one measure an owner may hold: nodes, memories, agents or apps. The keys are src/lib/ownerLimits/keys.ts.
+///
+/// Relationships: belongs to exactly one Organization or one User (`chk_owner_limits_one_owner`).
+///
+/// Behaviour:
+/// - The limit in force for an owner and key is this row when one exists, else the deployment default for the owner's
+///   kind (`OWNER_DEFAULT_LIMITS`), else unlimited. A null `limitValue` means unlimited and lifts the default.
+/// - A row is a setting, not a record: it is deleted when cleared, with its owner, and for the merged-away person of an
+///   account merge. The `owner.limits.changed` log line is the record.
+/// - `sourceType` and `sourceId` say what set it. `note` must not hold personal data.
+/// - Two nullable uniques, not one: a NULL never collides, so each covers only its own kind of owner.
+model OwnerLimit {
+  id             String   @id
+  organizationId String?  @map("organization_id")
+  ownerUserId    String?  @map("owner_user_id")
+  key            String
+  /// Null means unlimited. 64-bit, because a later key counts bytes.
+  limitValue     BigInt?  @map("limit_value")
+  sourceType     String   @map("source_type")
+  sourceId       String   @map("source_id")
+  note           String
+  createdAt      DateTime @default(now()) @map("created_at")
+  createdBy      String?  @map("created_by")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  updatedBy      String?  @map("updated_by")
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  ownerUser    User?         @relation("OwnerLimitUser", fields: [ownerUserId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, key])
+  @@unique([ownerUserId, key])
+  @@map("owner_limits")
+}
+
+/// How many live nodes one memory holds, so an owner's node total is a sum over its memories and not a scan of `nodes` (#5078).
+///
+/// Relationships: belongs to exactly one Memory and ends with it.
+///
+/// Behaviour:
+/// - Written only by the triggers of `prisma/memory-node-total-invariants.sql` and the reconcile script. No application code
+///   writes it, and no API serves it: it is only an input to the owner's sum
+///   (hrn:node:hadronmemory.com:specs:cor:acl:150:03).
+/// - A transaction's changes wait in MemoryNodePending and are folded in at its commit, so a figure is this row plus the pending rows.
+/// - Who owns the memory and whether it is live are joined when read, so a soft delete, a transfer or an account merge
+///   needs no write here. A memory without a row has never held a live node.
+/// - No CHECK keeps it non-negative: a drifted figure must never make a node delete fail. The script reports it.
+model MemoryNodeTotal {
+  memoryId  String @id @map("memory_id")
+  liveNodes BigInt @map("live_nodes")
+
+  memory Memory @relation(fields: [memoryId], references: [id], onDelete: Cascade)
+
+  @@map("memory_node_totals")
+}
+
+/// A change to a memory's live-node figure that its transaction has not folded into MemoryNodeTotal yet (#5078).
+///
+/// Behaviour:
+/// - The triggers on `nodes` insert rows here, and a deferred trigger moves the transaction's own rows into the totals as the
+///   commit's last step, in memory order. So no counter row is locked while a transaction still takes other locks.
+/// - Empty in every committed state. Left-over rows (the fold trigger was off) still count in every figure, so it stays exact.
+/// - No foreign key: a memory deleted in the same transaction leaves nothing to fold.
+model MemoryNodePending {
+  id       String @id
+  /// The writing transaction (`pg_current_xact_id`), so a fold takes only its own rows.
+  txId     BigInt @map("tx_id")
+  memoryId String @map("memory_id")
+  delta    BigInt
+
+  @@index([txId])
+  @@map("memory_node_pending")
 }
 
 /// A trigger that starts a headless run when an outside system calls a URL. Each accepted call creates one AppRun.
@@ -6381,6 +6744,9 @@ enum UrnAliasEntityType {
   AGENT
   APP
   NODE
+  /// An Edge URN a move changed (#2947, rulings 0153 and 0162): a rebased derived loc, or an authored edge carried into
+  /// another memory (its memory atom changes), or one renumbered on a destination collision.
+  EDGE
 }
 
 /// Why a {@link UrnAlias} row exists.
@@ -6788,9 +7154,8 @@ model MemoryConfig {
 /// - `validationTask`: the task that content-validation reports on matching nodes name
 ///   (src/lib/contentValidationReport.ts). Reports are advisory and never block a write.
 /// - `writers`: who may write matching nodes, on top of memory write access: `ALL` (no narrowing), `ADMIN`
-///   (the owning organization's admins and owners, and the owning user) or `OWNER`. `OWNER` is not built:
-///   every write that touches such a role is refused with ROLE_WRITERS_UNSUPPORTED
-///   (src/lib/nodeRoleWriters.ts). The level is checked against the node's state before and after the write
+///   (the owning organization's admins and owners, and the owning user) or `OWNER` (#1333: the owning party,
+///   plus an App published by the owner; see src/lib/nodeRoleWriters.ts). The level is checked against the node's state before and after the write
 ///   (hrn:node:hadronmemory.com:specs:cor:acl:010:03).
 /// - `descriptionNode` (a node that describes the role) and `validateBy` (who is meant to run the validation
 ///   task) are stored and returned by the config API. No other code reads them today.
@@ -7213,12 +7578,17 @@ model AppAutomationReadGrantEvent {
 ///   node's current file. A REMOVE row is an old path that a move left behind, named by `removeLoc`
 ///   (`removeLoc` is empty for WRITE). `branch` is the branch the attempt resolved to, empty only for older
 ///   rows written before the branch was recorded.
-/// - A row exists only while the last settled attempt failed. A success deletes it, and so does an ordinary
-///   write to a memory that is not mirrored (src/integrations/github/mirrorObligations.ts, the only writer).
+/// - A row exists while the debt is unapplied. A success deletes it, and so does an ordinary
+///   write to a memory that is not mirrored. FAILED/NOT_CLONED/EXHAUSTED rows are written by
+///   src/integrations/github/mirrorObligations.ts after a settled attempt; a PENDING row is born
+///   from the #425 nodes trigger the moment a delete removes the node's file from what the mirror
+///   owes, before any attempt has run (prisma/git-mirror-obligation-invariants.sql).
 /// - `attemptSeq` comes from the sequence `git_mirror_attempt_seq`, taken inside the per-memory checkout lock
 ///   and settled before the lock is released. A settle only applies over a lower `attemptSeq`, so a late
-///   settle never overwrites a newer one.
-/// - `state`: FAILED can be retried, NOT_CLONED means there is no local clone, EXHAUSTED means the retry sweep
+///   settle never overwrites a newer one. The #425 trigger takes a sequence value at capture, so its row
+///   is fenced against exactly like any older attempt.
+/// - `state`: PENDING is a captured, never-attempted delete debt due on the next sweep pass; FAILED can be
+///   retried, NOT_CLONED means there is no local clone, EXHAUSTED means the retry sweep
 ///   reached its attempt cap (an ordinary write can still settle the row).
 /// - `errorClass` is one of a fixed set of words (CHECK in prisma/git-mirror-obligation-invariants.sql). No
 ///   exception text, URL or token is ever stored.
@@ -7256,9 +7626,12 @@ enum GitMirrorObligationKind {
   @@map("git_mirror_obligation_kind")
 }
 
+/// PENDING = a delete debt the nodes trigger captured, no attempt run yet (#425, due on the next sweep pass);
 /// FAILED = retryable failure; NOT_CLONED = no local clone; EXHAUSTED = sweep cap reached (ordinary writes still
 /// settle).
 enum GitMirrorObligationState {
+  /// #425: the nodes trigger captured the debt; no attempt has run yet. Due on the next sweep pass.
+  PENDING
   FAILED
   NOT_CLONED
   EXHAUSTED
@@ -7381,6 +7754,10 @@ model AgentTask {
   /// #2646 (hrn:node:hadronmemory.com:specs:cor:agt:050:02, What a clone does): the task this one was cloned from, set once at creation and never
   /// changed. Always in the same App (the clone is made in the source's App). Null for every task not made by a clone.
   clonedFromId         String?   @map("cloned_from_id")
+  /// #4997 (hrn:node:hadronmemory.com:specs:cor:agt:050:01 Project marker; hrn:node:hadronmemory.com:specs:cor:agt:150 A project): the
+  /// project marker. Set only at creation and never changed (trg_agent_tasks_project_marker_immutable refuses a change);
+  /// AT0 is never marked (chk_agent_tasks_at0_unmarked). Both in raw SQL, agent-task-project-marker-invariants.sql.
+  isProject            Boolean   @default(false) @map("is_project")
   ownerWorkerId        String?   @map("owner_worker_id")
   ownerUserId          String?   @map("owner_user_id")
   /// Both null ⇒ queued while pending (hrn:node:hadronmemory.com:specs:cor:agt:050:03).
@@ -7566,7 +7943,7 @@ model AgentTaskCounter {
 ///   sealed record of who acted and what it concerned, and a foreign-key action would have to update the row.
 /// - An alarm has AgentTeamAlarmSchedule rows (who it wakes, and when) and at most one AlarmEscalationEnd.
 /// - An alarm that is about no task has one episode row that points at it: DarkWorkerEpisode,
-///   CoordinatorCadenceEpisode, PostLimitEpisode, StartFailingEpisode or HostSweepEpisode.
+///   LeadCadenceEpisode, PostLimitEpisode, StartFailingEpisode, HostSweepEpisode or SaturationEpisode.
 /// - WorkerDeliveryTaskEvent rows record the delivery of an event to a worker.
 ///
 /// Behaviour:
@@ -7580,7 +7957,7 @@ model AgentTaskCounter {
 ///   alarm with no task, which is why those have episode tables.
 /// - `txId` is the id of the writing transaction, set by the database, so a reader can page in commit order.
 /// - Most events are written by src/lib/agentTasks/events.ts. The modules that raise an alarm about no task
-///   insert their own alarm rows (darkWorker.ts, coordinatorCadence.ts, postLimit.ts and sweepRuns.ts in
+///   insert their own alarm rows (darkWorker.ts, leadCadence.ts, postLimit.ts and sweepRuns.ts in
 ///   src/lib/agentTasks, and src/lib/desiredState/desiredStart.ts), and src/lib/stopSignals/notices.ts,
 ///   src/lib/hostOperations/sessionEnd.ts and src/lib/contextReset/contextReset.ts write events of their own.
 ///
@@ -7637,18 +8014,22 @@ model AgentTeamEvent {
   wakes      AgentTeamAlarmSchedule[]
   deliveries WorkerDeliveryTaskEvent[]
   darkEpisode DarkWorkerEpisode?
-  cadenceEpisode CoordinatorCadenceEpisode?
+  cadenceEpisode LeadCadenceEpisode?
   postLimitEpisode PostLimitEpisode?
   startFailingEpisode StartFailingEpisode?
   hostSweepEpisode HostSweepEpisode?
+  saturationEpisode SaturationEpisode?
+  teamDarkEpisode TeamDarkEpisode? @relation("TeamDarkRaised")
+  teamDarkRecovered TeamDarkEpisode? @relation("TeamDarkRecovered")
   /// #3934 (V77): the recorded end of this alarm's escalation, written once by the evaluator pass or the acknowledgement.
   escalationEnd AlarmEscalationEnd?
 
-  @@unique([taskId, type, episodeStart], map: "agent_team_events_episode_uniq")
+  /// #4344 (ruling A): the App is in the one-alarm-per-episode key. The three-column index was dropped by the contract migration.
+  @@unique([appId, taskId, type, episodeStart], map: "agent_team_events_episode_app_uniq")
   @@index([appId, createdAt])
   /// #4084: the changed-since read's commit-safe order (agentTaskExternalIdChanges).
   @@index([appId, txId, createdAt, id])
-  @@index([taskId])
+  @@index([taskId, type])
   /// #1707 — "assigned least recently" (hrn:node:hadronmemory.com:specs:cor:agt:060:06) reads a worker's
   /// latest assignment event.
   @@index([subjectWorkerId, createdAt])
@@ -7783,44 +8164,47 @@ model DarkWorkerEpisode {
   @@map("dark_worker_episodes")
 }
 
-/// One period during which a worker that is expected to hand out tasks was late doing so: it assigned no task
-/// for 60 minutes while a worker it could have given work to was free. The row opens with the alarm raised
-/// about the worker and is closed when the worker next assigns a task.
+/// One period during which a lead was late handing out work: it assigned no task for 60 minutes while a worker
+/// under it was free for work. The row opens with the alarm raised about the lead and is closed when the lead
+/// next assigns a task.
 ///
-/// Which workers: a Worker whose `role` is the text `coordinator` (compared without regard to case) and that
-/// is not retired. `role` is free text on Worker; this one value is what the platform reads to find the
-/// workers whose assigning it times. The name of the model is historical and under review in #4375.
+/// Which workers: every LEAD, a worker that at least one worker reports to (the reporting line, hrn:node:hadronmemory.com:specs:cor:agt:020:12),
+/// that is not retired. No `role` takes part: a worker in any role is watched when it leads, and a worker that
+/// nobody reports to is not watched. The one definition of a lead is src/lib/agentTasks/leads.ts. A worker that
+/// stops being a lead while its episode is open has the episode ended by the next pass (`endedAt` is that pass's
+/// time): the alarm says a lead stopped assigning, and ending it stops the escalation up the reporting line.
 ///
 /// Episode pattern: an alarm is an AgentTeamEvent, which is append-only, and an alarm about no task cannot be
 /// de-duplicated by that table's unique index. So each period during which the condition holds is one row
-/// here, with at most one open row per worker, inserted in the same transaction as the alarm. That makes it
+/// here, with at most one open row per lead, inserted in the same transaction as the alarm. That makes it
 /// one alarm per episode, and gives the alarm an end.
 ///
 /// Relationships: belongs to an App and to the Worker it is about, and is deleted with either. `event` is the
-/// alarm raised with the episode (an AgentTeamEvent of type `alarm.coordinator-cadence`, with no task), one to
-/// one.
+/// alarm raised with the episode (an AgentTeamEvent of type `alarm.lead-cadence`, with no task; episodes raised
+/// before #4375 carry `alarm.coordinator-cadence`, which is history and is read the same way), one to one.
 ///
 /// Behaviour:
-/// - The stall evaluator's pass (`evaluateCoordinatorCadence`, src/lib/agentTasks/coordinatorCadence.ts, every
-///   minute) opens an episode when such a worker has made no assignment of its own for 60 minutes and at least
-///   one worker in its lane is free for work. Its lane is the workers whose reporting line leads to it, and
-///   the workers that report to no one. Another such worker, and a worker under a stop signal, never count as
-///   free.
-/// - Only a task the worker itself assigns or reassigns counts (an AgentTeamEvent of type `task.assigned` or
-///   `task.reassigned` with the worker as actor). Assignments made by the matcher do not.
-/// - The 60 minutes run from the latest of the worker's last own assignment, the start of its first session,
-///   and the moment in CoordinatorCadenceClock.
-/// - A worker is not judged late while its team is paused, it is paused itself, or it is under a stop signal.
+/// - The stall evaluator's pass (`evaluateLeadCadence`, src/lib/agentTasks/leadCadence.ts, every minute)
+///   opens an episode when a lead has made no assignment of its own for 60 minutes and at least one worker
+///   under it is free for work. The workers under a lead are those whose reporting line leads to it, and the
+///   workers that report to no one. A lead, a sub-lead included, and a worker under a stop signal never count
+///   as free.
+/// - Only a task the lead itself assigns or reassigns counts (an AgentTeamEvent of type `task.assigned` or
+///   `task.reassigned` with the lead as actor). Assignments made by the matcher do not.
+/// - The 60 minutes run from the latest of the lead's last own assignment, the start of its first session,
+///   and the moment in LeadCadenceClock.
+/// - A lead is not judged late while its team is paused, it is paused itself, or it is under a stop signal.
 ///   Having no live session is not an exemption.
-/// - At most one open row per worker (partial unique index in prisma/coordinator-cadence-invariants.sql). The
-///   episode ends only at the worker's next own assignment, and `endedAt` is that assignment's time. A lane
-///   worker turning busy, or the worker being paused, does not end it, so neither raises a second alarm.
-/// - While the worker is exempt the 60 minutes keep running; only the judgment is skipped. A worker that comes
+/// - At most one open row per lead (partial unique index in prisma/lead-cadence-invariants.sql). The episode
+///   ends only at the lead's next own assignment, and `endedAt` is that assignment's time. A worker under the
+///   lead turning busy, or the lead being paused, does not end it, so neither raises a second alarm.
+/// - While the lead is exempt the 60 minutes keep running; only the judgment is skipped. A lead that comes
 ///   back after a long pause without having assigned anything can be judged late at once.
 /// - AlarmEscalationEnd and the wake schedule read `endedAt` to stop the alarm's escalation.
 ///
-/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:050:31. Background: #2763.
-model CoordinatorCadenceEpisode {
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:050:31 (Decided in part, including the 60-minute trigger).
+/// Background: #2763, renamed and re-pointed by #4375.
+model LeadCadenceEpisode {
   id       String    @id @default(cuid())
   appId    String    @map("app_id")
   workerId String    @map("worker_id")
@@ -7833,44 +8217,37 @@ model CoordinatorCadenceEpisode {
   event  AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
 
   @@index([appId, endedAt])
-  @@map("coordinator_cadence_episodes")
+  @@map("lead_cadence_episodes")
 }
 
-/// The moment the platform first saw a worker as one whose task assigning it times. One row per such worker.
-/// It gives the worker a starting point for its 60-minute window, so that a worker the platform has only just
-/// begun to watch is not reported late at once.
+/// The moment the cadence evaluator first saw this worker as a lead. A lead that has never assigned a task is not
+/// late until 60 minutes after this time (or after its first live session, if later); see
+/// hrn:node:hadronmemory.com:specs:cor:agt:050:31. One row per lead, written once and never updated. Its sibling
+/// LeadCadenceEpisode records the open alarm.
 ///
-/// Which workers: a Worker whose `role` is the text `coordinator` (compared without regard to case) and that
-/// is not retired. `role` is free text on Worker; this one value is what the platform reads to find the
-/// workers that are expected to hand out tasks to others. The name of the model is historical and under review
-/// in #4375.
+/// Why the evaluator needs the row: the other moments that start a lead's 60 minutes (its last own assignment
+/// and the start of its first session) can be missing or old. A worker that never assigned a task and never had
+/// a session has neither, and a lead that existed before the evaluator first ran can have both far in the past.
+/// Without a recorded first sighting, such a lead would be late on the very first pass. With it, the lead is
+/// not late until 60 minutes after the platform first saw it as a lead. A worker that becomes a lead later gets
+/// its row at the first pass that sees it as one.
 ///
-/// What is timed: how long such a worker has gone without assigning or reassigning a task itself. When that
-/// reaches 60 minutes while a worker it could give work to is free, the platform raises one alarm about it
-/// and opens a CoordinatorCadenceEpisode. The 60 minutes run from the latest of three moments: the worker's
-/// last own assignment, the start of its first session, and `observedAt` in this row.
-///
-/// A worker is not judged late while its team is paused, it is paused itself, or it is under a stop signal.
-/// Having no live session is not an exemption. While the worker is exempt the 60 minutes keep running; only the
-/// judgment is skipped.
-///
-/// Why the evaluator needs the row: the first two moments can be missing or old. A worker that never assigned
-/// a task and never had a session has neither, and a worker that existed before the evaluator first ran can
-/// have both far in the past. Without a recorded first sighting, such a worker would be late on the very first
-/// pass. With it, the worker is not late until 60 minutes after the platform first saw it.
+/// Which workers: the leads (a worker that at least one worker reports to, hrn:node:hadronmemory.com:specs:cor:agt:020:12; no `role` takes part;
+/// the one definition is src/lib/agentTasks/leads.ts). A lead that is judged late has an open LeadCadenceEpisode.
 ///
 /// Relationships: belongs to the Worker it is about (`workerId` is the primary key) and to that worker's App,
 /// and is deleted with either.
 ///
-/// Behaviour: inserted by `observe` in src/lib/agentTasks/coordinatorCadence.ts, which the stall evaluator's
-/// pass (src/jobs/taskStallEvaluator.ts, every minute) runs for each such worker when it decides whether the
-/// worker is late, and again inside the transaction that raises the alarm. The insert is
-/// `ON CONFLICT DO NOTHING`, so the first pass to see a worker sets `observedAt` and concurrent passes agree
-/// on it. No code updates or deletes a row: a worker that stops being watched and is watched again later
-/// keeps its first `observedAt`.
+/// Behaviour: inserted by `observe` in src/lib/agentTasks/leadCadence.ts, which the stall evaluator's pass
+/// (src/jobs/taskStallEvaluator.ts, every minute) runs for each lead when it decides whether the lead is late,
+/// and again inside the transaction that raises the alarm. The insert is `ON CONFLICT DO NOTHING`, so the first
+/// pass to see a lead sets `observedAt` and concurrent passes agree on it. No code updates a row. The row belongs to
+/// the lead's current stint: each pass deletes the rows of the App's workers that are not leads, so a worker that
+/// stops leading and leads again, or one that kept a row from before the rename, gets a fresh `observedAt` at the
+/// first pass that sees it as a lead.
 ///
-/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:050:31. Background: #2763.
-model CoordinatorCadenceClock {
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:050:31. Background: #2763, renamed and re-pointed by #4375.
+model LeadCadenceClock {
   workerId   String   @id @map("worker_id")
   appId      String   @map("app_id")
   observedAt DateTime @map("observed_at")
@@ -7878,7 +8255,7 @@ model CoordinatorCadenceClock {
   app    App    @relation(fields: [appId], references: [id], onDelete: Cascade)
   worker Worker @relation(fields: [workerId], references: [id], onDelete: Cascade)
 
-  @@map("coordinator_cadence_clocks")
+  @@map("lead_cadence_clocks")
 }
 
 /// One period, at most an hour long, during which the platform's attempts to start a worker kept failing. The
@@ -8048,6 +8425,78 @@ model HostSweepEpisode {
   @@map("host_sweep_episodes")
 }
 
+/// One period during which a family/tier/role combination of an App is saturated: the platform could not
+/// give work of that combination to anyone. #3819 slice 1.
+///
+/// Episode pattern: an alarm is an AgentTeamEvent, which is append-only, and an alarm about no task cannot be
+/// de-duplicated by that table's unique index. So each period during which the condition holds is one row
+/// here, with at most one open row per (App, family, tier, role), inserted in the same transaction as the
+/// alarm. That makes it one alarm per episode across passes and instances, and gives the alarm an end.
+///
+/// Relationships: belongs to an App and is deleted with it. `event` is the alarm raised with the episode (an
+/// AgentTeamEvent of type `alarm.saturation`, with no task, no subject worker and an empty chain), one to one.
+/// `family`, `tier` and `role` are the combination as AgentMatchOutcome keys it: a dimension a task left open
+/// is the empty string (so the composite key has no NULL), and the role is lower case.
+///
+/// Behaviour:
+/// - The stall evaluator's pass (`evaluateSaturation`, src/lib/agentTasks/saturation.ts, every minute) opens an
+///   episode for a combination that is saturated and has none open (partial unique index in
+///   prisma/saturation-invariants.sql). Saturated, windowless: the combination's latest match outcome is no
+///   worker and under 168 hours old (by its decision time, on the database clock), or it has at least one
+///   worker that is not retired and none eligible (a paused family, every worker unavailable).
+/// - The same pass ends it when neither holds: a match recorded against the combination, an eligible worker
+///   gained while the latest outcome is not no worker, the no-worker outcome reaching 168 hours (whether or not
+///   the matcher purged its row), or its last worker retired. Also when the App is deleted or uninstalled.
+/// - Acknowledging the alarm does not end the episode (hrn:node:hadronmemory.com:specs:cor:agt:060:16). The alarm has no chain, so it wakes
+///   nobody and no AlarmEscalationEnd is recorded for it.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:agt:060:15. Background: #3819.
+model SaturationEpisode {
+  id       String    @id @default(cuid())
+  appId    String    @map("app_id")
+  family   String
+  tier     String
+  role     String
+  eventId  String    @unique @map("event_id")
+  openedAt DateTime  @map("opened_at")
+  endedAt  DateTime? @map("ended_at")
+
+  app   App            @relation(fields: [appId], references: [id], onDelete: Cascade)
+  event AgentTeamEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([appId, endedAt])
+  @@map("saturation_episodes")
+}
+
+/// #4531 (hrn:node:hadronmemory.com:specs:cor:agt:050:34, Proposed) — one dark-team episode of an App: the team as a whole
+/// went silent past the dark window. Written only by the stall evaluator (src/lib/agentTasks/teamDark.ts).
+///
+/// Relationships: belongs to an App. `eventId` is the one `team.dark` alarm the episode raised, written in the transaction
+/// that opened it; `recoveredEventId` is the one `team.recovered` event written in the transaction that ended it, null
+/// while the episode is open.
+///
+/// Behaviour:
+/// - The alarm stream is append-only, so an episode's end lives here, not on the alarm.
+/// - Exactly one OPEN row per App (partial unique index, raw SQL in prisma/team-dark-invariants.sql): the race between two
+///   passes or two server instances is decided by that index, so a second pass records no second alarm.
+/// - `endedAt` is never before `openedAt` (CHECK `chk_team_dark_episodes_shape`), and a row that names a `team.recovered`
+///   event is ended. The converse does not hold: an episode whose App left the live set ends with no recovery event.
+model TeamDarkEpisode {
+  id               String    @id @default(cuid())
+  appId            String    @map("app_id")
+  eventId          String    @unique @map("event_id")
+  recoveredEventId String?   @unique @map("recovered_event_id")
+  openedAt         DateTime  @map("opened_at")
+  endedAt          DateTime? @map("ended_at")
+
+  app            App             @relation(fields: [appId], references: [id], onDelete: Cascade)
+  event          AgentTeamEvent  @relation("TeamDarkRaised", fields: [eventId], references: [id], onDelete: Cascade)
+  recoveredEvent AgentTeamEvent? @relation("TeamDarkRecovered", fields: [recoveredEventId], references: [id], onDelete: Cascade)
+
+  @@index([appId, endedAt])
+  @@map("team_dark_episodes")
+}
+
 /// Whether one worker is available for work, and if not, why and until when. It is one of the inputs to
 /// whether the matcher may give the worker a task. A worker with no row is available.
 ///
@@ -8212,6 +8661,20 @@ model AgentTaskStallSchedule {
   /// operation it collected before the platform fails it: 5 to 1440; null is
   /// the default, 60.
   hostReportTimeoutMinutes Int?     @map("host_report_timeout_minutes")
+  /// #4777 (hrn:node:hadronmemory.com:specs:cor:agt:060:16) — the roles a saturation alarm wakes: whoever manages the App
+  /// sets it (setSaturationAlarmWakeRoles). Empty by default, and the platform names no role of its own. Stored trimmed,
+  /// lower-cased, de-duplicated and sorted (at most 32 names of 1 to 64 characters, no ':' or whitespace); a worker's role
+  /// matches regardless of case. Read once, in the transaction that raises the alarm: a later change wakes nobody for it.
+  saturationWakeRoles      String[] @default([]) @map("saturation_wake_roles")
+  /// #4921 slice A (hrn:node:hadronmemory.com:specs:cor:agt:060:16 is the precedent) — the roles the App lists for three
+  /// purposes: whoever may link a defect to a pull request, the role route of the register pick, and whoever may withdraw
+  /// a negative review verdict besides its recorder. Whoever manages the App sets each (setAppRoleList). Empty by default,
+  /// and the platform names no role of its own. Same stored form as `saturationWakeRoles`: trimmed, lower-cased,
+  /// de-duplicated and sorted, at most 32 names of 1 to 64 characters, no ':' or whitespace; matched regardless of case.
+  /// Slice A stores them; no door reads them until slice B.
+  defectLinkRoles          String[] @default([]) @map("defect_link_roles")
+  registerPickRoles        String[] @default([]) @map("register_pick_roles")
+  reviewWithdrawRoles      String[] @default([]) @map("review_withdraw_roles")
   updatedAt                DateTime @updatedAt @map("updated_at")
   updatedBy                String?  @map("updated_by")
 
@@ -8348,6 +8811,48 @@ model HostWorkerAssignment {
   @@index([appId, hostId])
   @@index([workerId])
   @@map("host_worker_assignments")
+}
+
+/// One host of a team App, and its settings: the platform's own record that a machine is a host of the App
+/// (hrn:node:hadronmemory.com:specs:cor:agt:070:01, the host itself and its settings, Proposed). Before #5259 a host
+/// existed only as its registration, its key's `host:operate` scope and its assignments.
+///
+/// Relationships: belongs to an App and is deleted with it. `hostId` is the host's id within the App, the same plain
+/// value a registration, a scope and an assignment carry. `createdByUserId` and `removedByUserId` are plain ids that
+/// outlive the account. One row per (App, host), live or removed.
+///
+/// Behaviour:
+/// - Created by joining a machine as a host (`joinAgentTeamHost`), which also issues the host's key: whoever manages
+///   the App, as a person acting as themselves (hrn:node:hadronmemory.com:specs:cor:agt:070:07). Joining a removed
+///   host revives its row with its settings reset.
+/// - A null setting is the product default: `pollIntervalSeconds` (1 to 86400) is what the host's own configuration
+///   or the CLI says, `deliveryEnabled` is on. Changed by `updateAgentTeamHost`; stored for the host to read and apply, never consumed by the server.
+/// - Removing a host (`removeAgentTeamHost`, person-only) stamps `removedAt`, revokes its keys, ends its registration,
+///   removes its assignments and fails its open operations, in one transaction.
+/// - Holds no path, program, credential, account detail or anything tool-specific (hrn:node:hadronmemory.com:specs:cor:agt:070:03).
+/// - `createdByUserId` is null only on a row the #5259 backfill made for a host with no resolvable creator (no live
+///   scope granter and no assignment creator); every join sets it.
+/// - Shape: prisma/agent-team-host-invariants.sql.
+///
+/// Entity spec: hrn:node:hadronmemory.com:specs:cor:agt:070:01. Rules: hrn:node:hadronmemory.com:specs:cor:agt:070:04,
+/// hrn:node:hadronmemory.com:specs:cor:agt:070:07. Background: #5209, #5259.
+model AgentTeamHost {
+  id                  String    @id
+  appId               String    @map("app_id")
+  hostId              String    @map("host_id")
+  label               String
+  pollIntervalSeconds Int?      @map("poll_interval_seconds")
+  deliveryEnabled     Boolean?  @map("delivery_enabled")
+  createdByUserId     String?   @map("created_by_user_id")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @default(now()) @map("updated_at")
+  removedAt           DateTime? @map("removed_at")
+  removedByUserId     String?   @map("removed_by_user_id")
+
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@unique([appId, hostId], map: "agent_team_hosts_app_host_uniq")
+  @@map("agent_team_hosts")
 }
 
 /// One instruction the platform issued to one host of a team App, for one worker: for example start this
@@ -10038,7 +10543,14 @@ model ChatRootCounter {
   messageCount Int @default(0) @map("message_count")
   lastMessageAt DateTime? @map("last_message_at")
   updatedAt DateTime @updatedAt @map("updated_at")
+  /// #5027 (Ask 6): the Agent the chat was started with, written by startChat for every new chat. Read first by the
+  /// turn lookup (`resolveChatHomeAgent`) and by `myChats`, because a named home (a group, a private memory, another
+  /// Agent's personal memory) carries no per-Agent pointer. Null for chats started before it existed: they read
+  /// exactly as before. Not a foreign key, so deleting an Agent leaves the chat's record as it was (the turn lookup
+  /// treats a deleted Agent as today's pointer does). Never encrypted.
+  agentId String? @map("agent_id")
   chatRoot Node @relation(fields: [chatRootNodeId], references: [id], onDelete: Cascade)
+  @@index([agentId])
   @@map("chat_root_counters")
 }
 
@@ -10081,7 +10593,7 @@ model ChatRootEngineState {
 ///   erased; the grant and its reason stay (hrn:node:hadronmemory.com:specs:cor:acl:140:08).
 /// - `signature` is the GrantSignature that activated it. The grant has many GrantSigningRequest and
 ///   GrantSignature rows, and its history is in GrantEvent.
-/// - `requestedByUserId`, `requestedByWorkerId` and `requestedBySessionId` say who asked for it, as plain ids.
+/// - `requestedByUserId`, `requestedByWorkerId`, `requestedBySessionId` and (a headless run's ask, #3753) `requestedByRunId` say who asked for it, as plain ids.
 ///   (GrantSigningRequest names the same idea `requester…`; both spellings are the real column names.)
 ///
 /// Behaviour:
@@ -10131,6 +10643,10 @@ model Grant {
   requestedByUserId     String?   @map("requested_by_user_id")
   requestedByWorkerId   String?   @map("requested_by_worker_id")
   requestedBySessionId  String?   @map("requested_by_session_id")
+  /// #3753 (Grants S2c): the headless AppRun that asked, when a run asked (the S5 case of the grant Create rule). FK-free sealed id like the other
+  /// requester ids: a run is not a worker or session (no #1162 fence), and the id never changes after the insert. Null on every
+  /// worker- and manager-made row. There is no user here: the run's on-behalf-of person is NOT the requester (ruling 0255 item 21).
+  requestedByRunId      String?   @map("requested_by_run_id")
   /// A registered action (FK): there is no free-text or recorded-only stand-in.
   action                String
   /// The values the grant allows (a single value, a list or a wildcard); never a secret.
@@ -10149,6 +10665,8 @@ model Grant {
   /// activates one grant, so the column is unique.
   signatureId           String?   @unique @map("signature_id")
   revokedAt             DateTime? @map("revoked_at")
+  /// The person who ended it. #4767 (Grants R6): an agent's own withdrawal through a run records no person —
+  /// null with `withdrawnAt` set (the end's other half, the shape CHECK's rule).
   revokedBy             String?   @map("revoked_by")
   /// #4173 (hrn:node:hadronmemory.com:specs:cor:acl:140:03): the withdrawal marker, a FACT like `revokedAt` and never a state column. Equal to `revokedAt`, set once with
   /// the revoke stamp, on a never-activated row only. Rows withdrawn before #4173 have none and read as revoked.
@@ -10157,6 +10675,13 @@ model Grant {
   /// deleted). A FACT, like `revokedAt`, never a state label: the live check reads it, and nothing names the ended state.
   /// Stamped once, and only on a grant not already ended (prisma/grant-invariants.sql); the holder id above stays.
   holderDepartedAt      DateTime? @map("holder_departed_at")
+  /// #4180 (Holger R5, hrn:node:hadronmemory.com:specs:cor:acl:140:03): WHY the holder went, as a cause code with no wording
+  /// (USER_ERASED, ORG_LEFT, ORG_REMOVED, WORKER_RETIRED, WORKER_DELETED, AGENT_DELETED, AGENT_UNINSTALLED,
+  /// AGENT_IMPORTER_UNINSTALLED, AGENT_IMPORTER_DELETED, AGENT_IMPORT_REMOVED, AGENT_LICENSE_REVOKED, AGENT_LICENSE_EXPIRED, ORG_DELETED, APP_DELETED). Set in the statement that stamps
+  /// `holderDepartedAt`, never afterwards; it must fit the holder's kind and what happened to it (prisma/grant-invariants.sql).
+  /// NULL on a stamped row means no cause was recorded (a departure stamped before #4180, or by the previous image); reads
+  /// answer REASON_NOT_RECORDED for it, never a guess.
+  holderDepartureReason String?   @map("holder_departure_reason")
   createdAt             DateTime  @default(now()) @map("created_at")
   updatedAt             DateTime  @updatedAt @map("updated_at")
 
@@ -10194,6 +10719,10 @@ model SecretReadClient {
   issuerUserId String?   @map("issuer_user_id")
   /// The grant's issuer is its person holder. Stored once so S4's protection change and read check can query it.
   selfIssued   Boolean   @map("self_issued")
+  /// #3999 R22: whether the holder is the actual signer's own worker. The marker is written at read-client activation
+  /// (the passkey issuance flow) and judged against the worker's hold at that moment. False — a person-held client, a
+  /// worker another person held, or a worker with no live hold then. Null — pending or legacy, not captured. Sealed then.
+  issuedToOwnWorker Boolean? @map("issued_to_own_worker")
   /// SECRET_DELETED | PROTECTED, set together with `endedAt`, once.
   endReason    String?   @map("end_reason")
   endedAt      DateTime? @map("ended_at")
@@ -10251,12 +10780,85 @@ model GrantSigningRequest {
   endedAt            DateTime? @map("ended_at")
   /// #4546: latest verified ineligible proof on an open request; no signer identity and no state change.
   lastRefusedAt      DateTime? @map("last_refused_at")
+  /// #5001: set when this request is one item of a selection (then `positionInSelection` is its place, 0-based, in
+  /// ascending grant id); NULL for a one-grant request. Both set or both NULL (chk_grant_signing_request_shape).
+  selectionId        String?   @map("selection_id")
+  positionInSelection Int?     @map("position_in_selection")
 
-  grant     Grant           @relation(fields: [grantId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  grant     Grant                 @relation(fields: [grantId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  selection GrantSigningSelection? @relation(fields: [selectionId], references: [id], onDelete: Cascade, onUpdate: Restrict)
   signature GrantSignature?
 
   @@index([grantId, createdAt])
+  @@unique([selectionId, grantId])
+  @@index([selectionId])
   @@map("grant_signing_requests")
+}
+
+/// One request for ONE passkey touch over a SELECTION of one App's pending grants (#5001; ruling 0255 item 19).
+///
+/// Relationships: belongs to one App and is deleted with it. `items` are the per-grant GrantSigningRequest rows
+/// (one per grant, each with its own version and terms-hash pin, so a grant that changes ends only its own item).
+/// `signature` is the one touch record once the selection completes.
+///
+/// Behaviour:
+/// - Begins `open`, ends exactly once: `completed`, `declined`, `expired` or `withdrawn`. There is no `stale`
+///   state, because staleness is per item (the item request goes `stale`; the selection stays open).
+/// - Every time is the database clock. A trigger sets the times and enforces the fixed fields and the single end
+///   (prisma/grant-selection-signing-invariants.sql).
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:acl:140:07. Payload: hrn:node:hadronmemory.com:specs:cor:acl:140:09. Background: #5001.
+model GrantSigningSelection {
+  /// 128 bits of randomness, base64url (the node-signing id mint).
+  id                 String    @id
+  appId              String    @map("app_id")
+  payloadVersion     String    @map("payload_version")
+  requesterUserId    String?   @map("requester_user_id")
+  requesterAppId     String?   @map("requester_app_id")
+  requesterWorkerId  String?   @map("requester_worker_id")
+  requesterSessionId String?   @map("requester_session_id")
+  /// open | completed | declined | expired | withdrawn
+  state              String    @default("open")
+  createdAt          DateTime  @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("created_at")
+  expiresAt          DateTime  @map("expires_at")
+  endedAt            DateTime? @map("ended_at")
+  lastRefusedAt      DateTime? @map("last_refused_at")
+
+  app       App                       @relation(fields: [appId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  items     GrantSigningRequest[]
+  signature GrantSelectionSignature?
+
+  @@index([appId, createdAt])
+  @@map("grant_signing_selections")
+}
+
+/// The record of one person's ONE passkey touch over a selection of grants (#5001). It keeps the signed item list
+/// (each item's grant id, version and terms hash, in signed order) so that a later read rebuilds the bytes from what
+/// was signed, never from the grants as they are now. Each activated item also has its own GrantSignature row.
+///
+/// Append-only (prisma/grant-selection-signing-invariants.sql); deleted only with its App.
+///
+/// Rule: hrn:node:hadronmemory.com:specs:cor:acl:140:09. Background: #5001.
+model GrantSelectionSignature {
+  id                  String   @id @default(cuid())
+  selectionId         String   @unique @map("selection_id")
+  /// A person, always. Sealed history: no FK.
+  signerId            String   @map("signer_id")
+  passkeyCredentialId String   @map("passkey_credential_id")
+  payloadVersion      String   @map("payload_version")
+  /// The signed items in signed order: [{grantId, version, termsHash}], ascending grant id.
+  items               Json
+  rpId                String   @map("rp_id")
+  authenticatorData   Bytes    @map("authenticator_data")
+  clientDataJson      Bytes    @map("client_data_json")
+  signature           Bytes
+  verifiedAt          DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("verified_at")
+
+  selection       GrantSigningSelection @relation(fields: [selectionId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  passkey         PasskeyCredential     @relation(fields: [passkeyCredentialId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  grantSignatures GrantSignature[]
+
+  @@map("grant_selection_signatures")
 }
 
 /// The record of one person's passkey signature on one Grant. It proves that this person, with this passkey,
@@ -10303,7 +10905,10 @@ model GrantSignature {
   clientDataJson      Bytes    @map("client_data_json")
   signature           Bytes
   verifiedAt          DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("verified_at")
+  /// #5001: the touch record this one came from when the grant was signed as part of a selection; NULL for a one-grant signature.
+  selectionSignatureId String? @map("selection_signature_id")
 
+  selectionSignature GrantSelectionSignature? @relation(fields: [selectionSignatureId], references: [id], onDelete: Cascade, onUpdate: Restrict)
   grant          Grant               @relation("GrantSignatures", fields: [grantId], references: [id], onDelete: Cascade, onUpdate: Restrict)
   signingRequest GrantSigningRequest @relation(fields: [signingRequestId], references: [id], onDelete: Cascade, onUpdate: Restrict)
   passkey        PasskeyCredential   @relation(fields: [passkeyCredentialId], references: [id], onDelete: Restrict, onUpdate: Restrict)
@@ -10324,7 +10929,8 @@ model GrantSignature {
 ///   prisma/grant-invariants.sql).
 /// - `ACTIVATE` is written when a person's signature activates the grant and names the signer. `REVOKE` and
 ///   `WITHDRAW` are written when a person ends the grant and name that person and, when the act came through a
-///   worker's session, the worker and session. `USE` is written each time the grant is used and names the
+///   worker's session, the worker and session. A `WITHDRAW` may instead be an agent's own act through a run
+///   (#4767): it names no person and carries `runId` alone. `USE` is written each time the grant is used and names the
 ///   worker and session that used it. Each is written in the transaction of the act it records.
 /// - No code writes a `CREATE` event today, and a grant that ends because its holder went gets no event.
 /// - `at` is the database clock.
@@ -10337,7 +10943,7 @@ model GrantEvent {
   id           String   @id @default(cuid())
   grantId      String   @map("grant_id")
   appId        String   @map("app_id")
-  /// CREATE | ACTIVATE | REVOKE | USE (CHECK in grant-invariants.sql).
+  /// CREATE | ACTIVATE | REVOKE | WITHDRAW | USE (CHECK in grant-invariants.sql).
   action       String
   at           DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @db.Timestamp(3)
   actorUserId  String?  @map("actor_user_id")
@@ -10401,4 +11007,30 @@ model Action {
   grants Grant[]
 
   @@map("actions")
+}
+
+/// #3999: a person's immutable proposed change. Ciphertext is never a read-surface field.
+model SecretChangeRequest {
+  id String @id
+  appId String @map("app_id")
+  secretId String? @map("secret_id")
+  secretName String @map("secret_name")
+  secretKind String @map("secret_kind")
+  metadata Json
+  operation String
+  requesterId String @map("requester_id")
+  state String @default("open")
+  snapshot String
+  stagedValueEncrypted String? @map("staged_value_encrypted")
+  keyVersion Int? @map("key_version")
+  sizeBytes Int? @map("size_bytes")
+  protectedResult Boolean? @map("protected_result")
+  writeVersion Boolean @default(true) @map("write_version")
+  createdAt DateTime @default(dbgenerated("(clock_timestamp() AT TIME ZONE 'UTC'::text)")) @map("created_at") @db.Timestamp(3)
+  expiresAt DateTime @map("expires_at") @db.Timestamp(3)
+  endedAt DateTime? @map("ended_at") @db.Timestamp(3)
+  app App @relation(fields: [appId], references: [id], onDelete: Cascade)
+  requester User @relation(fields: [requesterId], references: [id], onDelete: Cascade)
+  @@index([appId, secretName, state], map: "secret_change_requests_secret_open")
+  @@map("secret_change_requests")
 }

@@ -50,7 +50,7 @@ beforeEach(async () => {
 });
 
 const spec = () =>
-  M.createSpecNode({}, { input: { memoryId, loc: 'app:onb:010', name: 'f', role: 'spec', data: { version: '0.0.1' } } }, ctx());
+  M.createSpecNode({}, { input: { memoryRef: memoryId, loc: 'app:onb:010', name: 'f', role: 'spec', data: { version: '0.0.1' } } }, ctx());
 
 describe('a data MERGE on a spec node (what `hadron node update --data-merge` sends)', () => {
   it('says no door merges and names the REPLACE route, with every surface', async () => {
@@ -72,7 +72,7 @@ describe('a data MERGE on a spec node (what `hadron node update --data-merge` se
     const n = await spec();
     // What `hadron node update <ref> --data '<object>'` does for a spec node:
     // the CLI routes the replace through updateSpecNode by the node's kind.
-    await M.updateSpecNode({}, { input: { id: n.id, data: { version: '0.0.1', provenance: 'x' } } }, ctx());
+    await M.updateSpecNode({}, { input: { ref: n.id, data: { version: '0.0.1', provenance: 'x' } } }, ctx());
     const after = await db.node.findUniqueOrThrow({ where: { id: n.id } });
     expect(after.data).toEqual({ version: '0.0.1', provenance: 'x' });
   });
@@ -93,7 +93,7 @@ describe('a properties MERGE on a spec node', () => {
 describe('a generic (non-merge) write on a spec node', () => {
   it('names the GraphQL door, that the CLI routes there itself, the spec commands, and no MCP route', async () => {
     const n = await spec();
-    const r = await refusal(M.updateNode({}, { input: { id: n.id, content: 'x' } }, ctx()));
+    const r = await refusal(M.updateNode({}, { input: { ref: n.id, content: 'x' } }, ctx()));
 
     expect(r.code).toBe('ROLE_GOVERNED');
     expect(r.ext).not.toHaveProperty('merge');
@@ -107,7 +107,7 @@ describe('a generic (non-merge) write on a spec node', () => {
 describe('a data MERGE on a TASK, over GraphQL', () => {
   it('names the GraphQL/CLI replace route and no MCP tool', async () => {
     // The GraphQL door exempts the kind but does not SET the flag: pass it.
-    const t = await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:t', name: 't', content: 'Do it.', isRunnable: true } }, ctx());
+    const t = await M.createTaskNode({}, { input: { memoryRef: memoryId, loc: 'tasks:t', name: 't', content: 'Do it.', isRunnable: true } }, ctx());
     const r = await refusal(M.updateNodeData({}, { nodeRef: t.id, data: { a: 1 } }, ctx()));
 
     expect(r.ext).toMatchObject({ kind: 'task', door: 'updateTaskNode', mcpDoor: null, merge: 'data' });
@@ -140,7 +140,7 @@ describe('a node governed as MORE THAN ONE kind (@copilot + @codex, PR #1305)', 
       data: { id: generateId(), memoryId, loc: 'checks:rr', name: 'rr', role: 'review', isRunnable: true, content: 'x' },
     });
 
-    const r = await refusal(M.updateNode({}, { input: { id: n.id, content: 'y' } }, ctx()));
+    const r = await refusal(M.updateNode({}, { input: { ref: n.id, content: 'y' } }, ctx()));
     expect(r.ext).toMatchObject({ code: 'ROLE_GOVERNED', kinds: ['task', 'review'] });
     expect(r.message).toContain('governed as more than one kind (task and review)');
     expect(r.message).toContain('no current route can write it');
@@ -149,18 +149,18 @@ describe('a node governed as MORE THAN ONE kind (@copilot + @codex, PR #1305)', 
     expect(r.ext.mcpDoor).toBeNull();
 
     // TRUTHFUL: each door the message declines to recommend does fail.
-    expect((await refusal(M.updateTaskNode({}, { input: { id: n.id, content: 'y' } }, ctx()))).code).toBe('ROLE_GOVERNED');
-    expect((await refusal(M.updateReviewNode({}, { input: { id: n.id, content: 'y' } }, ctx()))).code).toBe('ROLE_GOVERNED');
+    expect((await refusal(M.updateTaskNode({}, { input: { ref: n.id, content: 'y' } }, ctx()))).code).toBe('ROLE_GOVERNED');
+    expect((await refusal(M.updateReviewNode({}, { input: { ref: n.id, content: 'y' } }, ctx()))).code).toBe('ROLE_GOVERNED');
   });
 });
 
 describe('a refusal offers only routes that perform the refused operation (@codex, PR #1305)', () => {
   it('a revision RESTORE says no door restores, and offers no node-update route', async () => {
     const n = await spec();
-    await M.updateSpecNode({}, { input: { id: n.id, content: 'second' } }, ctx());
+    await M.updateSpecNode({}, { input: { ref: n.id, content: 'second' } }, ctx());
     const rev = await db.nodeRevision.findFirstOrThrow({ where: { nodeId: n.id }, orderBy: { createdAt: 'asc' } });
 
-    const r = await refusal(M.restoreNodeRevision({}, { revisionId: rev.id }, ctx()));
+    const r = await refusal(M.restoreNodeRevision({}, { nodeRevRef: rev.id }, ctx()));
     expect(r.code).toBe('ROLE_GOVERNED');
     expect(r.message).toContain('no door restores a revision');
     expect(r.message).not.toMatch(/routes to it by itself|Over MCP|may update/);
@@ -181,10 +181,10 @@ describe('a refusal offers only routes that perform the refused operation (@code
 
 describe('a CREATE that would un-govern the node it resurrects (@codex, PR #1305)', () => {
   it('offers no MCP or CLI create route: both would force the signal back on', async () => {
-    const t = await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:gone', name: 'g', content: 'x', isRunnable: true } }, ctx());
+    const t = await M.createTaskNode({}, { input: { memoryRef: memoryId, loc: 'tasks:gone', name: 'g', content: 'x', isRunnable: true } }, ctx());
     await db.node.update({ where: { id: t.id }, data: { deletedAt: new Date() } });
 
-    const r = await refusal(M.createNode({}, { input: { memoryId, loc: 'tasks:gone', name: 'g', isRunnable: false } }, ctx()));
+    const r = await refusal(M.createNode({}, { input: { memoryRef: memoryId, loc: 'tasks:gone', name: 'g', isRunnable: false } }, ctx()));
 
     expect(r.ext).toMatchObject({ code: 'ROLE_GOVERNED', kind: 'task', op: 'create', refusal: 'removes', mcpDoor: null });
     expect(r.message).not.toMatch(/hadron_create_task|routes to it by itself/);
@@ -193,7 +193,7 @@ describe('a CREATE that would un-govern the node it resurrects (@codex, PR #1305
 
 describe('callers whose refused operation no node-write route performs (@codex, PR #1305)', () => {
   it('a CLONE of a governed node offers no route: node create does not perform a clone', async () => {
-    const t = await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:src', name: 's', content: 'x', isRunnable: true } }, ctx());
+    const t = await M.createTaskNode({}, { input: { memoryRef: memoryId, loc: 'tasks:src', name: 's', content: 'x', isRunnable: true } }, ctx());
     const mem = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
 
     const r = await refusal(M.cloneNode({}, { sourceRef: t.id, targetUrn: `hrn:node:${mem.urn.replace(/^hrn:mem:/, '')}:tasks:copy` }, ctx()));
@@ -204,7 +204,7 @@ describe('callers whose refused operation no node-write route performs (@codex, 
   });
 
   it('MCP hadron_create_node on a LIVE governed loc offers no create door: it would hit NODE_LOC_CONFLICT', async () => {
-    const t = await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:live', name: 'l', content: 'x', isRunnable: true } }, ctx());
+    const t = await M.createTaskNode({}, { input: { memoryRef: memoryId, loc: 'tasks:live', name: 'l', content: 'x', isRunnable: true } }, ctx());
     const mem = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
     const urn = `hrn:node:${mem.urn.replace(/^hrn:mem:/, '')}:tasks:live`;
     // Platform ADMIN, as the #1201 MCP tests drive it: the MCP write gate is
@@ -239,20 +239,20 @@ describe('MCP advertises a door only when it could replay the refused call (@cod
   });
 
   it('CONTROL: a replayable update of a live task names hadron_update_task', async () => {
-    await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:ok', name: 'o', content: 'x', isRunnable: true } }, ctx());
+    await M.createTaskNode({}, { input: { memoryRef: memoryId, loc: 'tasks:ok', name: 'o', content: 'x', isRunnable: true } }, ctx());
     const text = await adminMcp().callToolText('hadron_update_node', { urn: await taskUrn('tasks:ok'), content: 'y' });
     expect(text).toContain('Over MCP, use hadron_update_task');
   });
 
   it('an update carrying a field the door lacks (objectType) names no door', async () => {
-    await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:ot', name: 'o', content: 'x', isRunnable: true } }, ctx());
+    await M.createTaskNode({}, { input: { memoryRef: memoryId, loc: 'tasks:ot', name: 'o', content: 'x', isRunnable: true } }, ctx());
     const text = await adminMcp().callToolText('hadron_update_node', { urn: await taskUrn('tasks:ot'), objectType: 'thing' });
     expect(text).toMatch(/role_governed/);
     expect(text).not.toContain('hadron_update_task');
   });
 
   it('an update of a TOMBSTONED task names no door: the update doors answer NODE_NOT_FOUND too', async () => {
-    const t = await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:dead', name: 'd', content: 'x', isRunnable: true } }, ctx());
+    const t = await M.createTaskNode({}, { input: { memoryRef: memoryId, loc: 'tasks:dead', name: 'd', content: 'x', isRunnable: true } }, ctx());
     await db.node.update({ where: { id: t.id }, data: { deletedAt: new Date() } });
     const text = await adminMcp().callToolText('hadron_update_node', { urn: await taskUrn('tasks:dead'), content: 'y' });
     expect(text).not.toContain('hadron_update_task');
@@ -261,7 +261,7 @@ describe('MCP advertises a door only when it could replay the refused call (@cod
 
 describe('GraphQL-side cases from review round 4 (@copilot, PR #1305)', () => {
   it('updateObject on a governed node offers no node-surface route', async () => {
-    const t = await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:obj', name: 'o', content: 'x', isRunnable: true } }, ctx());
+    const t = await M.createTaskNode({}, { input: { memoryRef: memoryId, loc: 'tasks:obj', name: 'o', content: 'x', isRunnable: true } }, ctx());
     const r = await refusal(M.updateObject({}, { ref: t.id, fields: { a: 1 } }, ctx()));
     expect(r.code).toBe('ROLE_GOVERNED');
     expect(r.ext.mcpDoor).toBeNull();
@@ -269,9 +269,9 @@ describe('GraphQL-side cases from review round 4 (@copilot, PR #1305)', () => {
   });
 
   it('updateNode on a TOMBSTONED governed node offers no route', async () => {
-    const t = await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:tomb', name: 't', content: 'x', isRunnable: true } }, ctx());
+    const t = await M.createTaskNode({}, { input: { memoryRef: memoryId, loc: 'tasks:tomb', name: 't', content: 'x', isRunnable: true } }, ctx());
     await db.node.update({ where: { id: t.id }, data: { deletedAt: new Date() } });
-    const r = await refusal(M.updateNode({}, { input: { memoryId, loc: 'tasks:tomb', content: 'y' } }, ctx()));
+    const r = await refusal(M.updateNode({}, { input: { memoryRef: memoryId, loc: 'tasks:tomb', content: 'y' } }, ctx()));
     // Either the plain not-found or a refusal with no route: never a door
     // that would itself answer NODE_NOT_FOUND.
     expect(r.message).not.toMatch(/routes to it by itself|Over MCP/);
@@ -299,7 +299,7 @@ describe('kind signals are door-specific (@copilot + @codex, PR #1305 round 5)',
   });
 
   it('MCP: editing a live task while setting a role names no door; the control (content only) still does', async () => {
-    await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:sig', name: 's', content: 'x', isRunnable: true } }, ctx());
+    await M.createTaskNode({}, { input: { memoryRef: memoryId, loc: 'tasks:sig', name: 's', content: 'x', isRunnable: true } }, ctx());
     const mem = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
     const urn = `hrn:node:${mem.urn.replace(/^hrn:mem:/, '')}:tasks:sig`;
     const mcp = createTestableMcpServer({ userId: uid, roles: ['ADMIN'], clientId: `user:${uid}` } as never);
@@ -315,7 +315,7 @@ describe('kind signals are door-specific (@copilot + @codex, PR #1305 round 5)',
 
 describe('MCP create over a TOMBSTONE offers no door (@codex, PR #1305 round 6)', () => {
   it('resurrection clears omitted fields here but the doors preserve them, so no door replays it', async () => {
-    const t = await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:res', name: 'r', content: 'x', isRunnable: true } }, ctx());
+    const t = await M.createTaskNode({}, { input: { memoryRef: memoryId, loc: 'tasks:res', name: 'r', content: 'x', isRunnable: true } }, ctx());
     await db.node.update({ where: { id: t.id }, data: { deletedAt: new Date() } });
     const mem = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
     const text = await createTestableMcpServer({ userId: uid, roles: ['ADMIN'], clientId: `user:${uid}` } as never).callToolText(
@@ -338,7 +338,7 @@ describe('MCP create over a TOMBSTONE offers no door (@codex, PR #1305 round 6)'
 
 describe('an UPDATE of a loc with no row at all (@copilot, PR #1305)', () => {
   it('offers no route, whichever refusal comes first', async () => {
-    const r = await refusal(M.updateNode({}, { input: { memoryId, loc: 'tasks:nowhere', role: 'spec', content: 'y' } }, ctx()));
+    const r = await refusal(M.updateNode({}, { input: { memoryRef: memoryId, loc: 'tasks:nowhere', role: 'spec', content: 'y' } }, ctx()));
     expect(r.message).not.toMatch(/routes to it by itself|Over MCP/);
     expect(r.ext.mcpDoor ?? null).toBeNull();
   });
@@ -352,7 +352,7 @@ describe('an MCP data merge DELEGATED to GraphQL keeps its MCP origin (@codex, P
   };
 
   it('a task: names the MCP door, which takes the whole data object', async () => {
-    await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:md', name: 'm', content: 'x', isRunnable: true } }, ctx());
+    await M.createTaskNode({}, { input: { memoryRef: memoryId, loc: 'tasks:md', name: 'm', content: 'x', isRunnable: true } }, ctx());
     const text = await mcp().callToolText('hadron_update_node_data', { nodeUrn: await urnOf('tasks:md'), data: { a: 1 } });
     expect(text).toContain('no door merges');
     expect(text).toContain('Over MCP, pass the whole data object to hadron_update_task');
@@ -369,7 +369,7 @@ describe('an MCP data merge DELEGATED to GraphQL keeps its MCP origin (@codex, P
 describe('an MCP door tool delegating to GraphQL keeps its MCP origin (@codex, PR #1305 round 9)', () => {
   const mcp = () => createTestableMcpServer({ userId: uid, roles: ['ADMIN'], clientId: `user:${uid}` } as never);
   const reviewUrn = async () => {
-    await M.createReviewNode({}, { input: { memoryId, loc: 'checks:r', name: 'r', content: 'x', role: 'review' } }, ctx());
+    await M.createReviewNode({}, { input: { memoryRef: memoryId, loc: 'checks:r', name: 'r', content: 'x', role: 'review' } }, ctx());
     const mem = await db.memory.findUniqueOrThrow({ where: { id: memoryId } });
     return `hrn:node:${mem.urn.replace(/^hrn:mem:/, '')}:checks:r`;
   };
@@ -389,15 +389,15 @@ describe('an MCP door tool delegating to GraphQL keeps its MCP origin (@codex, P
 
 describe('a GraphQL create that RESURRECTS a governed tombstone (@codex, PR #1305 round 10)', () => {
   it('offers no route when the signal is omitted: the CLI routes create by input, which names no kind', async () => {
-    const t = await M.createTaskNode({}, { input: { memoryId, loc: 'tasks:rz', name: 'r', content: 'x', isRunnable: true } }, ctx());
+    const t = await M.createTaskNode({}, { input: { memoryRef: memoryId, loc: 'tasks:rz', name: 'r', content: 'x', isRunnable: true } }, ctx());
     await db.node.update({ where: { id: t.id }, data: { deletedAt: new Date() } });
-    const r = await refusal(M.createNode({}, { input: { memoryId, loc: 'tasks:rz', name: 'again', content: 'y' } }, ctx()));
+    const r = await refusal(M.createNode({}, { input: { memoryRef: memoryId, loc: 'tasks:rz', name: 'again', content: 'y' } }, ctx()));
     expect(r.ext).toMatchObject({ code: 'ROLE_GOVERNED', refusal: 'edits', op: 'create', mcpDoor: null });
     expect(r.message).toContain('There is no route to suggest for this operation');
   });
 
   it('CONTROL: a create onto a FREE loc still names the CLI route', async () => {
-    const r = await refusal(M.createNode({}, { input: { memoryId, loc: 'tasks:free', name: 'f', isRunnable: true } }, ctx()));
+    const r = await refusal(M.createNode({}, { input: { memoryRef: memoryId, loc: 'tasks:free', name: 'f', isRunnable: true } }, ctx()));
     expect(r.message).toContain('`hadron node create` routes to it by itself');
   });
 });
