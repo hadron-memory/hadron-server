@@ -159,7 +159,7 @@ describe('the creation switch (deploy order: an older judge reads only `memory`)
 
 describe('the signed sentence names every restriction, and nothing for an absent key', () => {
   const action = () => PLATFORM_ACTIONS.find((a) => a.name === 'memory.read')!;
-  const app = { urn: 'hrn:app:acme.com:mealplan' };
+  const app = { urn: 'hrn:app:acme.com:kitchen' };
   const refs = { m1: { urn: 'hrn:mem:acme.com:recipes' }, o1: { urn: 'hrn:org:acme.com' } };
   const S = '01a2scheduleid00000000000000000s';
   const H = '01a2webhookid000000000000000000w';
@@ -168,15 +168,15 @@ describe('the signed sentence names every restriction, and nothing for an absent
 
   it('the five sentences of the pre-build bytes (issuecomment-7236803193), the first byte-identical to S1', () => {
     expect(render({ memory: 'm1' }))
-      .toBe('Let hrn:app:acme.com:mealplan, acting with no person behind it, read the memory hrn:mem:acme.com:recipes, read only');
+      .toBe('Let hrn:app:acme.com:kitchen, acting with no person behind it, read the memory hrn:mem:acme.com:recipes, read only');
     expect(render({ memory: 'm1', branch: 'docs:api' }))
-      .toBe('Let hrn:app:acme.com:mealplan, acting with no person behind it, read the memory hrn:mem:acme.com:recipes, only the loc docs:api and below it, read only');
+      .toBe('Let hrn:app:acme.com:kitchen, acting with no person behind it, read the memory hrn:mem:acme.com:recipes, only the loc docs:api and below it, read only');
     expect(render({ memory: 'm1', automation: S }))
-      .toBe(`Let hrn:app:acme.com:mealplan, acting with no person behind it, read the memory hrn:mem:acme.com:recipes, read only, and only in the runs of the schedule ${S}`);
+      .toBe(`Let hrn:app:acme.com:kitchen, acting with no person behind it, read the memory hrn:mem:acme.com:recipes, read only, and only in the runs of the schedule ${S}`);
     expect(render({ memory: 'm1', branch: 'docs:api', automation: H }))
-      .toBe(`Let hrn:app:acme.com:mealplan, acting with no person behind it, read the memory hrn:mem:acme.com:recipes, only the loc docs:api and below it, read only, and only in the runs of the webhook ${H}`);
+      .toBe(`Let hrn:app:acme.com:kitchen, acting with no person behind it, read the memory hrn:mem:acme.com:recipes, only the loc docs:api and below it, read only, and only in the runs of the webhook ${H}`);
     expect(render({ memory: 'o1', automation: S }))
-      .toBe(`Let hrn:app:acme.com:mealplan, acting with no person behind it, read all ORGANIZATION knowledge of hrn:org:acme.com, read only, and only in the runs of the schedule ${S}`);
+      .toBe(`Let hrn:app:acme.com:kitchen, acting with no person behind it, read all ORGANIZATION knowledge of hrn:org:acme.com, read only, and only in the runs of the schedule ${S}`);
   });
 
   it('a value it cannot write refuses the whole sentence: null, "", the wildcard, a list, an unresolved automation', () => {
