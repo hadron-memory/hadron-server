@@ -49,8 +49,10 @@ export async function reliedRevisionsOf(
     else if (reference.approved) approved = true;
   }
   if (approved) {
-    // Same predicate/selector as S2; no decrypt-to-qualify branch and no carrier
-    // inference (a newer byte-identical sibling may be the served snapshot).
+    // Same predicate/selector as S2; no decrypt-to-qualify branch and no inference
+    // from where the approval was recorded: since #5481 the served snapshot is the
+    // newest revision an approval is recorded at, which may be a later non-content
+    // revision that carries it forward.
     const selected = await newestApprovedRevisionOf(tx, targetNodeId);
     if (selected.truncated) throw new IncludeRetentionInactiveError();
     if (selected.found?.source === 'snapshot') result.add(selected.found.revNo);

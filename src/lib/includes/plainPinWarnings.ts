@@ -77,10 +77,13 @@ export async function plainPinWarnings(
         // #2750 / cor:dmo:150:07: the SQL memory filter is the second defense behind canRead. The accessible set is
         // always a materialised list (#3921), so it is always applied. An empty OR arm is not TRUE.
         OR: [{ memoryId: scope.memoryId }, { memoryId: null }, { memoryId: { in: scope.accessible } }],
-      }, select: { approvalHash: true },
+      }, select: { approvalHash: true, approvedRevNo: true },
     }) : null;
     if (snapshot && !readableSnapshot) continue;
-    const carriesApproval = snapshot ? readableSnapshot!.approvalHash !== null
+    // Kept by pruning: the revision an approval was RECORDED at. A row that only carries an approval forward from an
+    // earlier revision (#5481) is ordinary history, exactly as revisionsExemptFromPruning reads it.
+    const carriesApproval = snapshot
+      ? readableSnapshot!.approvalHash !== null && !(readableSnapshot!.approvedRevNo != null && readableSnapshot!.approvedRevNo < revision)
       : live.approvedRevNo === revision && live.approvalHash !== null;
     if (carriesApproval) continue;
     const signature = await ctx.db.nodeSignature.findFirst({

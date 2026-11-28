@@ -3478,21 +3478,21 @@ export const typeDefs = `#graphql
     approvedByUser: NodeRevisionEditor
     "#1591 — the approving principal when no user is known, e.g. app:<id>."
     approvedByInfo: String
-    "#1591 — when this revision was approved; null unless it was approved before it was edited away."
+    "#1591, #5481 — when the approval this revision carries was recorded; null when it carries none. A revision carries the approval recorded at it, and so does each later revision that left the title, abstract and content unchanged (revisionApproval.recordedAtRevision names the revision it was recorded at)."
     approvedAt: DateTime
     "#1591 — approval hash v1 recorded when this revision was approved."
     approvalHash: String
-    "#1838 — was THIS revision approved (for pinning)? Not whether the node is approved now (that is Node.approvalStatus). A revision counts as approved when some recorded approval covers exactly its hashed content, whichever revision the approval was recorded on (Holger's R7, hrn:node:hadronmemory.com:specs:cor:dmo:060:04)."
+    "#1838, #5481 — is THIS revision approved (for pinning and for serving)? Not whether the node is approved now (that is Node.approvalStatus). A revision is approved only when an approval is recorded at it: the revision the approval was made at, and each later revision that left the title, abstract and content unchanged, which keeps the approval in force (hrn:node:hadronmemory.com:specs:cor:dmo:120:04). A revision whose text only equals a text approved at another revision is not approved (Holger, 2026-11-28; this reverses the earlier rule in hrn:node:hadronmemory.com:specs:cor:dmo:060:04)."
     revisionApproval: RevisionApproval!
     createdAt: DateTime!
   }
 
-  "#1838 — whether one revision was approved, and by which recorded approval."
+  "#1838, #5481 — whether one revision is approved, and by which recorded approval."
   type RevisionApproval {
     "NOT_APPLICABLE inside an encrypted memory; APPROVED or NOT_APPROVED otherwise (never SUPERSEDED: that is about the live text)."
     state: NodeApprovalState!
     approved: Boolean!
-    "The revision the covering approval was recorded at; it can differ from this revision when only metadata changed, or the text recurs."
+    "The revision the approval was recorded at. Lower than this revision when the revisions in between changed only metadata (tags, role, location and the like), never the title, abstract or content."
     recordedAtRevision: Int
     approvedBy: String
     approvedByInfo: String

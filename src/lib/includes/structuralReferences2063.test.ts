@@ -127,9 +127,17 @@ describe('structural references (#2063 R1)', () => {
     expect(await relied()).toEqual(new Set());
   });
 
-  it('F: unpinned approved selects the covered non-carrier sibling through the shared predicate', async () => {
+  // #5481 restated: was "F: unpinned approved selects the covered non-carrier sibling through the shared predicate":
+  // revision 3 held the approved text with no approval of its own and was selected because revision 1's record covered
+  // it. Such a row is no longer approved. The sibling the shared predicate selects is one the approval is recorded at:
+  // revision 3 here carries revision 1's approval forward, as the revision writer leaves a later non-content revision.
+  it('F: unpinned approved selects the newest revision an approval is recorded at, through the shared predicate (#5481)', async () => {
     const hash = computeApprovalHash({ title: 'Target', abstract: null, content: 'approved' });
-    for (const revNo of [1, 3]) await db.nodeRevision.create({ data: { nodeId: target.id, memoryId: memory.id, loc: 'target', name: 'Target', content: 'approved', tags: [], revNo, ...(revNo === 1 ? { approvedByInfo: 'test', approvedAt: new Date(), approvalHash: hash } : {}) } });
+    const record = { approvedByInfo: 'test', approvedAt: new Date(), approvalHash: hash };
+    const row = (revNo: number, approval: Record<string, unknown>) => db.nodeRevision.create({ data: { nodeId: target.id, memoryId: memory.id, loc: 'target', name: 'Target', content: 'approved', tags: [], revNo, ...approval } });
+    await row(1, record);
+    await row(3, { ...record, approvedRevNo: 1 });
+    await row(4, {}); // the same text with no approval recorded at it: never selected
     await db.node.update({ where: { id: source.id }, data: { content: '{{> target approved}} {{> target approved signed}}' } });
     await activate();
     expect(await relied()).toEqual(new Set([3]));

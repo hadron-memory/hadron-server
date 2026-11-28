@@ -387,7 +387,18 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // `memory.write`); they are deprecated in the SDL and removed once a CLI release carrying hadron-cli#3319 ships.
 // `AutomationApproval.readGrants` is always empty (deprecated). (4) A run carrying a user id no longer reads through #2883's grant: a
 // user-backed run reads only what its user reads. (0.56.0 is #5391 and 0.57.0 is #5441, both merged first.)
-export const HADRON_SERVER_VERSION = '0.58.0';
+// 0.61.0 — BREAKING (behaviour; the SDL changes in descriptions only) (#5481, Holger 2026-11-28, decision record
+// 2026-11-27-holger-rulings-to-bo-system-nodes-and-roles section 7; reverses the #1838 rule of cor:dmo:060:04): a revision is approved
+// only when an approval is recorded AT it. (1) `NodeRevision.revisionApproval` no longer reads APPROVED for a revision whose text only
+// equals a text approved at another revision (a restore or a compile back to earlier text, or a revision older than the approval);
+// `recordedAtRevision` is lower than the revision only across revisions that changed no title, abstract or content. (2) A boot prompt
+// serve (bind, chat, run) and an `approved` include (`{{> x approved}}`, pinned or not) select the newest revision an approval is
+// recorded at; one whose text matches an earlier approval is not served, and a pin on it resolves to the notice (a compile refuses).
+// (3) `NodeRevision.approvedBy` / `approvedAt` / `approvalHash` are also set on a later revision that left the hashed content
+// unchanged: it carries the approval forward. A revision made before this version keeps today's answer in an Agent's system memory
+// or an install memory (a one-time re-anchoring at deploy); elsewhere it follows the new rule at once. No SDL field, argument or
+// MCP tool changes. (0.59.0 is claimed by #5452 and by #5453 PR A, 0.60.0 by #5453 PR B, all open when this was written.)
+export const HADRON_SERVER_VERSION = '0.61.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

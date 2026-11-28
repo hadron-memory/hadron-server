@@ -42,17 +42,27 @@ it('keeps the newest covered non-carrier through a small cap, but prunes older c
   expect(kept.length).toBe(3); // carrier + newest covered + cap
   expect((await newestApprovedRevisionOf(db, n.id)).found?.revNo).toBe(3);
 });
-it('a later qualifying sibling replaces the old extra exemption', async () => {
+// #5481 restated: this pinned that the approved text coming BACK (revision 4, with no approval of its own) took over the
+// exemption from revision 2, because revision 1's record covered its text. A revision is now approved only by the record
+// at it, so the repeat changes nothing; what replaces the extra exemption is a later revision an approval is recorded at.
+it('the approved text coming back does not move the exemption; a later APPROVED revision replaces it (#5481)', async () => {
   const n = await node('replacement');
   await resolvers.Mutation.approveNode(null, { nodeRef: n.id }, ctx());
   await edit(n.id, { tags: ['a'] });
-  await edit(n.id, { content: 'different' }); // covered snapshot 2
+  await edit(n.id, { content: 'different' }); // snapshot 2: the approval was in force at it
   expect([...await revisionsExemptFromPruning(db, n.id, memoryId)]).toContain(2);
-  await edit(n.id, { content: 'approved text' }); // live 4 covered by carrier 1
-  await edit(n.id, { content: 'different again' }); // covered snapshot 4
+  await edit(n.id, { content: 'approved text' }); // live 4: the approved text again, no approval recorded at it
+  await edit(n.id, { content: 'different again' }); // snapshot 4 carries nothing
   const exempt = [...await revisionsExemptFromPruning(db, n.id, memoryId)];
-  expect(exempt).toContain(4);
-  expect(exempt).not.toContain(2);
+  expect(exempt).toContain(2);
+  expect(exempt).not.toContain(4);
+  await edit(n.id, { content: 'approved text' }); // live 6
+  await resolvers.Mutation.approveNode(null, { nodeRef: n.id }, ctx()); // recorded AT revision 6
+  await edit(n.id, { tags: ['b'] }); // snapshot 6 holds its own record; live 7
+  await edit(n.id, { content: 'different a third time' }); // snapshot 7: the newest approved revision
+  const after = [...await revisionsExemptFromPruning(db, n.id, memoryId)];
+  expect(after).toEqual(expect.arrayContaining([1, 6, 7]));
+  expect(after).not.toContain(2);
 });
 it('never-approved revisions add no exemption and ordinary history still prunes', async () => {
   const n = await node('ordinary');
