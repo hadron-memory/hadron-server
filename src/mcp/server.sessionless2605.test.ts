@@ -13,7 +13,7 @@ import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { db } from '../integrations/db/client.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, createDbAppWithKey } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { mintUserApiKey, type OAuthScope } from '../middleware/auth.js';
 import { signJwt } from '../auth/jwt.js';
@@ -233,10 +233,10 @@ describe('#2605 sessionless serving', () => {
   it('answers 503 when the database fails after authentication, rather than leaving the request unanswered', async () => {
     sessionless();
     const key = await mintKey('portal');
-    // The session binding is the first database read after the credential; it runs on every sessionless request.
-    const failing = vi.spyOn(db.session, 'findUnique').mockRejectedValue(new Error('simulated database failure'));
+    // The user's App resolution is the first database read after the credential that does not swallow a failure.
+    const failing = vi.spyOn(db.appMember, 'findMany').mockRejectedValue(new Error('simulated database failure'));
     try {
-      const res = await post(rpc('tools/list'), { key, headers: { 'x-hadron-session': 'sess-2605' } });
+      const res = await post(rpc('tools/list'), { key });
       expect(res.status).toBe(503);
       expect(res.json).toEqual({ error: 'Authentication temporarily unavailable' });
     } finally {
@@ -274,6 +274,98 @@ describe('#2605 sessionless serving', () => {
     const chat1Next = await post(call('hadron_list_memories'), { key: connector });
     expect(chat1Next.json.result.content[0].text).toContain(appB.urn);
     expect(chat1Next.json.result.content[0].text).not.toContain(appA.urn);
+  });
+
+  // cor:aut:020:02, cor:agt:020:03, cor:acl:010:04: the header narrows a pure App key, so DROPPING it would widen the key.
+  describe('X-Hadron-Session is refused, never dropped', () => {
+    const HEADER = { 'x-hadron-session': 'a-session-id' };
+
+    it('refuses a user credential that sends it, with a typed error naming the header, and serves the same request without it', async () => {
+      sessionless();
+      const key = await mintKey('portal');
+      const refused = await post(call('hadron_list_memories'), { key, headers: HEADER });
+      expect(refused.status).toBe(400);
+      expect(refused.json.error.data).toEqual({ code: 'SESSION_HEADER_UNSUPPORTED', header: 'X-Hadron-Session' });
+      expect(refused.json.error.message).toContain('X-Hadron-Session');
+      expect(refused.sessionHeader).toBeNull();
+      expect((await post(call('hadron_list_memories'), { key })).status).toBe(200);
+    });
+
+    it('refuses a pure App key that sends it, so a narrowing it asked for is never bypassed, and serves it without', async () => {
+      sessionless();
+      const org = await db.organization.findFirstOrThrow();
+      const { rawKey } = await createDbAppWithKey(db, `slkey-${generateId().slice(-6)}`, org.id);
+      for (const body of [initializeBody, rpc('tools/list'), call('hadron_list_memories')]) {
+        const refused = await post(body, { key: rawKey, headers: HEADER });
+        expect(refused.status).toBe(400);
+        expect(refused.json.error.data.code).toBe('SESSION_HEADER_UNSUPPORTED');
+      }
+      expect((await post(rpc('tools/list'), { key: rawKey })).status).toBe(200);
+    });
+
+    it('answers a request with no credential the way it always does, header or not (authentication comes first)', async () => {
+      sessionless();
+      const without = await post(rpc('tools/list'));
+      const withHeader = await post(rpc('tools/list'), { headers: HEADER });
+      expect(withHeader.status).toBe(401);
+      expect(withHeader.text).toBe(without.text);
+    });
+
+    it('does not refuse an empty header', async () => {
+      sessionless();
+      const key = await mintKey('portal');
+      expect((await post(rpc('tools/list'), { key, headers: { 'x-hadron-session': '' } })).status).toBe(200);
+    });
+  });
+
+  it('refuses subscriptions/listen with a typed error instead of holding the request open', async () => {
+    sessionless();
+    const key = await mintKey('portal');
+    const listen = { jsonrpc: '2.0', id: 9, method: 'subscriptions/listen', params: { notifications: { toolsListChanged: true } } };
+    for (const body of [listen, [rpc('tools/list'), listen]]) {
+      const answer = await Promise.race([
+        post(body, { key }),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('listen held the request open')), 5_000)),
+      ]);
+      expect(answer.status).toBe(400);
+      expect(answer.json.error.data.code).toBe('SUBSCRIPTIONS_LISTEN_UNSUPPORTED');
+      expect(answer.json.id).toBe(9);
+    }
+  });
+
+  it('answers a picker with the list relay, never a hang, for a client that declares elicitation', async () => {
+    sessionless();
+    const key = await mintKey('portal');
+    const orgId = (await db.organization.findFirstOrThrow()).id;
+    for (const n of [1, 2]) {
+      await db.memory.create({ data: { id: generateId(), name: `pick-${n}`, urn: `sl-pick-${generateId().slice(-6)}:m${n}`, class: 'knowledge', organizationId: orgId } as never });
+    }
+    const client = new Client({ name: 'elicit-client', version: '1' }, { capabilities: { elicitation: { form: {} } } } as never);
+    const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), { requestInit: { headers: { authorization: `Bearer ${key}` } } });
+    try {
+      await client.connect(transport);
+      const result = await Promise.race([
+        client.callTool({ name: 'hadron_run_task', arguments: { task: 'anything' } }),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('the picker hung')), 8_000)),
+      ]);
+      expect(JSON.stringify(result.content)).toContain('Pass a `memory` hint');
+      expect(JSON.stringify(result.content)).toContain('pick-1');
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  }, 15_000);
+
+  it('hadron_set_active_* says "this request only" to a caller with no stored selection, and not to one that has it', async () => {
+    sessionless();
+    const noKey = await mintKey('portal');
+    const org = await db.organization.findFirstOrThrow();
+    const bare = await post(call('hadron_set_active_app', { app: appA.urn }), { key: noKey });
+    expect(bare.json.result.content[0].text).toContain('applies to this request only');
+    const bareOrg = await post(call('hadron_set_active_org', { org: org.urn }), { key: noKey });
+    expect(bareOrg.json.result.content[0].text).toContain('Active organization set to');
+    expect(bareOrg.json.result.content[0].text).toContain('applies to this request only');
+    const stored = await post(call('hadron_set_active_app', { app: appA.urn }), { key: await mintKey('oauth:dcr_note') });
+    expect(stored.json.result.content[0].text).not.toContain('this request only');
   });
 
   it('answers an unknown tool with a JSON-RPC error and a bad argument with an error result', async () => {

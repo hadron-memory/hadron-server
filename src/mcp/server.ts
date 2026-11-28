@@ -2468,6 +2468,8 @@ export function createMcpServerInstance(
     restoredOrgId?: string;
     /** Spec 049 Phase 3 — an already-re-authorized active-scope selection to start from. */
     restoredScopeId?: string;
+    /** #2605 — built for ONE sessionless request: nothing is held between requests, and no server-to-client request can be serviced. */
+    sessionless?: boolean;
   } = {},
 ): McpServer {
   /**
@@ -2476,6 +2478,14 @@ export function createMcpServerInstance(
    * keeps the pre-#1012 in-memory-only behaviour, so opting out costs nothing.
    */
   const clientKey = opts.clientKey ?? null;
+  const sessionless = opts.sessionless === true;
+  /**
+   * #2605: under sessionless serving a caller with no stored-selection key keeps nothing from one request to the next,
+   * so a successful `hadron_set_active_*` must not read as durable. Empty everywhere else.
+   */
+  const requestOnlyNote = sessionless && clientKey === null
+    ? ' This selection applies to this request only: the connection holds no state between requests, and this caller has no stored selection (an OAuth login, or the X-Hadron-Client-Id header, gives one).'
+    : '';
 
   /**
    * #1009 — this MCP session replaced one the client had already been using
@@ -3584,7 +3594,7 @@ export function createMcpServerInstance(
       const dep = getDeploymentInfo();
       return textResult(
         `Active memory set to: ${safeEmitEntityUrnV2('memory', mem.urn)} ` +
-          `(server: ${dep.baseUrl}, version: ${dep.version}).`,
+          `(server: ${dep.baseUrl}, version: ${dep.version}).` + requestOnlyNote,
       );
     },
   );
@@ -3891,7 +3901,7 @@ export function createMcpServerInstance(
             appUrn: r.app.urn,
           });
           return textResult(
-            `Active App set to: **${safeEmitEntityUrnV2('app', r.app.urn)}** (${r.app.name}). Subsequent App-scoped tools will operate against this App. Call hadron_set_active_app again with a different identifier to switch, or hadron_list_apps to see other options.`,
+            `Active App set to: **${safeEmitEntityUrnV2('app', r.app.urn)}** (${r.app.name}). Subsequent App-scoped tools will operate against this App. Call hadron_set_active_app again with a different identifier to switch, or hadron_list_apps to see other options.` + requestOnlyNote,
           );
         }
         case 'ambiguous': {
@@ -4012,7 +4022,7 @@ export function createMcpServerInstance(
           ? ` Note: your active App is owned by ${await renderOrgLine(effective.organizationId)}, which outranks this selection while it is active — the ladder resolves to that organization until you switch or clear the App.`
           : '';
       return textResult(
-        `Active organization set to ${await renderOrgLine(r.organizationId)} and stored for this client. It is the ladder's third rung: a call that names an organization, or an org-owned active App, outranks it. hadron_server_info reports what currently resolves; the scope ladder (spec 049 Phase 3) is the read surface that consumes it.${outranked}`,
+        `Active organization set to ${await renderOrgLine(r.organizationId)} and stored for this client. It is the ladder's third rung: a call that names an organization, or an org-owned active App, outranks it. hadron_server_info reports what currently resolves; the scope ladder (spec 049 Phase 3) is the read surface that consumes it.${outranked}${requestOnlyNote}`,
       );
     },
   );
@@ -4478,7 +4488,7 @@ export function createMcpServerInstance(
       await saveActiveScope(db, auth, clientKey, row.id);
       mcpLog('info', 'active_scope_set', { userId: auth.userId, mcpSessionId: getSessionId(), scopeId: row.id });
       const now = await mcpSearchScope(undefined, false);
-      return textResult(`Active scope set to "${row.name}" (id ${row.id}) and stored for this client.${now ? `\n${scopeNoteLine(now)}` : ''}`);
+      return textResult(`Active scope set to "${row.name}" (id ${row.id}) and stored for this client.${now ? `\n${scopeNoteLine(now)}` : ''}${requestOnlyNote}`);
     },
   );
 
@@ -9436,6 +9446,9 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
   }
 
   function clientSupportsElicitation(): boolean {
+    // #2605: a per-request instance has no stream back to the client, so a picker would hang or be dropped. Report no
+    // support: every caller already falls back to the list relay, which is the typed answer (cor:api:060:03).
+    if (sessionless) return false;
     try {
       return !!server.server.getClientCapabilities()?.elicitation;
     } catch {
@@ -9450,6 +9463,7 @@ On success returns the moved node's record: new URN, name, type, tags, edge coun
     options: Array<{ const: string; title: string }>,
     message: string,
   ): Promise<string | null> {
+    if (sessionless) throw new Error('Elicitation is not available under sessionless serving.');
     const result = await server.server.elicitInput({
       mode: 'form',
       message,
@@ -13412,7 +13426,8 @@ async function openOrRejectMcpSession(
 //
 // What a request gets instead of connection state:
 //   - its credential, resolved on every request (so a revoked credential or a changed role takes effect at once);
-//   - the `X-Hadron-Session` header, bound on every request like on any other surface;
+//   - the `X-Hadron-Session` header is REFUSED (400, `SESSION_HEADER_UNSUPPORTED`), not bound and not dropped: it narrows a
+//     pure App key, so dropping it would widen the key; honouring it is plan H1/H2;
 //   - its stored selections (`prepareMcpPrincipal`, keyed by client id header or OAuth client).
 // Nothing is remembered between two requests of one client: a selection made by a caller with no stored-selection key
 // lasts for that one request. A named session supplying the App and memory is the next slice (plan H1/H2).
@@ -13438,6 +13453,20 @@ export function mcpServingMode(): 'sessionful' | 'sessionless' {
   return process.env.MCP_SERVING_MODE === MCP_SERVING_MODE_SESSIONLESS ? 'sessionless' : 'sessionful';
 }
 
+/** The JSON-RPC messages of a request body (one, or a batch), tolerating any other shape. */
+function jsonRpcMessages(body: unknown): Array<{ method?: unknown; id?: unknown }> {
+  const items = Array.isArray(body) ? body : [body];
+  return items.filter((m): m is { method?: unknown; id?: unknown } => typeof m === 'object' && m !== null);
+}
+
+const MCP_SESSION_HEADER_NAME = 'X-Hadron-Session';
+
+/** True when the request names a worker session in the header, in any spelling bindPresentedSession would act on. */
+function presentedSessionHeader(req: Request): boolean {
+  const header = req.headers['x-hadron-session'];
+  return (Array.isArray(header) ? header[0] : header) ? true : false;
+}
+
 /** What `handleMcpSessionlessRequest` settled about the principal, handed to the per-request factory. */
 interface SessionlessPrincipal {
   auth: AuthContext;
@@ -13457,6 +13486,7 @@ const sessionlessMcpHandler = createMcpHandler(
     if (!principal) throw new Error('sessionless MCP request reached the server factory without a principal');
     return createMcpServerInstance(principal.auth, () => undefined, principal.cachedAppResolution, {
       isReconnect: false,
+      sessionless: true,
       clientKey: principal.clientKey,
       restoredMemoryUrn: principal.restored.memoryUrn,
       restoredOrgId: principal.restored.activeOrgId,
@@ -13517,6 +13547,29 @@ async function dispatchMcpSessionlessRequest(req: Request, res: Response): Promi
 
   let principal: SessionlessPrincipal;
   try {
+    // The header is REFUSED, never dropped: on a pure App key it narrows the key's reach to the session's scope
+    // (cor:aut:020:02, cor:agt:020:03, cor:acl:010:04), so ignoring it would widen the key, and honouring it is the
+    // H1/H2 slice. Checked before the principal's stored selections are read, so a refused request touches nothing.
+    if (presentedSessionHeader(req)) {
+      res.status(400).json({
+        jsonrpc: '2.0',
+        error: { code: -32600, message: `The ${MCP_SESSION_HEADER_NAME} header is not supported by sessionless MCP serving. Send the request without it.`, data: { code: 'SESSION_HEADER_UNSUPPORTED', header: MCP_SESSION_HEADER_NAME } },
+        id: null,
+      });
+      return;
+    }
+    // `subscriptions/listen` is a long-lived SSE response over POST, which nothing here bounds or drains (plan Q6, T3):
+    // answered with a typed refusal, never a stream that holds the request open or an answer that drops it silently.
+    const listen = jsonRpcMessages(req.body).find((m) => m.method === 'subscriptions/listen');
+    if (listen) {
+      res.status(400).json({
+        jsonrpc: '2.0',
+        error: { code: -32601, message: 'subscriptions/listen is not supported by sessionless MCP serving.', data: { code: 'SUBSCRIPTIONS_LISTEN_UNSUPPORTED' } },
+        id: listen.id ?? null,
+      });
+      return;
+    }
+    // Nothing is bound, so this only publishes the validated user behind the request's writes (#2176).
     await bindPresentedSession(req, db, auth);
     // #2123: session-sensitive consumers read THIS request's binding result.
     auth.requestSession = { sessionId: auth.sessionId, refused: auth.sessionBindingRefused === true };
