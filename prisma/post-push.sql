@@ -542,6 +542,14 @@ CREATE INDEX IF NOT EXISTS nodes_memory_segment_key_eligible_idx
   ON nodes (memory_id, ((replace(loc, ':', chr(1))) COLLATE "C"))
   WHERE deleted_at IS NULL AND node_type <> ALL(ARRAY['system','chat-message','comment']) AND loc <> '';
 
+-- #5452: its twin for a segments read that asked for system nodes (includeSystemNodes): system rows in, chat-message
+-- and comment rows still out. Same definition as migration 20261127234000_nodes_segment_key_with_system_index, which
+-- builds it CONCURRENTLY for production (keep in lockstep; pinned). The WHERE clause is
+-- segmentEligibleSql(undefined, { includeSystemNodes: true }) in src/lib/memoryLocSegments.ts.
+CREATE INDEX IF NOT EXISTS nodes_memory_segment_key_with_system_idx
+  ON nodes (memory_id, ((replace(loc, ':', chr(1))) COLLATE "C"))
+  WHERE deleted_at IS NULL AND node_type <> ALL(ARRAY['chat-message','comment']) AND loc <> '';
+
 -- ── #719 structured/faceted query: value-cast guard functions + JSONB GIN ────
 -- Mirrors prisma/migrations/20260718120000_where_query_helpers/migration.sql
 -- (keep in lockstep). The `where` predicate compiler (src/lib/retrieval/

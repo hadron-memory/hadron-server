@@ -366,7 +366,16 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // with the one `CHAT_HOME_INVALID` and writes nothing; only the person themselves creates a missing personal or private default home
 // (an App key, a run or a worker session is refused). A start with neither memoryRef nor a default behaves as before.
 // (0.54.0 is #5407 and 0.55.0 is #5411, both merged first.)
-export const HADRON_SERVER_VERSION = '0.56.0';
+// 0.59.0 — ADDITIVE (#5452, cor:api:090:02, cor:api:090:05): an explicit way to read `system` nodes. New optional
+// `NodeFilter.includeSystemNodes: Boolean` on `findNodes`, the same argument on `Query.memoryLocSegments`, and the same parameter on
+// MCP `hadron_find_nodes` (and on `hadron_list_nodes`, where it is accepted and changes nothing: that tree never hid system nodes).
+// `true` lifts `system`, and only `system`, from the default node-type exclusion; `chat-message`, comments, the memory-class SYSTEM
+// default, access, soft-deleted rows and inheritance are untouched, and an explicit `nodeType` / `nodeTypes` decides alone. No default
+// changes: `false`, `null` and omitted are the answers of 0.56.0. `appNodes` / `appNodesPage` refuse either boolean with BAD_USER_INPUT
+// (a new refusal on a new field only). A client keys on this version before sending the field: an older server refuses an unknown
+// input field over GraphQL and silently drops an unknown MCP argument (hadron-portal#2695, hadron-cli#3328). (0.56.0 is #5027,
+// merged first; the open #5441 and #5447 both claim 0.57.0, so one of them takes 0.58.0.)
+export const HADRON_SERVER_VERSION = '0.59.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

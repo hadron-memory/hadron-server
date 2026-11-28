@@ -30,7 +30,7 @@ import { vectorSearchNodes, vectorSearchChunks, vectorRanksOf, type NodeVectorSc
 import { UnindexableQueryError, compileBooleanQuery } from './tsquery.js';
 import { compileNodeWhere, compileNodePropertySort } from './nodeWhere.js';
 import { regexSearchTimeoutMs } from './regexTimeout.js';
-import { UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES } from './defaultNodeTypes.js';
+import { defaultExcludedNodeTypes } from './defaultNodeTypes.js';
 import { PARENT_LOC_SQL } from '../childLoc.js';
 
 /** Ordered parameter accumulator — appends a value and returns its `$n` placeholder. */
@@ -49,9 +49,11 @@ function filterClause(f: NodeSqlFilter | undefined, bind: (v: unknown) => string
   // Explicit nodeType wins; otherwise exclude the unqualified-search defaults,
   // system and chat-message (#2836; node_type is NOT NULL, default 'info').
   // #3113 — an explicit list is also explicit: it narrows to the named types and replaces the default.
+  // #5452 — the default is asked of the one shared function, which lifts `system` for includeSystemNodes: true
+  // and never chat-message; with an explicit type above, the flag is not read at all.
   if (flt.nodeTypes) parts.push(`node_type = ANY(${bind(flt.nodeTypes)}::text[])`);
   else if (flt.nodeType) parts.push(`node_type = ${bind(flt.nodeType)}`);
-  else parts.push(`node_type <> ALL(${bind([...UNQUALIFIED_SEARCH_EXCLUDED_NODE_TYPES])}::text[])`);
+  else parts.push(`node_type <> ALL(${bind([...defaultExcludedNodeTypes(flt)])}::text[])`);
   if (flt.objectType) parts.push(`object_type = ${bind(flt.objectType)}`); // #725 collection facet
   if (flt.isRunnable != null) parts.push(`is_runnable = ${bind(flt.isRunnable)}`);
   if (flt.role != null) {
