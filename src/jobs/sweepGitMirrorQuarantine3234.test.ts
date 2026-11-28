@@ -49,6 +49,8 @@ vi.mock('../integrations/github/execGit.js', async importOriginal => {
 import { withMirrorCheckout } from '../integrations/github/gitMirrorCheckout.js';
 import { gitMirrorSweepTick } from './sweepGitMirrorObligations.js';
 import { takeAttemptSeq } from '../integrations/github/mirrorObligations.js';
+import { disableMirrorWriteCapture } from '../test/disableMirrorWriteCapture.js';
+disableMirrorWriteCapture(); // #5469: these suites seed their own obligation rows
 
 const SOURCE = 'https://github.com/acme/repo.git';
 const ORG_URN = 'mirror3234-org';

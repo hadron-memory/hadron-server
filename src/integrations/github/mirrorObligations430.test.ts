@@ -418,7 +418,7 @@ describe('a failed mirror attempt leaves a redacted obligation (#430)', () => {
     // database reaches the same shape ONLY through a migration, so the CURRENT bytes must end
     // some migration verbatim (older carriers keep older copies and no longer match — that is
     // the point: editing the file without a carrying migration goes red here). #425 moved the
-    // carrier from 20261117800000_git_mirror_push_rejected to 20261122140000_git_mirror_remove_pending.
+    // carrier from 20261117800000_git_mirror_push_rejected to 20261122140000_git_mirror_remove_pending, and #5469 to 20261128120000_git_mirror_write_capture.
     const carriers = readdirSync(migrations).filter((d) => {
       const p = new URL(`../../../prisma/migrations/${d}/migration.sql`, import.meta.url);
       return existsSync(p) && readFileSync(p, 'utf8').endsWith(sql);

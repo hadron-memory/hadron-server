@@ -32,6 +32,8 @@ import { mirrorMutationMarker } from '../integrations/github/mirrorFileMutation.
 import { pushMemoryToGit } from '../integrations/github/pushMemoryToGit.js';
 import { withMirrorCheckout } from '../integrations/github/gitMirrorCheckout.js';
 import { gitMirrorSweepTick } from './sweepGitMirrorObligations.js';
+import { disableMirrorWriteCapture } from '../test/disableMirrorWriteCapture.js';
+disableMirrorWriteCapture(); // #5469: these suites seed their own obligation rows
 const SOURCE = 'https://github.com/synthetic/isolation3242.git';
 const IDENT = { GIT_AUTHOR_NAME: 'test', GIT_AUTHOR_EMAIL: 'test@example.invalid', GIT_COMMITTER_NAME: 'test', GIT_COMMITTER_EMAIL: 'test@example.invalid' };
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, ...IDENT }, stdio: ['ignore','pipe','pipe'] }).trim();

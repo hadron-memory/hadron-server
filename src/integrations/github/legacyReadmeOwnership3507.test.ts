@@ -38,6 +38,8 @@ vi.mock('./execGit.js', () => ({
 import { writeNodeToGit, writeNodeFile } from './writeNodeToGit.js';
 import { readNodeFileId } from './nodeFrontmatter.js';
 import { pushMemoryToGit } from './pushMemoryToGit.js';
+import { disableMirrorWriteCapture } from '../../test/disableMirrorWriteCapture.js';
+disableMirrorWriteCapture(); // #5469: these suites seed their own obligation rows
 
 const IDENT = { GIT_AUTHOR_NAME: 'fixture', GIT_AUTHOR_EMAIL: 'fixture@example.test', GIT_COMMITTER_NAME: 'fixture', GIT_COMMITTER_EMAIL: 'fixture@example.test' };
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, ...IDENT }, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
