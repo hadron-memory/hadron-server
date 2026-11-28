@@ -8,7 +8,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
-import { assertRegexPatternAllowed, hasRegexBackreference, selectsNonAreSyntax, REGEX_PATTERN_MAX_CHARS } from './regexGuard.js';
+import { assertRegexPatternAllowed, hasRegexBackreference, hasRegexInlineComment, selectsNonAreSyntax, REGEX_PATTERN_MAX_CHARS } from './regexGuard.js';
 import { REGEX_SEARCH_PER_WINDOW, REGEX_SEARCH_WINDOW_SECONDS, withRegexSearchSlot } from '../rateLimit/index.js';
 import { postgresRetrievalProvider } from './postgres.js';
 import { rateWindowWaitMs, RATE_WINDOW_TEST_TIMEOUT_MS } from '../../test/rateWindow.js';
@@ -24,6 +24,14 @@ describe('#5486 SEC10 P2-1: a leading option that selects the basic or extended 
     expect(() => assertRegexPatternAllowed(p)).toThrow(/basic, extended or expanded/);
   });
   it.each(['(?i)abc', '***:(?i)a', 'a(?b)', 'abc', '(?q)a.b', '(?s)(?i)x'])('allows %s', (p) => expect(selectsNonAreSyntax(p)).toBe(false));
+});
+
+describe('#5486 SEC10 P2-3: an inline (?#...) comment is refused', () => {
+  it.each([String.raw`(a)(?#[)\1]`, String.raw`(a)(?#[)\1`, '(?#x)abc', 'a(?#c)b'])('refuses %s', (p) => {
+    expect(hasRegexInlineComment(p)).toBe(true);
+    expect(() => assertRegexPatternAllowed(p)).toThrow(/may not contain a comment/);
+  });
+  it.each([String.raw`\(?#x)`, '[(?#]', '(?:a)', '(?=a)', '(?i)a', 'a?#b'])('allows %s', (p) => expect(hasRegexInlineComment(p)).toBe(false));
 });
 
 describe('#5486 hasRegexBackreference (a scanner, not a substring test)', () => {

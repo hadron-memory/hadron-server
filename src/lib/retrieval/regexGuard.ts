@@ -39,15 +39,28 @@ export function selectsNonAreSyntax(pattern: string): boolean {
   }
 }
 
+/**
+ * #5486 SEC10 P2-3: an ARE inline comment `(?#...)` (default syntax, no option) ends at the first `)`, so a `[` inside it
+ * opens no bracket while the scanner would read one and skip a later backreference. True when `pattern` holds `(?#` outside a
+ * bracket expression and not escaped; the pattern is refused (a comment has no use in a search box).
+ */
+export function hasRegexInlineComment(pattern: string): boolean {
+  return scan(pattern, 'comment');
+}
+
 /** True when `pattern` contains a backreference outside a bracket expression. */
 export function hasRegexBackreference(pattern: string): boolean {
+  return scan(pattern, 'backreference');
+}
+
+function scan(pattern: string, find: 'backreference' | 'comment'): boolean {
   let i = 0;
   const n = pattern.length;
   while (i < n) {
     const c = pattern[i]!;
     if (c === '\\') {
       const next = pattern[i + 1];
-      if (next !== undefined && next >= '1' && next <= '9') return true;
+      if (find === 'backreference' && next !== undefined && next >= '1' && next <= '9') return true;
       i += 2; // the escape and the character it escapes (`\\` is one escape)
       continue;
     }
@@ -55,6 +68,7 @@ export function hasRegexBackreference(pattern: string): boolean {
       i = skipBracketExpression(pattern, i + 1);
       continue;
     }
+    if (find === 'comment' && c === '(' && pattern[i + 1] === '?' && pattern[i + 2] === '#') return true;
     i += 1;
   }
   return false;
@@ -90,6 +104,10 @@ export function assertRegexPatternAllowed(pattern: string): void {
   }
   if (selectsNonAreSyntax(pattern)) {
     throw new GraphQLError('A regex pattern may not select the basic, extended or expanded syntax. Remove the leading option.',
+      { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  if (hasRegexInlineComment(pattern)) {
+    throw new GraphQLError('A regex pattern may not contain a comment. Remove the (?# ...) comment.',
       { extensions: { code: 'BAD_USER_INPUT' } });
   }
   if (hasRegexBackreference(pattern)) {
