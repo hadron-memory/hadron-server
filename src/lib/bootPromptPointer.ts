@@ -22,7 +22,7 @@ import { resolveAppInstallation, lockAppInstallation, lockAppAgentCustomization 
 import { GraphQLError } from 'graphql';
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { lockWorkersForAssignment } from './agentTasks/workerLock.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, isBootPromptRole } from './bootPrompt.js';
+import { isCompiledBootPrompt } from './bootPrompt.js';
 import { currentActor, currentActorAmbiguity } from './requestActor.js';
 import { managesAgent, managesApp, type AppManagerCaller } from './auth/appManagement.js';
 import { isRunPrincipal } from './auth/runPrincipal.js';
@@ -217,9 +217,10 @@ export async function assertMayWriteBootPromptPointer(
  *  1. the ref parses (a node id or a fully-qualified node URN), else `BAD_USER_INPUT`;
  *  2. it names a LIVE node in a live memory the caller may read, else
  *     `BOOT_PROMPT_POINTER_NOT_FOUND` (an unreadable node answers exactly like a missing one);
- *  3. the node is compiled, else `BOOT_PROMPT_POINTER_NOT_COMPILED`;
- *  4. its role is in the boot-prompt family, else `BOOT_PROMPT_POINTER_WRONG_ROLE`
- *     (the S6 CHECK makes this unreachable for a compiled node; kept as defence);
+ *  3. the node is compiled (role `prompt.boot.compiled`, #5453), else `BOOT_PROMPT_POINTER_NOT_COMPILED`: a source,
+ *     a rule and a node outside the family all answer this;
+ *  4. (retired by #5453) the role is the compiled mark now, so check 3 covers what `BOOT_PROMPT_POINTER_WRONG_ROLE`
+ *     guarded. Nothing returns that code any more; it stays in the list so a client that names it still compiles;
  *  5. it sits where this field's prompt lives, else `BOOT_PROMPT_POINTER_WRONG_MEMORY`:
  *     the Agent's OWN system memory (never a base Agent's, never another's), or
  *     the install memory of THIS (App, Agent) for the install and worker pointers.
@@ -250,11 +251,11 @@ export async function validateBootPromptPointer(
     select: { id: true, loc: true, memoryId: true, nodeType: true, role: true, memory: { select: { urn: true } } },
   });
   if (!node || !(await canReadMemory(node.memoryId))) throw notFound();
-  if (node.nodeType !== COMPILED_BOOT_PROMPT_NODE_TYPE) {
+  // #5453: the compiled node is told apart by its role (`prompt.boot.compiled`, exact). A source, a rule and a node
+  // outside the family are all "not compiled"; the former second refusal (a compiled type without the role) has no
+  // row it could mean now that the role IS the mark.
+  if (!isCompiledBootPrompt(node)) {
     throw pointerError('BOOT_PROMPT_POINTER_NOT_COMPILED', 'a pointer names a compiled boot prompt, never its source.');
-  }
-  if (!isBootPromptRole(node.role)) {
-    throw pointerError('BOOT_PROMPT_POINTER_WRONG_ROLE', 'the target does not have the boot-prompt role.');
   }
   const placement = await expectedPromptMemoryId(tx, owner);
   if (placement === null || node.memoryId !== placement) {

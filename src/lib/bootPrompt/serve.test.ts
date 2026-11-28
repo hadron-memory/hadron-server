@@ -8,7 +8,7 @@ import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
 import { computeApprovalHash } from '../approvalHash.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../bootPrompt.js';
+import { BOOT_PROMPT_COMPILED_ROLE, BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../bootPrompt.js';
 import { sha256Hex, type CompiledProvenance } from '../bootCompile/provenance.js';
 import { resolveServedBootPrompt } from './serve.js';
 import { NEWEST_APPROVED_REVISION_SCAN_CAP, NEWEST_APPROVED_REVISION_SCAN_BATCHES } from '../nodeApproval.js';
@@ -38,7 +38,7 @@ const prov = (hash: string): CompiledProvenance => ({
 /** A compiled node at revision 1 holding `content`, with its compile row. Approved when `approve`. */
 async function compiled(loc: string, content: string, approve = true) {
   const node = await withCompileWrite(() => db.node.create({
-    data: { id: generateId(), memoryId, loc, name: loc, content, role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
+    data: { id: generateId(), memoryId, loc, name: loc, content, role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE },
   }));
   await db.compiledPromptRevision.create({
     data: { compiledNodeId: node.id, compiledRevNo: 1, contentHash: sha256Hex(content), targetKind: 'AGENT', targetAgentId: agentId, provenance: prov(sha256Hex('src')) as never, occurrenceCount: 1 },

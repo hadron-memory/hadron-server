@@ -18,7 +18,7 @@ beforeEach(async () => {
   memoryId = (await db.memory.create({ data: { name: 'system', urn: 'compiled-lint:system', class: 'system', organizationId: org.id } })).id;
   agentId = (await db.agent.create({ data: { name: 'Agent', urn: 'compiled-lint:agent', organizationId: org.id, systemMemoryId: memoryId } })).id;
   sourceId = (await db.node.create({ data: { memoryId, loc: 'boot:source', name: 'source', content: 'source', role: 'boot-prompt' } })).id;
-  compiledId = (await withCompileWrite(() => db.node.create({ data: { memoryId, loc: 'boot:compiled', name: 'compiled', content: 'expanded text without tags', role: 'boot-prompt', nodeType: 'compiled-boot-prompt' } }))).id;
+  compiledId = (await withCompileWrite(() => db.node.create({ data: { memoryId, loc: 'boot:compiled', name: 'compiled', content: 'expanded text without tags', role: 'prompt.boot.compiled', nodeType: 'system' } }))).id;
   await record(1);
   ctx = { db, userId: user.id, roles: [] } as Context;
 });

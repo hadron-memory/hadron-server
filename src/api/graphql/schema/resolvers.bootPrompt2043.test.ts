@@ -12,7 +12,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { resolvers, type Context } from './resolvers.js';
 import { runAsActor } from '../../../lib/requestActor.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
+import { BOOT_PROMPT_COMPILED_ROLE, BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 
@@ -46,7 +46,7 @@ const source = (loc = 'boot:source') => db.node.create({
   data: { id: generateId(), memoryId: memory.id, loc, name: 'Source', content: 'You are {{worker.name}}.', role: 'boot-prompt' },
 });
 const compiled = () => withCompileWrite(() => db.node.create({
-  data: { id: generateId(), memoryId: memory.id, loc: 'boot:compiled', name: 'Compiled', content: 'You are Basil.', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
+  data: { id: generateId(), memoryId: memory.id, loc: 'boot:compiled', name: 'Compiled', content: 'You are Basil.', role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE },
 }));
 const snapshot = async (id: string) => ({
   node: await db.node.findUniqueOrThrow({ where: { id } }),
@@ -90,7 +90,7 @@ describe('guard A: a generic write never touches a compiled node (#2043)', () =>
 
   it('a generic create of a compiled node is refused', async () => {
     expect(await codeOf(resolvers.Mutation.createNode(null, {
-      input: { memoryRef: memory.id, loc: 'x:1', name: 'X', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
+      input: { memoryRef: memory.id, loc: 'x:1', name: 'X', role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE },
     }, ctx()))).toBe('BOOT_PROMPT_COMPILED_WRITE');
     expect(await db.node.count({ where: { memoryId: memory.id, loc: 'x:1' } })).toBe(0);
   });
@@ -128,12 +128,19 @@ describe('guard A: a generic write never touches a compiled node (#2043)', () =>
   });
 });
 
-describe('the DB backstop: a compiled node keeps its role (#2043)', () => {
-  it('rejects stripping the role while the marker stays', async () => {
+describe('the DB backstop (#2043, replaced by #5453: the compiled mark is the role)', () => {
+  it('a compiled node stays type system, and the retired node type is refused', async () => {
     const c = await compiled();
-    await expect(db.node.update({ where: { id: c.id }, data: { role: 'notes' } })).rejects.toThrow(/chk_nodes_compiled_boot_prompt_role/);
-    await expect(db.node.update({ where: { id: c.id }, data: { role: null } })).rejects.toThrow(/chk_nodes_compiled_boot_prompt_role/);
-    await db.node.update({ where: { id: c.id }, data: { role: 'boot-prompt.worker' } });
+    await expect(db.node.update({ where: { id: c.id }, data: { nodeType: 'info' } })).rejects.toThrow(/chk_nodes_compiled_boot_prompt_kind/);
+    await expect(db.node.update({ where: { id: c.id }, data: { nodeType: 'compiled-boot-prompt' } })).rejects.toThrow(/chk_nodes_compiled_boot_prompt_kind/);
+  });
+
+  it('a role strip is no longer something the database can see: the application guard is what refuses it', async () => {
+    // Before #5453 the CHECK kept a family role on the compiled TYPE, so a raw role strip was refused. The role IS
+    // the mark now: a row without it is simply not a compiled node, and no CHECK can tell that it used to be one.
+    const c = await compiled();
+    expect(await codeOf(resolvers.Mutation.updateNode(null, { input: { ref: c.id, role: 'notes' } }, ctx()))).toBe('BOOT_PROMPT_COMPILED_WRITE');
+    await db.node.update({ where: { id: c.id }, data: { role: 'notes' } });
   });
 });
 
@@ -227,7 +234,7 @@ describe('merge target collisions (#2043, Ruth P2)', () => {
   it('a merge cannot fold a source node onto a compiled target; a worker session cannot fold onto a boot-prompt target', async () => {
     const target = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'collide-target' }, ctx());
     const tCompiled = await withCompileWrite(() => db.node.create({ data: {
-      id: generateId(), memoryId: target.id, loc: 'boot:compiled', name: 'TC', content: 'compiled', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE,
+      id: generateId(), memoryId: target.id, loc: 'boot:compiled', name: 'TC', content: 'compiled', role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE,
     } }));
     const tSource = await db.node.create({ data: { id: generateId(), memoryId: target.id, loc: 'boot:source', name: 'TS', content: 'target source', role: 'boot-prompt' } });
     await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'boot:compiled', name: 'S1', content: 'forged over compiled' } });
@@ -255,7 +262,7 @@ describe('merge batches recheck under their locks (#2043, Jane/Cameron P2)', () 
       const target = await resolvers.Mutation.createMemory(null, { orgRef: orgId, name: 'late-target' }, ctx());
       // fold: plain source onto a compiled target, and onto a boot-prompt target under a worker session.
       const tCompiled = await withCompileWrite(() => db.node.create({ data: {
-        id: generateId(), memoryId: target.id, loc: 'boot:compiled', name: 'TC', content: 'compiled', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE,
+        id: generateId(), memoryId: target.id, loc: 'boot:compiled', name: 'TC', content: 'compiled', role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE,
       } }));
       const tSource = await db.node.create({ data: { id: generateId(), memoryId: target.id, loc: 'boot:source', name: 'TS', content: 'target source', role: 'boot-prompt' } });
       await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'boot:compiled', name: 'S1', content: 'forged' } });
@@ -302,7 +309,8 @@ describe('the invariants file is copied verbatim into its migration (#2043)', ()
     const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
     const invariants = read('../../../../prisma/boot-prompt-invariants.sql');
     const dir = fileURLToPath(new URL('../../../../prisma/migrations/', import.meta.url));
-    const migration = readdirSync(dir).filter((d) => /_boot_prompt_compiled_check$/.test(d)).sort().at(-1)!;
+    // #5453: the newest migration to carry it is the definition-node one (the 2043 migration holds the text of its time).
+    const migration = readdirSync(dir).filter((d) => /_boot_prompt_compiled_check$|_definition_node_roles$/.test(d)).sort().at(-1)!;
     expect(read(`../../../../prisma/migrations/${migration}/migration.sql`)).toContain(invariants);
     expect(read('../../../../prisma/post-push.sql')).toContain('\\ir boot-prompt-invariants.sql');
   });

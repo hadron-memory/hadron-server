@@ -6,7 +6,7 @@ import { resolveAppInstallation, type InstallationDb } from './appInstallations.
  * chain plus its own, read live (nothing is copied). Where two Agents in the
  * chain hold a node at the same loc, the nearest one to the child wins, the
  * child's own first, replacing the other whole by address. Boot prompts are
- * never inherited: a base's node whose role family is `boot-prompt`
+ * never inherited: a base's node whose role family is `prompt.boot`
  * (cor:agt:040:05) is not part of any child's effective memory, and doesn't
  * hide a farther base's node either, since it isn't a candidate at all.
  * Comments are never inherited either (#1935): a comment lives in its
@@ -25,11 +25,20 @@ import { resolveAppInstallation, type InstallationDb } from './appInstallations.
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { AGENT_BASE_CHAIN_CAP } from './agentBase.js';
 import { COMMENT_NODE_TYPE } from './comments/index.js';
+import { BOOT_PROMPT_ROLE, BOOT_PROMPT_RULE_ROLE, LEGACY_BOOT_PROMPT_ROLE, isBootPromptItselfRole } from './bootPrompt.js';
 
 type Db = (Pick<PrismaClient, '$queryRaw'> & InstallationDb) | Prisma.TransactionClient;
 
-/** The role family a base never passes down (cor:dmo:050:14 ruling 2). */
-export const NOT_INHERITED_ROLE = 'boot-prompt';
+/**
+ * The role family a base never passes down (cor:dmo:050:14 ruling 2): a boot prompt ITSELF, that is the family
+ * `prompt.boot` (and the legacy `boot-prompt`) minus its rule. #5453: a rule (`prompt.boot.rule`) IS inherited, as it
+ * was under its old role `boot-prompt-rule`: derived Agents include their base's rules. A role in `prompt.*` outside
+ * `prompt.boot.*` is an ordinary node and is inherited. The TypeScript twin of the SQL predicates is
+ * `isBootPromptItselfRole` (src/lib/bootPrompt.ts).
+ */
+export const NOT_INHERITED_ROLES = [BOOT_PROMPT_ROLE, LEGACY_BOOT_PROMPT_ROLE] as const;
+export const NOT_INHERITED_LIKES = [`${BOOT_PROMPT_ROLE}.%`, `${LEGACY_BOOT_PROMPT_ROLE}.%`] as const;
+export const INHERITED_FAMILY_ROLE = BOOT_PROMPT_RULE_ROLE;
 
 /** One Agent in a chain, with the system memory it contributes. */
 export type ChainLink = { agentId: string; agentUrn: string; memoryId: string };
@@ -78,7 +87,7 @@ export async function inheritedNodeIds(db: Db, chain: ChainLink[]): Promise<Map<
     candidate AS (
       SELECT n.id, n.loc, c.pos FROM nodes n JOIN chain c ON n.memory_id = c.memory_id
       WHERE n.deleted_at IS NULL
-        AND (c.pos = 1 OR n.role IS NULL OR NOT (n.role = ${NOT_INHERITED_ROLE} OR n.role LIKE ${NOT_INHERITED_ROLE + '.%'}))
+        AND (c.pos = 1 OR n.role IS NULL OR NOT ((n.role IN (${NOT_INHERITED_ROLES[0]}, ${NOT_INHERITED_ROLES[1]}) OR n.role LIKE ${NOT_INHERITED_LIKES[0]} OR n.role LIKE ${NOT_INHERITED_LIKES[1]}) AND n.role <> ${INHERITED_FAMILY_ROLE}))
         AND (c.pos = 1 OR n.node_type <> ${COMMENT_NODE_TYPE})
     )
     SELECT c.id, c.pos FROM candidate c
@@ -99,7 +108,7 @@ export async function descendantMemoriesInheriting(
   db: Db,
   node: { id: string; memoryId: string; loc: string; role: string | null },
 ): Promise<string[]> {
-  if (node.role === NOT_INHERITED_ROLE || node.role?.startsWith(`${NOT_INHERITED_ROLE}.`)) return [];
+  if (isBootPromptItselfRole(node.role)) return [];
   const self = await db.$queryRaw<Array<{ node_type: string }>>`SELECT node_type FROM nodes WHERE id = ${node.id}`;
   if (self[0]?.node_type === COMMENT_NODE_TYPE) return [];
   // Every live Agent below the node's own Agent, with the memories between
@@ -123,7 +132,7 @@ export async function descendantMemoriesInheriting(
       AND NOT EXISTS (
         SELECT 1 FROM nodes o
         WHERE o.memory_id = ANY(d.path) AND o.loc = ${node.loc} AND o.deleted_at IS NULL
-          AND (o.memory_id = d.memory_id OR o.role IS NULL OR NOT (o.role = ${NOT_INHERITED_ROLE} OR o.role LIKE ${NOT_INHERITED_ROLE + '.%'}))
+          AND (o.memory_id = d.memory_id OR o.role IS NULL OR NOT ((o.role IN (${NOT_INHERITED_ROLES[0]}, ${NOT_INHERITED_ROLES[1]}) OR o.role LIKE ${NOT_INHERITED_LIKES[0]} OR o.role LIKE ${NOT_INHERITED_LIKES[1]}) AND o.role <> ${INHERITED_FAMILY_ROLE}))
       )`;
   return rows.map((r) => r.memory_id);
 }
@@ -216,7 +225,7 @@ export async function findEffectiveNodeIdByLoc(
     FROM unnest(${memIds}::text[]) WITH ORDINALITY AS c(memory_id, pos)
     JOIN nodes n ON n.memory_id = c.memory_id
     WHERE n.loc = ${loc} AND n.deleted_at IS NULL
-      AND ((c.pos = 1 AND NOT ${inheritRoot}) OR n.role IS NULL OR NOT (n.role = ${NOT_INHERITED_ROLE} OR n.role LIKE ${NOT_INHERITED_ROLE + '.%'}))
+      AND ((c.pos = 1 AND NOT ${inheritRoot}) OR n.role IS NULL OR NOT ((n.role IN (${NOT_INHERITED_ROLES[0]}, ${NOT_INHERITED_ROLES[1]}) OR n.role LIKE ${NOT_INHERITED_LIKES[0]} OR n.role LIKE ${NOT_INHERITED_LIKES[1]}) AND n.role <> ${INHERITED_FAMILY_ROLE}))
       AND ((c.pos = 1 AND NOT ${inheritRoot}) OR n.node_type <> ${COMMENT_NODE_TYPE})
     ORDER BY c.pos LIMIT 1`;
   const hit = rows[0];
@@ -280,7 +289,7 @@ export async function findEffectiveNodeIdsByLoc(
     JOIN ask ON ask.root = l.root
     JOIN nodes n ON n.memory_id = l.memory_id
     WHERE n.loc = ${loc} AND n.deleted_at IS NULL
-      AND ((l.pos = 1 AND NOT ask.inherit_root) OR n.role IS NULL OR NOT (n.role = ${NOT_INHERITED_ROLE} OR n.role LIKE ${NOT_INHERITED_ROLE + '.%'}))
+      AND ((l.pos = 1 AND NOT ask.inherit_root) OR n.role IS NULL OR NOT ((n.role IN (${NOT_INHERITED_ROLES[0]}, ${NOT_INHERITED_ROLES[1]}) OR n.role LIKE ${NOT_INHERITED_LIKES[0]} OR n.role LIKE ${NOT_INHERITED_LIKES[1]}) AND n.role <> ${INHERITED_FAMILY_ROLE}))
       AND ((l.pos = 1 AND NOT ask.inherit_root) OR n.node_type <> ${COMMENT_NODE_TYPE})
     ORDER BY l.root, ask.inherit_root, l.pos`;
   for (const r of rows) {
@@ -312,7 +321,7 @@ export function markInherited<T extends { memoryId: string }>(
 }
 
 const isNotInheritedRole = (role: string | null | undefined): boolean =>
-  role === NOT_INHERITED_ROLE || role?.startsWith(`${NOT_INHERITED_ROLE}.`) === true;
+  isBootPromptItselfRole(role);
 
 /**
  * Re-check rows a listing fetched through {@link effectiveScope} (Diego's P2-1
@@ -557,7 +566,7 @@ export async function findCompileNodeIdByLoc(
     FROM unnest(${memIds}::text[]) WITH ORDINALITY AS c(memory_id, pos)
     JOIN nodes n ON n.memory_id = c.memory_id
     WHERE n.loc = ${loc} AND n.deleted_at IS NULL
-      AND (c.pos <= ${exemptThrough} OR n.role IS NULL OR NOT (n.role = ${NOT_INHERITED_ROLE} OR n.role LIKE ${NOT_INHERITED_ROLE + '.%'}))
+      AND (c.pos <= ${exemptThrough} OR n.role IS NULL OR NOT ((n.role IN (${NOT_INHERITED_ROLES[0]}, ${NOT_INHERITED_ROLES[1]}) OR n.role LIKE ${NOT_INHERITED_LIKES[0]} OR n.role LIKE ${NOT_INHERITED_LIKES[1]}) AND n.role <> ${INHERITED_FAMILY_ROLE}))
       AND (c.pos <= ${exemptThrough} OR n.node_type <> ${COMMENT_NODE_TYPE})
     ORDER BY c.pos LIMIT 1`;
   const hit = rows[0];

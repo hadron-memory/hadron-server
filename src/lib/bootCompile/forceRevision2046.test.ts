@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
 import { generateId } from '../id.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../bootPrompt.js';
+import { BOOT_PROMPT_COMPILED_ROLE, BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../bootPrompt.js';
 import { writeNodeCore } from '../../api/graphql/schema/resolvers.mutation.node.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 
@@ -31,7 +31,7 @@ const resave = (loc: string, force: boolean) =>
 describe('#2046 S9-4 — forceRevision', () => {
   it('inside the compile an identical save leaves one more revision and advances revSeq', async () => {
     const node = await withCompileWrite(() => db.node.create({
-      data: { id: generateId(), memoryId, loc: 'c', name: 'N', content: 'same', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
+      data: { id: generateId(), memoryId, loc: 'c', name: 'N', content: 'same', role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE },
     }));
     const before = { revs: await revCount(node.id), seq: node.revSeq };
     await withCompileWrite(() => resave('c', true));
@@ -41,7 +41,7 @@ describe('#2046 S9-4 — forceRevision', () => {
 
   it('inside the compile, without the option, an identical save is still a no-op', async () => {
     const node = await withCompileWrite(() => db.node.create({
-      data: { id: generateId(), memoryId, loc: 'c', name: 'N', content: 'same', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
+      data: { id: generateId(), memoryId, loc: 'c', name: 'N', content: 'same', role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE },
     }));
     const before = await revCount(node.id);
     await withCompileWrite(() => resave('c', false));

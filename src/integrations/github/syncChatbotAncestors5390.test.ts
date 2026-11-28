@@ -71,7 +71,8 @@ describe('#5390 git sync creates the missing container parents', () => {
     expect((await liveLocs()).filter((l) => want.includes(l))).toEqual(want);
     const parents = await db.node.findMany({ where: { memoryId, loc: { in: ['conversations', 'prompts', 'prompts:welcome'] } } });
     expect(parents.map((p) => [p.loc, p.ownerRepo, p.nodeType, p.createdBy]).sort()).toEqual([
-      ['conversations', null, 'info', 'system:github-sync'], ['prompts', null, 'info', 'system:github-sync'], ['prompts:welcome', null, 'info', 'system:github-sync'],
+      // #5453 Ask 8: the auto-created parents are type `system` (they were `info`), on this door as on the others.
+      ['conversations', null, 'system', 'system:github-sync'], ['prompts', null, 'system', 'system:github-sync'], ['prompts:welcome', null, 'system', 'system:github-sync'],
     ]);
     expect((await syncGraphFromGithub(graphOf())).error).toBeUndefined();
     expect(await db.node.count({ where: { memoryId, loc: { in: ['conversations', 'prompts', 'prompts:welcome'] } } })).toBe(3);

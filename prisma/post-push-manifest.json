@@ -712,7 +712,7 @@
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."
     },
     {
-      "name": "chk_nodes_compiled_boot_prompt_role",
+      "name": "chk_nodes_compiled_boot_prompt_kind",
       "kind": "check-constraint",
       "file": "boot-prompt-invariants.sql",
       "why": "CHECK constraint enforcing a platform invariant; Prisma schema language cannot express CHECK constraints (it has unique and foreign-key constraints)."

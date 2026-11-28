@@ -6,7 +6,7 @@ import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
+import { BOOT_PROMPT_COMPILED_ROLE, BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
 import { sha256Hex } from '../../../lib/bootCompile/provenance.js';
 import { requireFreshSigningPreview, signingPreviewDigest } from '../../../lib/bootPrompt/signingSwitch.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -35,7 +35,7 @@ beforeEach(async () => {
   const memory = await db.memory.create({ data: { class: 'system', name: 'System', urn: `${authorRoot}:system`, organizationId: author.id } });
   const agent = await db.agent.create({ data: { name: 'Display agent is not its slug', urn: `${authorRoot}:agent-slug`, organizationId: author.id, systemMemoryId: memory.id } }); agentId = agent.id;
   const app = await db.app.create({ data: { name: 'Display team', urn: `${servingRoot}:team-slug`, organizationId: orgId } }); appId = app.id;
-  const node = await withCompileWrite(() => db.node.create({ data: { memoryId: memory.id, loc: 'boot:compiled', name: 'Compiled', content: 'Approved unsigned', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE } }));
+  const node = await withCompileWrite(() => db.node.create({ data: { memoryId: memory.id, loc: 'boot:compiled', name: 'Compiled', content: 'Approved unsigned', role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE } }));
   await db.compiledPromptRevision.create({ data: { compiledNodeId: node.id, compiledRevNo: node.revSeq, contentHash: sha256Hex(node.content!), targetKind: 'AGENT', targetAgentId: agentId,
     provenance: { version: 1, occurrences: [{ order: 0, depth: 0, parent: null, kind: 'source', nodeId: 'source', revNo: 1, hash: sha256Hex('source'), selection: { rev: null, approved: true, signed: false } }] }, occurrenceCount: 1 } });
   await db.node.update({ where: { id: node.id }, data: { approvedRevNo: node.revSeq, approvedAt: new Date(), approvedByInfo: 'fixture', approvalHash: computeApprovalHash({ title: node.name, abstract: node.abstract, content: node.content }) } });

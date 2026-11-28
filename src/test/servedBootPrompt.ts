@@ -6,7 +6,7 @@
 import type { PrismaClient } from '../generated/prisma/index.js';
 import { generateId } from '../lib/id.js';
 import { computeApprovalHash } from '../lib/approvalHash.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../lib/bootPrompt.js';
+import { BOOT_PROMPT_COMPILED_ROLE, BOOT_PROMPT_NODE_TYPE, BOOT_PROMPT_SOURCE_ROLE, withCompileWrite } from '../lib/bootPrompt.js';
 import { sha256Hex, type CompiledProvenance } from '../lib/bootCompile/provenance.js';
 
 const provenance = (sourceId: string, content: string): CompiledProvenance => ({
@@ -27,10 +27,10 @@ export async function serveAgentBootPrompt(db: PrismaClient, agentId: string, co
   }
   const suffix = generateId().slice(-6).toLowerCase();
   // The source the compiled node was compiled from: casting reads the provenance to find the Agents a prompt includes from.
-  const source = await db.node.create({ data: { id: generateId(), memoryId: memoryId!, loc: `boot:source-${suffix}`, name: 'source', content, role: 'boot-prompt' } });
+  const source = await db.node.create({ data: { id: generateId(), memoryId: memoryId!, loc: `boot:source-${suffix}`, name: 'source', content, role: BOOT_PROMPT_SOURCE_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE } });
   const loc = `boot:compiled-${suffix}`;
   const node = await withCompileWrite(() => db.node.create({ data: {
-    id: generateId(), memoryId: memoryId!, loc, name: 'compiled', content, role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE,
+    id: generateId(), memoryId: memoryId!, loc, name: 'compiled', content, role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE,
   } }));
   await db.compiledPromptRevision.create({ data: {
     compiledNodeId: node.id, compiledRevNo: 1, contentHash: sha256Hex(content), targetKind: 'AGENT', targetAgentId: agentId,

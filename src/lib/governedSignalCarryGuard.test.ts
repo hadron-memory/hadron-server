@@ -47,7 +47,7 @@ const UNGOVERNED_BULK_WRITERS: ReadonlyArray<{ file: string; why: string }> = [
     file: 'lib/chatbotAncestors.ts',
     why:
       "#5390: its one createMany inserts the missing chatbot container parents (`conversations`, `prompts`, " +
-      "`prompts:<name>`) as empty nodeType 'info' rows with ON CONFLICT DO NOTHING, so a concurrent keyless insert of " +
+      "`prompts:<name>`) as empty nodeType 'system' rows (#5453) with ON CONFLICT DO NOTHING, so a concurrent keyless insert of " +
       "the same root does not abort the write. It copies no node, so there is no source role or isRunnable to carry.",
   },
 ];

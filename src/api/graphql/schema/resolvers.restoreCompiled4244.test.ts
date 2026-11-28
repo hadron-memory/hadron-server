@@ -1,9 +1,9 @@
 /**
  * #4244 (cor:agt:040:12, Proposed sentence; cor:agt:040:10) — an Agent revision restore leaves the Agent's compiled
  * boot prompts as they are: it does not write one, it does not tombstone one, and it ignores a snapshot's copy of
- * one, because compiling is the only way a compiled node is written. On main the restore's upsert proposes a
- * `compiled-boot-prompt` row with no role and Postgres refuses it (chk_nodes_compiled_boot_prompt_role, 23514), so
- * every Agent with a compiled boot prompt fails to restore.
+ * one, because compiling is the only way a compiled node is written. Before #4244 the restore's upsert proposed a
+ * compiled row with no role and Postgres refused it (the CHECK of the time, 23514), so every Agent with a compiled
+ * boot prompt failed to restore. #5453: a compiled prompt is `system` / `prompt.boot.compiled`; the fixture follows.
  *
  * Also: a snapshot records each node's `role`, and an unknown `revisionLoc` is refused BAD_USER_INPUT before any write.
  *
@@ -89,7 +89,7 @@ const mk = (loc: string, extra: Record<string, unknown> = {}) =>
 /** The Agent has a boot-prompt source and its compiled prompt, as after a first compile. */
 async function compile(content = 'compiled v1') {
   await mk(SOURCE, { role: 'boot-prompt', content: 'source' });
-  return mk(COMPILED, { nodeType: 'compiled-boot-prompt', role: 'boot-prompt', content });
+  return mk(COMPILED, { nodeType: 'system', role: 'prompt.boot.compiled', content });
 }
 const save = () => M.createRevision({}, { agentRef: agent.id }, adminCtx()) as Promise<{ revisionLoc: string }>;
 const restore = (revisionLoc: string) => M.restoreRevision({}, { agentRef: agent.id, revisionLoc }, adminCtx());
@@ -165,11 +165,21 @@ describe('#4244 A: a snapshot records each node\'s role', () => {
   });
 
   it('a source recreated from a snapshot (its row is gone) has the snapshot\'s role', async () => {
+    const src = await mk(SOURCE, { nodeType: 'system', role: 'prompt.boot.source', content: 'source' });
+    const rev = await save();
+    await db.node.delete({ where: { id: src.id } });
+    await restore(rev.revisionLoc);
+    expect(await node(SOURCE)).toMatchObject({ role: 'prompt.boot.source', content: 'source', deletedAt: null });
+  });
+
+  // #5453 changes this one on purpose: a snapshot that holds the BARE role (published before the migration, or a
+  // source a mirror wrote back) is recreated as today's source leaf, type system. The bare role is never written back.
+  it('#5453: a source recreated from a snapshot that holds the bare role is written as the source leaf', async () => {
     const src = await mk(SOURCE, { role: 'boot-prompt', content: 'source' });
     const rev = await save();
     await db.node.delete({ where: { id: src.id } });
     await restore(rev.revisionLoc);
-    expect(await node(SOURCE)).toMatchObject({ role: 'boot-prompt', content: 'source', deletedAt: null });
+    expect(await node(SOURCE)).toMatchObject({ nodeType: 'system', role: 'prompt.boot.source', content: 'source', deletedAt: null });
   });
 
   it('over an existing row the live role is kept, whatever the snapshot holds', async () => {
@@ -214,5 +224,57 @@ describe('#4244 B: an unknown revisionLoc is a typed refusal, before any write',
     const rev = await save();
     await db.node.updateMany({ where: { memoryId: systemMemory.id, loc: rev.revisionLoc }, data: { deletedAt: new Date() } });
     await expect(restore(rev.revisionLoc)).rejects.toMatchObject({ extensions: { code: 'BAD_USER_INPUT' } });
+  });
+});
+
+describe('#5453: a snapshot published before the definition-node migration', () => {
+  /** Rewrite a saved snapshot into the shape it had before #5453: the retired compiled type, the bare role, `info`. */
+  async function ageSnapshot(revisionLoc: string) {
+    const rev = await node(revisionLoc);
+    const data = rev.data as any;
+    for (const n of data.snapshot.nodes as Array<Record<string, unknown>>) {
+      if (n.loc === COMPILED) { n.nodeType = 'compiled-boot-prompt'; n.role = 'boot-prompt'; }
+      if (n.loc === SOURCE) { n.nodeType = 'info'; n.role = 'boot-prompt'; }
+      if (n.loc === 'boot:rules:core') { n.nodeType = 'info'; n.role = 'boot-prompt-rule'; }
+    }
+    await db.node.update({ where: { id: rev.id }, data: { data } });
+  }
+
+  it('restores a source and a rule as today\'s kind, never the bare role or the old type, and still ignores its compiled copy', async () => {
+    const compiledRow = await compile('compiled v1');
+    const rule = await mk('boot:rules:core', { nodeType: 'system', role: 'prompt.boot.rule', content: 'rule' });
+    const rev = await save();
+    await ageSnapshot(rev.revisionLoc);
+    expect((await snapshotNodes(rev.revisionLoc)).find((n) => n.loc === COMPILED)).toMatchObject({ nodeType: 'compiled-boot-prompt', role: 'boot-prompt' });
+    // The source and the rule are gone now, so the restore makes them anew from the old capture.
+    await db.node.deleteMany({ where: { memoryId: systemMemory.id, loc: { in: [SOURCE, 'boot:rules:core'] } } });
+    const before = asWas(await node(COMPILED) as any);
+    await restore(rev.revisionLoc);
+    expect(await node(SOURCE)).toMatchObject({ nodeType: 'system', role: 'prompt.boot.source', content: 'source', deletedAt: null });
+    expect(await node('boot:rules:core')).toMatchObject({ nodeType: 'system', role: 'prompt.boot.rule', content: 'rule', deletedAt: null });
+    expect((await node('boot:rules:core')).id).not.toBe(rule.id);
+    expect(asWas(await node(COMPILED) as any)).toEqual(before);
+    expect((await node(COMPILED)).id).toBe(compiledRow.id);
+    expect(await db.node.count({ where: { memoryId: systemMemory.id, nodeType: 'compiled-boot-prompt' } })).toBe(0);
+    expect(await db.node.count({ where: { memoryId: systemMemory.id, role: { in: ['boot-prompt', 'boot-prompt-rule'] } } })).toBe(0);
+  });
+
+  it('restored over a live migrated source: the type is not turned back to info and the live role stays', async () => {
+    await compile('compiled v1');
+    await db.node.updateMany({ where: { memoryId: systemMemory.id, loc: SOURCE }, data: { nodeType: 'system', role: 'prompt.boot.source' } });
+    const rev = await save();
+    await ageSnapshot(rev.revisionLoc);
+    await db.node.updateMany({ where: { memoryId: systemMemory.id, loc: SOURCE }, data: { content: 'edited after the snapshot' } });
+    await restore(rev.revisionLoc);
+    expect(await node(SOURCE)).toMatchObject({ nodeType: 'system', role: 'prompt.boot.source', content: 'source' });
+  });
+
+  it('a snapshot whose only copy of the compiled prompt is in the old form is not recreated when the Agent has none now', async () => {
+    const made = await compile();
+    const rev = await save();
+    await ageSnapshot(rev.revisionLoc);
+    await db.node.delete({ where: { id: made.id } });
+    await restore(rev.revisionLoc);
+    expect(await db.node.count({ where: { memoryId: systemMemory.id, loc: COMPILED } })).toBe(0);
   });
 });

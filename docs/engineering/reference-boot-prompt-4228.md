@@ -110,9 +110,9 @@ Limits of this trial:
 
 The path, for one role. It needs a person who manages the role Agent, acting as themselves:
 
-1. Copy the core to `hrn:node:hadronmemory.com:base-role-agent-system:boot:rules:reference-core` with role `boot-prompt-rule`, next to the existing `boot:rules:preamble`.
-2. Replace the body of `hrn:node:hadronmemory.com:<role>-system:boot:source` (role `boot-prompt`) with the role page plus the include tag for `boot:rules:reference-core`.
-3. `hadron agent compile hrn:agent:hadronmemory.com:<role>` writes a new revision of `<role>-system:boot:compiled` (`compiled-boot-prompt`).
+1. Copy the core to `hrn:node:hadronmemory.com:base-role-agent-system:boot:rules:reference-core` with role `prompt.boot.rule` (`boot-prompt-rule` before #5453), next to the existing `boot:rules:preamble`.
+2. Replace the body of `hrn:node:hadronmemory.com:<role>-system:boot:source` (role `boot-prompt` before the rename) with the role page plus the include tag for `boot:rules:reference-core`.
+3. `hadron agent compile hrn:agent:hadronmemory.com:<role>` writes a new revision of `<role>-system:boot:compiled` (type `system`, role `prompt.boot.compiled`; the node type `compiled-boot-prompt` before #5453).
 4. Approve that revision (`approveNode`). The serve picks the newest approved revision of the node the pointer names (`src/lib/bootPrompt/serve.ts`), so the next bind gets it. Until it is approved, the old approved revision keeps being served.
 5. A worker with its own pointer (`Worker.bootPromptNodeId`; its source is `hadron-dev-team-install-<role>:boot:workers:<worker id>:source`) is served that instead of the role's. Clear the pointer with `setWorkerBootPrompt` and no node, after moving that worker's own directions into its state note.
 

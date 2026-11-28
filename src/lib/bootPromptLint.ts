@@ -1,7 +1,7 @@
 import { memoryAccessFilter, type Context } from '../api/graphql/schema/resolvers.helpers.js';
 import { resolveNodeRef } from './entityRef/nodeRef.js';
 import { AmbiguousLegacyUrnError, NodeNotFoundError } from './entityRef/errors.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, isBootPromptRole } from './bootPrompt.js';
+import { isBootPromptRole, isCompiledBootPromptRole } from './bootPrompt.js';
 import { IncludeSyntaxError, locateIncludeTags, type IncludeTag } from './includes/parseIncludeTags.js';
 import { IncludeReadMemo, selectIncludeRevision, SIGNING_NOT_CHECKED_TEXT, type IncludeTarget } from './includes/spliceIncludes.js';
 import { decryptNodeFields } from './nodeCrypto.js';
@@ -163,7 +163,7 @@ const describeSettings = (settings: IncludeTag['settings']): string => {
 export async function lintSourceWarnings(ctx: Context, subject: LintSubject): Promise<LintWarning[] | null> {
   if (!isBootPromptRole(subject.role)) return [];
   // A compiled node's warnings read its recorded provenance (S11b), not live tags: unavailable, not empty.
-  if (subject.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE) return null;
+  if (isCompiledBootPromptRole(subject.role)) return null;
   const content = subject.content;
   if (!content || !content.includes('{{>')) return [];
   let tags: Array<IncludeTag & { index: number }>;
@@ -273,7 +273,7 @@ export async function lintWarningPage(
   ctx: Context, subject: LintSubject, args: { first?: number | null; after?: string | null } = {},
 ): Promise<LintWarningPage | null> {
   try {
-    if (subject.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE) {
+    if (isCompiledBootPromptRole(subject.role)) {
       const live = subject.revSeq ?? (await ctx.db.node.findUnique({ where: { id: subject.id }, select: { revSeq: true } }))?.revSeq;
       return live ? (await import('./compiledBootPromptLint.js')).lintCompiledRevision(ctx, subject.id, live, args) : null;
     }
@@ -303,7 +303,7 @@ export async function lintWarningPageForNodeId(
     // The source's include structure is its content: a caller who may write or approve it but not read it (an
     // install memory's manager) gets unavailable, never warnings derived from text they cannot see.
     const readable = await ctx.db.node.count({ where: { AND: [await memoryAccessFilter(ctx), { memory: { deletedAt: null } }, { id: row.id }] } });
-    if (readable === 0 && row.nodeType !== COMPILED_BOOT_PROMPT_NODE_TYPE) return null;
+    if (readable === 0 && !isCompiledBootPromptRole(row.role)) return null;
     let content = row.content;
     if (row.memory?.isEncrypted) {
       if (!sessionKeyCache.getByMemoryId(row.memoryId)) return null;

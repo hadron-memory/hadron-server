@@ -8,7 +8,7 @@ import { currentActor } from '../../../lib/requestActor.js';
 import { edgeDisplayOrder } from '../../../lib/edgeOrder.js';
 import { foreignEdgeMemoryIds } from '../../../lib/foreignEdgeMemories.js';
 import { assertBootPromptWriteAllowedOrGranted, spendEditGrantFor, graphqlEditFacts, withUpdateNodeDoor } from '../../../lib/grants/bootPromptGrant.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertBootPromptWriteAllowed, assertNoBootPromptRows, inCompileScope, isBootPromptRole } from '../../../lib/bootPrompt.js';
+import { assertBootPromptWriteAllowed, assertNoBootPromptRows, inCompileScope, isBootPromptItselfRole, isCompiledBootPrompt } from '../../../lib/bootPrompt.js';
 import { COMMENT_NODE_TYPE, assertNotCommentWrite, commentError, commentGovernedError } from '../../../lib/comments/index.js';
 import { commentIdsAmong, hardDeleteThreadsOfTargets, restoreThreadsOfTargets, softDeleteThreadsOfTargets } from '../../../lib/comments/lifecycle.js';
 import { questionContainedError, isQuestionFamilyRole, refuseQuestionFamily, refuseUnderQuestionLog } from '../../../lib/questions/index.js';
@@ -3287,7 +3287,8 @@ export const nodeMutations = {
         // #1606 — a comment is governed too (cor:dmo:110:04): skipped, reported as governed.
         if (governedKindsOf({ role: row.role, isRunnable: row.isRunnable }).length > 0 || row.nodeType === COMMENT_NODE_TYPE
           // #2043 — compiled boot prompts are written only by a compile; a worker session also skips sources.
-          || row.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE || (isBootPromptRole(row.role) && currentActor().workerId != null)) {
+          // #5453 — compiled by role; the worker-session skip reaches a boot prompt itself, never a rule (PR A).
+          || isCompiledBootPrompt(row) || (isBootPromptItselfRole(row.role) && currentActor().workerId != null)) {
           skipCounts.governed += 1;
           continue;
         }

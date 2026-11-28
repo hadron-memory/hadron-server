@@ -3,7 +3,7 @@ import { admitOperationRate } from '../../../lib/rateLimit/index.js';
 import { transportRateIdentity } from '../../../lib/rateLimit/identity.js';
 import { normalizeFindNodesPaging } from '../../../lib/findNodesPaging.js';
 import { readCompiledRevision } from '../../../lib/bootCompile/provenance.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE } from '../../../lib/bootPrompt.js';
+import { isCompiledBootPrompt } from '../../../lib/bootPrompt.js';
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
 import { projectUsageRowsFor } from './resolvers.usageProjection.js';
 import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
@@ -479,8 +479,8 @@ export const nodeQueries = {
       const fresh = await liveReadSnapshotContext(ctx, tx);
       const scope = await nodeRevisionsScope(fresh, args.nodeRef);
       if (!scope) return null;
-      const node = await tx.node.findUnique({ where: { id: scope.nodeId }, select: { nodeType: true } });
-      if (node?.nodeType !== COMPILED_BOOT_PROMPT_NODE_TYPE) return null;
+      const node = await tx.node.findUnique({ where: { id: scope.nodeId }, select: { role: true } });
+      if (!isCompiledBootPrompt(node)) return null;
       if (!Number.isInteger(args.revNo) || args.revNo < 1) return null;
       // Numbered snapshots are unique by (nodeId, revNo). Unknown snapshot ownership
       // cannot authorize this provenance read, even when the live node is readable.

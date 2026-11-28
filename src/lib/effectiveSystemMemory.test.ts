@@ -7,7 +7,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
-import { descendantMemoriesInheriting, inheritedNodeIds, resolveInheritedEdges, systemMemoryChain } from './effectiveSystemMemory.js';
+import { descendantMemoriesInheriting, effectiveScope, findEffectiveNodeIdsByLoc, inheritedNodeIds, resolveInheritedEdges, retainEffective, systemMemoryChain } from './effectiveSystemMemory.js';
 
 let n: number;
 let org: { id: string; urn: string };
@@ -22,9 +22,9 @@ async function agent(slug: string, base?: Ag): Promise<Ag> {
   return { id: a.id, urn: a.urn, mem: mem.id };
 }
 
-async function node(a: Ag, loc: string, data: { role?: string; deleted?: boolean } = {}): Promise<string> {
+async function node(a: Ag, loc: string, data: { role?: string; deleted?: boolean; nodeType?: string } = {}): Promise<string> {
   const row = await db.node.create({
-    data: { memoryId: a.mem, loc, name: loc, content: `${a.urn} ${loc}`, role: data.role ?? null, deletedAt: data.deleted ? new Date() : null },
+    data: { memoryId: a.mem, loc, name: loc, content: `${a.urn} ${loc}`, role: data.role ?? null, deletedAt: data.deleted ? new Date() : null, ...(data.nodeType ? { nodeType: data.nodeType } : {}) },
   });
   return row.id;
 }
@@ -109,7 +109,7 @@ describe('boot prompts are never inherited (ruling 2)', () => {
     const backend = await agent('backend-engineer', engineer);
     const go = await agent('go-engineer', backend);
     const farPrompt = await node(engineer, 'prompts:boot', { role: 'boot-prompt' });
-    const midPrompt = await node(backend, 'prompts:boot', { role: 'boot-prompt.compiled' });
+    const midPrompt = await node(backend, 'prompts:boot', { role: 'prompt.boot.compiled', nodeType: 'system' });
     const farOther = await node(engineer, 'notes:x');
     await node(backend, 'notes:x', { role: 'boot-prompt' });
     const got = await inherited(go);
@@ -119,6 +119,40 @@ describe('boot prompts are never inherited (ruling 2)', () => {
     expect(got.get(farOther)).toBe(engineer.id);
     expect(await descendantMemoriesInheriting(db, { id: farPrompt, memoryId: engineer.mem, loc: 'prompts:boot', role: 'boot-prompt' })).toEqual([]);
     expect((await descendantMemoriesInheriting(db, { id: farOther, memoryId: engineer.mem, loc: 'notes:x', role: null })).sort()).toEqual([go.mem]);
+  });
+
+  // #5453: a rule joined the boot-prompt family and is still inherited, as it was under `boot-prompt-rule`.
+  // "Never inherited" means the boot prompt itself: a source, a compiled node, the bare role, an unknown sub-kind.
+  it('#5453: a base\'s rule (prompt.boot.rule) IS passed down, by every read of the effective memory', async () => {
+    const engineer = await agent('engineer');
+    const backend = await agent('backend-engineer', engineer);
+    const go = await agent('go-engineer', backend);
+    const rule = await node(engineer, 'boot:rules:core', { role: 'prompt.boot.rule', nodeType: 'system' });
+    const source = await node(engineer, 'boot:source', { role: 'prompt.boot.source', nodeType: 'system' });
+    const unknown = await node(engineer, 'boot:coordinator', { role: 'boot-prompt.coordinator' });
+    const got = await inherited(go);
+    expect(got.get(rule)).toBe(engineer.id);
+    expect(got.has(source)).toBe(false);
+    expect(got.has(unknown)).toBe(false);
+    expect((await descendantMemoriesInheriting(db, { id: rule, memoryId: engineer.mem, loc: 'boot:rules:core', role: 'prompt.boot.rule' })).sort())
+      .toEqual([backend.mem, go.mem].sort());
+    expect(await descendantMemoriesInheriting(db, { id: source, memoryId: engineer.mem, loc: 'boot:source', role: 'prompt.boot.source' })).toEqual([]);
+    // The batch lookup, the re-check a listing runs on rows it already fetched, and the single-row re-check agree.
+    const batch = await findEffectiveNodeIdsByLoc(db, [{ memoryId: go.mem, inheritRoot: false }], 'boot:rules:core');
+    expect(batch.get(`${go.mem}:false`)?.id).toBe(rule);
+    expect((await findEffectiveNodeIdsByLoc(db, [{ memoryId: go.mem, inheritRoot: false }], 'boot:source')).get(`${go.mem}:false`)).toBeNull();
+    const scope = await effectiveScope(db, [go.mem]);
+    const kept = await retainEffective(db, [
+      { id: rule, memoryId: engineer.mem, role: 'prompt.boot.rule' },
+      { id: source, memoryId: engineer.mem, role: 'prompt.boot.source' },
+    ], scope);
+    expect(kept.map((r) => r.id)).toEqual([rule]);
+    // A nearer Agent's own rule at the same loc wins: it is a candidate, so it overrides the base's for everyone below it.
+    const nearRule = await node(backend, 'boot:rules:core', { role: 'prompt.boot.rule', nodeType: 'system' });
+    const again = await inherited(go);
+    expect(again.get(nearRule)).toBe(backend.id);
+    expect(again.has(rule)).toBe(false);
+    expect(await descendantMemoriesInheriting(db, { id: rule, memoryId: engineer.mem, loc: 'boot:rules:core', role: 'prompt.boot.rule' })).toEqual([]);
   });
 
   it('a child\'s own node at a base boot prompt\'s loc is simply the child\'s', async () => {

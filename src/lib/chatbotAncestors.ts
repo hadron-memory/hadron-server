@@ -89,7 +89,13 @@ export async function missingChatbotContainers(db: Db, memoryId: string, locs: r
   return missing;
 }
 
-/** Create the parents {@link missingChatbotContainers} returned, as empty `info` nodes. */
+/**
+ * The node type of a parent that holds an Agent's definition nodes (#5453 Ask 8, Holger 2026-11-27: "they should all
+ * be system"). Until #5453 these parents were written `info` here and in the skeleton, and `system` by the portal.
+ */
+export const DEFINITION_PARENT_NODE_TYPE = 'system' as const;
+
+/** Create the parents {@link missingChatbotContainers} returned, as empty `system` nodes with no role. */
 export async function createChatbotContainers(db: Db, memoryId: string, locs: readonly string[], createdBy: string | null): Promise<void> {
   if (locs.length === 0) return;
   const rows = [];
@@ -99,7 +105,7 @@ export async function createChatbotContainers(db: Db, memoryId: string, locs: re
     const root = ROOTS.get(parts[0]!)!;
     const name = parts.length === 1 ? root.name : parts[1]!;
     const description = parts.length === 1 ? root.description : `Parent of the prompt templates of the stages of conversation ${parts[1]}.`;
-    rows.push({ id: generateId(), memoryId, loc, name, description, nodeType: 'info' as const, createdBy });
+    rows.push({ id: generateId(), memoryId, loc, name, description, nodeType: DEFINITION_PARENT_NODE_TYPE, createdBy });
   }
   // A writer that holds no key on the container's loc (hadron_create_parent_node at a root, or a plain create of the loc
   // itself) can be inserting it right now. ON CONFLICT DO NOTHING waits for that insert and then keeps its row, instead

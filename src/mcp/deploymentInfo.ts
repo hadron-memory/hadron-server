@@ -387,7 +387,18 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // `memory.write`); they are deprecated in the SDL and removed once a CLI release carrying hadron-cli#3319 ships.
 // `AutomationApproval.readGrants` is always empty (deprecated). (4) A run carrying a user id no longer reads through #2883's grant: a
 // user-backed run reads only what its user reads. (0.56.0 is #5391 and 0.57.0 is #5441, both merged first.)
-export const HADRON_SERVER_VERSION = '0.58.0';
+// 0.60.0 — BREAKING (stored values and behaviour, no SDL change) (#5453 PR A, Holger 2026-11-27 and the renames of 2026-11-28, decision record sections 16 and 17; the Proposed lines of cor:dmo:020:04,
+// cor:agt:040:05, :06, :12, :18): every node that defines an Agent is node type `system`, and its ROLE names the kind. A compiled boot
+// prompt is `system` / `prompt.boot.compiled` (the node type `compiled-boot-prompt` is retired: no row holds it and the database refuses
+// it), a source `prompt.boot.source`, an included rule `prompt.boot.rule` (was `boot-prompt-rule`), and a chatbot's conversation, stage
+// and prompt-template nodes carry `chatbot.conversation`, `chatbot.stage`, `chatbot.prompt`. One migration retypes the existing rows. A
+// client that found a compiled prompt by `nodeType: "compiled-boot-prompt"`, or a rule by the role `boot-prompt-rule`, now finds nothing:
+// filter by role (`prompt.boot.compiled`, or the family `prompt.boot`). The retyped nodes are `system`, so an unqualified listing hides
+// them; ask for them with #5452's `includeSystemNodes` (0.59.0). A rule is in the boot-prompt family: only whoever manages its Agent or
+// App approves it, link lint applies to it, and a direct read shows its platform variables as written. Who may WRITE is unchanged: a
+// worker session still writes a rule and is still refused a source (worker sessions writing sources and compiling is PR B). The MCP
+// `nodeType` descriptions no longer list `task` or `compiled-boot-prompt`. (0.58.0 is #5404, merged first; 0.59.0 is left for #5452, the opt-in read, built in parallel.)
+export const HADRON_SERVER_VERSION = '0.60.0';
 
 /**
  * #1006 — the MCP surface's CAPABILITY tokens: what this build can actually do,

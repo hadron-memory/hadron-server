@@ -768,6 +768,10 @@ CREATE INDEX IF NOT EXISTS "nodes_msg_channel_seq_loc_c_idx"
 -- #1606 / #1607 — comment-node invariants. One source, shared verbatim with
 -- migration 20261005200000_comment_nodes (pinned by src/lib/comments/invariantsSql.test.ts).
 \ir comment-invariants.sql
+-- #5453 — the definition-node data step, then the CHECK it makes room for. One source each, both copied verbatim
+-- into migration 20261128010000_definition_node_roles (pinned by src/lib/definitionNodeRolesMigration5453.test.ts).
+-- A database that was pushed before #5453 still holds rows of the retired compiled type; the CHECK would refuse them.
+\ir definition-node-roles-backfill.sql
 \ir boot-prompt-invariants.sql
 \ir boot-prompt-pointer-invariants.sql
 \ir derived-install-prompt-pointer-invariants.sql

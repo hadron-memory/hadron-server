@@ -13,7 +13,7 @@ import { generateId } from '../../../lib/id.js';
 import { EntityNotFoundError } from '../../../lib/entityRef/errors.js';
 import { runAsActor } from '../../../lib/requestActor.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
+import { BOOT_PROMPT_COMPILED_ROLE, BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
 import { resolvers } from './resolvers.js';
 import type { Context } from './resolvers.helpers.js';
 
@@ -44,7 +44,7 @@ const ctxOf = (userId: string, extra: Record<string, unknown> = {}) =>
   ({ db, userId, roles: [], clientId: `user:${userId}`, ...extra }) as unknown as Context;
 const user = (name: string) => db.user.create({ data: { id: generateId(), name } });
 const compiledIn = (memoryId: string, loc = 'boot:compiled') => withCompileWrite(() => db.node.create({
-  data: { id: generateId(), memoryId, loc, name: 'Compiled', content: 'c', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
+  data: { id: generateId(), memoryId, loc, name: 'Compiled', content: 'c', role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE },
 }));
 
 async function fixture() {

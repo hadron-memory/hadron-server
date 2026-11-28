@@ -23,7 +23,7 @@ import { lockAppInstallation } from '../../../lib/appInstallations.js';
 import { GraphQLError } from 'graphql';
 import type { Node as NodeRow, Prisma } from '../../../generated/prisma/index.js';
 import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentOrgGrant.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, BOOT_PROMPT_ROLE, boundWorkerId, withCompileWrite } from '../../../lib/bootPrompt.js';
+import { BOOT_PROMPT_COMPILED_ROLE, BOOT_PROMPT_NODE_TYPE, boundWorkerId, isCompiledBootPrompt, withCompileWrite } from '../../../lib/bootPrompt.js';
 import { bootPromptGrantRequiredError, hasBatchGrant } from '../../../lib/grants/bootPromptGrant.js';
 import {
   loadBootPromptPointerOwner,
@@ -189,8 +189,8 @@ async function batchPrecheck(ctx: Context, target: CompileTargetInput, before: C
       select: { id: true },
     }))?.id ?? null;
   const loc = target.kind === 'WORKER' ? workerCompiledLoc(target.workerId) : target.kind === 'APP_AGENT' ? APP_COMPILED_LOC : AGENT_COMPILED_LOC;
-  const node = memoryId ? await ctx.db.node.findFirst({ where: { memoryId, loc, deletedAt: null }, select: { id: true, nodeType: true } }) : null;
-  if (!memoryId || !node || node.nodeType !== COMPILED_BOOT_PROMPT_NODE_TYPE
+  const node = memoryId ? await ctx.db.node.findFirst({ where: { memoryId, loc, deletedAt: null }, select: { id: true, role: true } }) : null;
+  if (!memoryId || !node || !isCompiledBootPrompt(node)
     || !(await hasBatchGrant(ctx.db as unknown as Prisma.TransactionClient, workerId, { id: node.id, memoryId, loc }))) {
     throw compileNotPermitted();
   }
@@ -378,9 +378,9 @@ async function decide(
       // a live batch grant held by this worker for this very node admits it. Judged BEFORE anything is assembled or provisioned, so a
       // session without one learns nothing else about the target, and everything rolls back on a refusal. The grant row is the last
       // lock taken before the writes (FOR SHARE: a revocation either committed first or waits).
-      const node = await tx.node.findFirst({ where: { memoryId: out.memoryId, loc: out.loc, deletedAt: null }, select: { id: true, nodeType: true } });
+      const node = await tx.node.findFirst({ where: { memoryId: out.memoryId, loc: out.loc, deletedAt: null }, select: { id: true, role: true } });
       batchNodeId = node?.id ?? null;
-      if (!node || node.nodeType !== COMPILED_BOOT_PROMPT_NODE_TYPE
+      if (!node || !isCompiledBootPrompt(node)
         || !(await hasBatchGrant(tx, batchWorkerId, { id: node.id, memoryId: out.memoryId, loc: out.loc }, true))) {
         throw compileNotPermitted();
       }
@@ -454,20 +454,21 @@ async function decide(
     // 4. The compiled node: a new revision every compile, even when the text is unchanged.
     const existing = await tx.node.findFirst({
       where: { memoryId: out.memoryId, loc: out.loc, deletedAt: null },
-      select: { id: true, nodeType: true },
+      select: { id: true, role: true },
     });
     // The grant was judged for ONE node id; a delete and re-create at the same address in between is a node it never named (Andi).
     if (batchWorkerId && existing?.id !== batchNodeId) throw compileNotPermitted();
     if (existing && options.createOnly) {
       throw new GraphQLError('The compiled boot prompt address is occupied.', { extensions: { code: 'ADDRESS_OCCUPIED' } });
     }
-    if (existing && existing.nodeType !== COMPILED_BOOT_PROMPT_NODE_TYPE) {
+    if (existing && !isCompiledBootPrompt(existing)) {
       throw new GraphQLError('The compiled boot prompt address is occupied by another node.', { extensions: { code: 'CONFLICT' } });
     }
     const written = await withCompileWrite(() => writeNodeCore(
       {
-        memoryId: out.memoryId, loc: out.loc, name: 'Compiled boot prompt', role: BOOT_PROMPT_ROLE,
-        nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE, content: plan.text,
+        // #5453 Ask 1: type `system`, told apart by the role `prompt.boot.compiled` (the node type of its own is retired).
+        memoryId: out.memoryId, loc: out.loc, name: 'Compiled boot prompt', role: BOOT_PROMPT_COMPILED_ROLE,
+        nodeType: BOOT_PROMPT_NODE_TYPE, content: plan.text,
       },
       txCtx,
       existing ? 'update' : 'create',
