@@ -163,26 +163,36 @@ describe('#5369 (#5388 LOCAL P3): a type 1 to 5 block counts only when it opens 
 
 describe('#5369 (#5388 LOCAL P1): the work grows with the text, not with its cube', () => {
   // At the frozen head a 40 KB body of this shape took 18 s (main 16 ms): each hidden tag rescanned the text for every later end tag.
+  // #5476: the guard measures the growth EXPONENT (the slope of log time against log size over four doubling sizes), not a ratio of two times
+  // behind a 50 ms floor: the floor switched the check on and off with the runner's speed, and the bound of 9 (linear is 4 for 4x the text)
+  // was wrong for a shape whose walk was in fact near-quadratic (the `<!x` shape scaled as n^1.9 past 16000 declarations: a newline search that
+  // ran back to the start of a text with no line break, once per bogus comment). Linear is an exponent of 1, quadratic 2, cubic 3; the bound is
+  // 1.5, the measured fits are 0.8 to 1.2 for every shape below, and a quadratic walk fits at 1.7 or more. The size list is per shape so
+  // that the slower shapes (about 60 us per repeat) stay under a second at their largest size.
   it.each([
-    ['backtick runs between hidden tags and end tags', (n: number) => 'x<!<style> `'.repeat(n) + '</style>'.repeat(n)],
-    ['end tags in indented code', (n: number) => 'x<!<style> `'.repeat(n) + '\n    </style>'.repeat(n)],
-    ['fences between hidden tags', (n: number) => 'x<!<style>\n```\n'.repeat(n) + '</style>\n'.repeat(n)],
-    // #5388 (QA F1): each `<!x` hides the next hidden start from the raw reader's first pass, so each is read by a walk of its own.
-    ['declarations hiding the next hidden tag', (n: number) => 'x<!<style><!x'.repeat(n) + '</style>'.repeat(n)],
-  ])('%s', (_label, body) => {
-    // #5388 BLIND P3: four times the text must not take sixteen times as long (the fastest of three runs at n and at 4n; linear is about 4,
-    // the restarts of the fence shape about 6, quadratic about 16). Below 50 ms at 4n the ratio is noise, so only the absolute bound holds there.
-    const time = (n: number): number => {
-      const text = body(n);
+    // [label, body, the first size]
+    ['backtick runs between hidden tags and end tags', (n: number) => 'x<!<style> `'.repeat(n) + '</style>'.repeat(n), 8000],
+    ['end tags in indented code', (n: number) => 'x<!<style> `'.repeat(n) + '\n    </style>'.repeat(n), 1000],
+    ['fences between hidden tags', (n: number) => 'x<!<style>\n```\n'.repeat(n) + '</style>\n'.repeat(n), 1000],
+    // #5388 (QA F1): each `<!x` hides the next hidden start from the raw reader's first pass, so each is read by a walk of its own. The text
+    // has no line break, so any search for one that is not bounded by the construct costs the whole text (#5476).
+    ['declarations hiding the next hidden tag', (n: number) => 'x<!<style><!x'.repeat(n) + '</style>'.repeat(n), 8000],
+  ] as Array<[string, (n: number) => string, number]>)('%s', (_label, body, first) => {
+    const sizes = [first, first * 2, first * 4, first * 8];
+    const fastest = (text: string): number => {
       let best = Infinity;
       for (let k = 0; k < 3; k += 1) { const started = performance.now(); escapeUnterminatedHtml(text); best = Math.min(best, performance.now() - started); }
       return best;
     };
-    const one = time(1000);
-    const four = time(4000);
-    expect(four).toBeLessThan(5000);
-    if (four >= 50) expect(four / one).toBeLessThan(9);
-  });
+    fastest(body(Math.min(first, 1000))); // warm the code before the first measured size
+    const xs = sizes.map((n) => Math.log(n));
+    const ys = sizes.map((n) => Math.log(Math.max(fastest(body(n)), 0.01)));
+    const mean = (v: number[]): number => v.reduce((a, b) => a + b, 0) / v.length;
+    const mx = mean(xs);
+    const my = mean(ys);
+    const slope = xs.reduce((sum, x, k) => sum + (x - mx) * (ys[k]! - my), 0) / xs.reduce((sum, x) => sum + (x - mx) ** 2, 0);
+    expect(slope).toBeLessThan(1.5);
+  }, 60_000);
 });
 
 describe('#5369 (#5388 BLIND P2 at dabc70c5): a bare CR is not a line break to the F2 rule (stated limit, #5401)', () => {
