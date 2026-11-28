@@ -5,7 +5,7 @@ import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { drainExpiredSecretChanges, SECRET_CHANGE_SWEEP_BATCH, SECRET_CHANGE_SWEEP_MAX_BATCHES } from '../lib/secrets/changeRequests.js';
 
-// 10,050 rows seeded and drained in 500-row transactions: well past the 5 s default on a shared CI runner (it timed out there).
+// 10,050 rows seeded and drained in 500-row transactions: a loaded CI shard can take tens of seconds for the file.
 vi.setConfig({ testTimeout: 120_000, hookTimeout: 120_000 });
 
 let appId: string, userId: string;
@@ -24,12 +24,15 @@ const cipherCount = async () => Number((await db.$queryRaw<Array<{ n: bigint }>>
 /** Counts are scoped to the rows a test seeded (their id prefix), never a whole-table count of a shared state. */
 const count = (state: string, prefix: string) => db.secretChangeRequest.count({ where: { state, id: { startsWith: prefix } } });
 /**
- * The drain opens one interactive transaction per 500-row batch. Prisma's default for that is 5 s, which a saturated CI shard
- * overruns (P2028 at 32 s in P2, #5312): the batch rolls back and the pin reads a wall-clock fault, not the bound it pins. The
- * drain under test is unchanged; only the db handle the tests pass it carries a roomy transaction timeout.
+ * #5312: the drain runs each batch under its own time bound (#5348: a 25 s statement bound inside a 30 s transaction) and a batch
+ * that overruns it rolls back and the next batch asks for half as many rows. On a saturated CI shard that is a wall-clock event,
+ * and it shifts every count these pins assert (a stopped run would clear 0, not 500). The pins are about the ROW bounds, so they
+ * pass the drain's own `statementTimeoutMs` option, far above any shard stall, and the shrink path is out of reach. The drain,
+ * its 500 x 20 constants and its selection are the production ones; #5348's pins own the time bounds and the shrink.
  */
-const TX_MS = 100_000;
-const roomy = { $transaction: (f: never) => (db.$transaction as any)(f, { timeout: TX_MS, maxWait: TX_MS }) };
+const ROOMY = { statementTimeoutMs: 90_000 };
+/** The drain's own transaction options (its timeout follows ROOMY), with a pool wait a saturated shard cannot exhaust (#5344). */
+const patient = { $transaction: (f: never, o: object) => (db.$transaction as any)(f, { ...o, maxWait: 90_000 }) };
 
 beforeEach(async () => {
   await cleanDb(db);
@@ -44,25 +47,25 @@ describe('#5244 the expiry sweep drains in bounded batches', () => {
 
   it('P1: one run clears more than 100 expired requests (1200)', async () => {
     await seed(1200, 'open', '-1 hour', 'a');
-    expect(await drainExpiredSecretChanges(roomy as never)).toBe(1200);
+    expect(await drainExpiredSecretChanges(patient as never, ROOMY)).toBe(1200);
     expect(await count('expired', 'a')).toBe(1200);
     expect(await count('open', 'a')).toBe(0);
   });
 
   it('P2: one run stops at the per-run bound (20 x 500) and the rest waits for the next run', async () => {
     await seed(10_050, 'open', '-1 hour', 'b');
-    expect(await drainExpiredSecretChanges(roomy as never)).toBe(10_000);
+    expect(await drainExpiredSecretChanges(patient as never, ROOMY)).toBe(10_000);
     expect(await count('expired', 'b')).toBe(10_000);
     expect(await count('open', 'b')).toBe(50);
-    expect(await drainExpiredSecretChanges(roomy as never)).toBe(50);
+    expect(await drainExpiredSecretChanges(patient as never, ROOMY)).toBe(50);
     expect(await count('open', 'b')).toBe(0);
   });
 
   it('P3: the batch is 500 rows, and each batch commits on its own (a later failure keeps the earlier batches)', async () => {
     await seed(1200, 'open', '-1 hour', 'c');
     let calls = 0;
-    const flaky = { $transaction: (f: never) => { if (++calls === 2) return Promise.reject(new Error('batch 2 failed')); return (roomy.$transaction as any)(f); } };
-    await expect(drainExpiredSecretChanges(flaky as never)).rejects.toThrow('batch 2 failed');
+    const flaky = { $transaction: (f: never, opts: never) => { if (++calls === 2) return Promise.reject(new Error('batch 2 failed')); return patient.$transaction(f, opts); } };
+    await expect(drainExpiredSecretChanges(flaky as never, ROOMY)).rejects.toThrow('batch 2 failed');
     expect(calls).toBe(2);
     expect(await count('expired', 'c')).toBe(500);
     expect(await count('open', 'c')).toBe(700);
@@ -73,7 +76,7 @@ describe('#5244 the expiry sweep drains in bounded batches', () => {
     await seed(2, 'open', '+1 hour', 'live');
     for (const s of ['completed', 'declined', 'withdrawn', 'stale'] as const) await seed(2, s, '-1 hour', s);
     const before = await db.secretChangeRequest.findMany({ where: { OR: [{ id: { startsWith: 'live' } }, { state: { not: 'open' } }] }, orderBy: { id: 'asc' } });
-    expect(await drainExpiredSecretChanges(roomy as never)).toBe(3);
+    expect(await drainExpiredSecretChanges(patient as never, ROOMY)).toBe(3);
     const after = await db.secretChangeRequest.findMany({ where: { OR: [{ id: { startsWith: 'live' } }, { state: { not: 'open' }, id: { not: { startsWith: 'dead' } } }] }, orderBy: { id: 'asc' } });
     expect(after).toEqual(before);
     const swept = await db.secretChangeRequest.findMany({ where: { id: { startsWith: 'dead' } } });
@@ -87,21 +90,21 @@ describe('#5244 the expiry sweep drains in bounded batches', () => {
     await db.$executeRaw`INSERT INTO secret_change_requests (id,app_id,secret_name,secret_kind,metadata,operation,requester_id,state,snapshot,staged_value_encrypted,key_version,size_bytes,write_version,expires_at)
       VALUES ('store-live',${appId},'s2','generic','{}'::jsonb,'STORE',${userId},'open','snap','CIPHERTEXT',1,7,true,(clock_timestamp() AT TIME ZONE 'UTC') + interval '1 hour')`;
     expect(await cipherCount()).toBe(2);
-    expect(await drainExpiredSecretChanges(roomy as never)).toBe(1);
+    expect(await drainExpiredSecretChanges(patient as never, ROOMY)).toBe(1);
     expect(await db.secretChangeRequest.findUnique({ where: { id: 'store1' } })).toMatchObject({ state: 'expired', keyVersion: 1, sizeBytes: 7 });
     expect(await cipherCount()).toBe(1); // only the live request keeps its ciphertext
   });
 
   it('P5: two overlapping runs clear each row once (counts sum to the total, neither errors)', async () => {
     await seed(1500, 'open', '-1 hour', 'e');
-    const [a, b] = await Promise.all([drainExpiredSecretChanges(roomy as never), drainExpiredSecretChanges(roomy as never)]);
+    const [a, b] = await Promise.all([drainExpiredSecretChanges(patient as never, ROOMY), drainExpiredSecretChanges(patient as never, ROOMY)]);
     expect(a + b).toBe(1500);
     expect(await count('expired', 'e')).toBe(1500);
   });
 
   it('stops between batches when asked', async () => {
     await seed(1200, 'open', '-1 hour', 'f');
-    expect(await drainExpiredSecretChanges(roomy as never, { shouldStop: () => true })).toBe(500);
+    expect(await drainExpiredSecretChanges(patient as never, { ...ROOMY, shouldStop: () => true })).toBe(500);
     expect(await count('open', 'f')).toBe(700);
   });
 });
