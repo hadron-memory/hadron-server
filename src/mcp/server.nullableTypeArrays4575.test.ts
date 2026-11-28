@@ -10,8 +10,7 @@
  * neededBy,defaultAction}. Fields that were already a union with another member (`data`, `condition`, ...) keep `anyOf`.
  */
 import { describe, expect, it } from 'vitest';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { createMcpServerInstance } from './server.js';
 
 const AUTH = { userId: 'u-a', roles: ['ADMIN'], clientId: 'github:a' };

@@ -19,7 +19,7 @@
 import { z } from 'zod';
 import { toolErrorResult } from './toolError.js';
 import { GraphQLError } from 'graphql';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { HadronMcpServer as McpServer } from './hadronMcpServer.js';
 import type { PrismaClient } from '../generated/prisma/index.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';

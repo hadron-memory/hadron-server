@@ -26,7 +26,7 @@ import { renderCheckStatusShort } from '../lib/workerCheckStatus.js';
 import { z } from 'zod';
 import { GraphQLError } from 'graphql';
 import { publicErrorExtensions } from '../lib/errorDiagnostics.js';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { HadronMcpServer as McpServer } from './hadronMcpServer.js';
 import { offTeamTool } from './disabledTools.js';
 import { resolvers, type Context } from '../api/graphql/schema/resolvers.js';
 import { agentTaskFieldResolvers, taskError } from '../api/graphql/schema/resolvers.agentTask.js';

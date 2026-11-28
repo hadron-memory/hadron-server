@@ -9,9 +9,10 @@
  * person, answers the one DOOR_RETIRED refusal before any check and changes nothing. The team snapshot tools are unchanged.
  */
 import { beforeEach, expect, it, vi } from 'vitest';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { Client } from '@modelcontextprotocol/client';
+import { McpServer } from '@modelcontextprotocol/server';
+import { withPositionalTool } from './hadronMcpServer.js';
+import { InMemoryTransport } from '@modelcontextprotocol/client';
 import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
@@ -60,7 +61,7 @@ const auth = (impersonating: boolean): AuthContext => ({
     expiresAt: new Date(Date.now() + 60_000) } } : {}),
 });
 async function call(name: string, args: Record<string, unknown>, impersonating: boolean) {
-  const server = new McpServer({ name: 'grant3409', version: '1' });
+  const server = withPositionalTool(new McpServer({ name: 'grant3409', version: '1' }));
   const client = new Client({ name: 'grant3409', version: '1' });
   registerAutomationReadGrantTools(server, { db, auth: auth(impersonating) });
   registerAutomationTeamSnapshotGrantTools(server, { db, auth: auth(impersonating) });
