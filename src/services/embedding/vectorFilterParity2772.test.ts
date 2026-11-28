@@ -65,6 +65,8 @@ const CASES: Array<[string, Record<string, unknown>]> = [
   ['minted', { minted: true }],
   ['approvalState', { approvalState: 'APPROVED' }],
   ['where', { where: { path: ['k'], eq: 'a$1b $2' } }],
+  // #5412 section 5: a branch-only memory's prefix filters inside the ranking and the small-scope count, before the candidate cap.
+  ['branches (#5412)', { branches: [{ memoryId: '$mem', prefixes: ['tgt'] }] }],
 ];
 
 // BLIND P3 (#4665): the fixture is under the small-scope bound, so the default run only exercises the EXACT statement;
@@ -75,7 +77,9 @@ for (const [label, bound] of [['exact path', null], ['ANN path (small-scope boun
   for (const [name, raw] of CASES) {
     const { _inverse, ...filter } = raw as Record<string, unknown>;
     it(`${name}: the page is full and holds only matching nodes though the nearest vectors fail the filter`, async () => {
-      const hits = await search(filter);
+      // The memory id exists only after beforeAll; '$mem' stands for it.
+      const resolved = filter.branches ? { ...filter, branches: [{ memoryId: mem, prefixes: ['tgt'] }] } : filter;
+      const hits = await search(resolved);
       const want = _inverse ? decoys : targets;
       expect(hits).toHaveLength(3);
       for (const h of hits) expect(want).toContain(h.nodeId);
