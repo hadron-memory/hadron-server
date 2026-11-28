@@ -101,7 +101,7 @@ import { controller } from './controller/controller.js';
 import { syncGraphFromGithub } from './integrations/github/syncGraphFromGithub.js';
 import { assignRequestId, bindRequestId, REQUEST_ID_HEADER } from './lib/requestContext.js';
 import { internalFaultErrorHandler, respondInternalFault } from './lib/internalFault.js';
-import { handleMcpRequest, handleMcpDelete, startMcpTransportSweepLoop } from './mcp/server.js';
+import { handleMcpRequest, handleMcpDelete, handleMcpSessionlessRequest, mcpServingMode, startMcpTransportSweepLoop } from './mcp/server.js';
 import { startAnonymousMemoryCleanupLoop } from './jobs/cleanupAnonymousMemories.js';
 import { startSecretChangeSweepLoop } from './jobs/sweepSecretChanges.js';
 import { startPasskeyCeremonySweepLoop } from './jobs/sweepPasskeyCeremonies.js';
@@ -1905,16 +1905,21 @@ export async function createServer({ readiness }: { readiness?: ReadinessSource 
   // ---------------------------------------------------------------------------
 
   // #1610: each MCP request gets its own actor holder (see requestActor.ts).
+  // #2605: MCP_SERVING_MODE=sessionless (off by default, read per request) serves every method through the
+  // sessionless path; anything else is today's sessionful serving.
   app.post('/mcp', bindRequestId, async (req, res) => {
-    await requestActorStorage.run(emptyActor(), () => handleMcpRequest(req, res));
+    const handle = mcpServingMode() === 'sessionless' ? handleMcpSessionlessRequest : handleMcpRequest;
+    await requestActorStorage.run(emptyActor(), () => handle(req, res));
   });
 
   app.get('/mcp', bindRequestId, async (req, res) => {
-    await requestActorStorage.run(emptyActor(), () => handleMcpRequest(req, res));
+    const handle = mcpServingMode() === 'sessionless' ? handleMcpSessionlessRequest : handleMcpRequest;
+    await requestActorStorage.run(emptyActor(), () => handle(req, res));
   });
 
   app.delete('/mcp', bindRequestId, async (req, res) => {
-    await requestActorStorage.run(emptyActor(), () => handleMcpDelete(req, res));
+    const handle = mcpServingMode() === 'sessionless' ? handleMcpSessionlessRequest : handleMcpDelete;
+    await requestActorStorage.run(emptyActor(), () => handle(req, res));
   });
 
   // OAuth dynamic client registration is not supported. MCP/LLM SDKs that
