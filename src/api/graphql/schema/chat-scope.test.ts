@@ -471,11 +471,12 @@ describe('ChatScopeError', () => {
   // ChatScopeError ships to the client as `INTERNAL_SERVER_ERROR` and
   // the three sub-codes collapse into one unidentifiable failure.
   it('exposes the code as extensions.code (so clients can branch on it)', () => {
+    // #5394 retired SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS; CHAT_APP_NOT_IDENTIFIED replaces it.
     const e = new ChatScopeError(
-      'SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS',
-      'nope from MCP App-key',
+      'CHAT_APP_NOT_IDENTIFIED',
+      'name the App',
     );
-    expect(e.extensions?.code).toBe('SHARED_CHAT_NOT_AVAILABLE_FOR_APP_SESSIONS');
+    expect(e.extensions?.code).toBe('CHAT_APP_NOT_IDENTIFIED');
   });
 });
 
@@ -583,23 +584,19 @@ describe('validateChatScopeInvariants', () => {
     ).toThrow(ChatScopeError);
   });
 
-  it('rejects private + private and shared + private (chat-roots never live on private-class memory)', () => {
-    // `private` is for secure single-owner records, not chat content.
-    // The rejection mirrors the existing `group`-class rejection.
-    expect(() =>
-      validateChatScopeInvariants({ scope: 'private', memoryClass: 'private' }),
-    ).toThrow(ChatScopeError);
-    expect(() =>
-      validateChatScopeInvariants({ scope: 'shared', memoryClass: 'private' }),
-    ).toThrow(ChatScopeError);
-    // Even with the legacy migration flag, private should not be tolerated —
-    // legacy chats only ever lived in personal or knowledge memory.
-    expect(() =>
-      validateChatScopeInvariants({
-        scope: undefined,
-        memoryClass: 'private',
-        allowMissingScope: true,
-      }),
-    ).toThrow(ChatScopeError);
+  it('#5027 Ask 6e: private admits a private-class home and shared a group home; the label must still match the class', () => {
+    // A chat may live in an app, group, personal or private memory (D-2026-11-26-008, cor:acl:030:01).
+    expect(() => validateChatScopeInvariants({ scope: 'private', memoryClass: 'private' })).not.toThrow();
+    expect(() => validateChatScopeInvariants({ scope: 'shared', memoryClass: 'group' })).not.toThrow();
+    expect(() => validateChatScopeInvariants({ scope: 'shared', memoryClass: 'private' })).toThrow(ChatScopeError);
+    expect(() => validateChatScopeInvariants({ scope: 'private', memoryClass: 'group' })).toThrow(ChatScopeError);
+    // Legacy chats with no scope only ever lived in personal or knowledge memory.
+    for (const memoryClass of ['private', 'group'] as const) {
+      expect(() => validateChatScopeInvariants({ scope: undefined, memoryClass, allowMissingScope: true })).toThrow(ChatScopeError);
+    }
+    // BLIND P3-13 on #5391: a system memory never holds a chat-root, whatever the label.
+    for (const scope of ['private', 'shared', undefined] as const) {
+      expect(() => validateChatScopeInvariants({ scope, memoryClass: 'system', allowMissingScope: true })).toThrow(ChatScopeError);
+    }
   });
 });

@@ -25,6 +25,7 @@ import { generateId } from '../id.js';
 import { APP_KEY_PREFIX, hashAppKey, type AuthContext } from '../../middleware/auth.js';
 import { resolvers, type Context } from '../../api/graphql/schema/resolvers.js';
 import { createTestableMcpServer } from '../../mcp/server.js';
+import { joinHostForKey } from '../../test/agentTeamHost.js';
 
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -105,6 +106,7 @@ beforeEach(async () => {
   kit = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, appId: app.id, agentId: agent.id, name: 'Kit', slug: 'kit', heldByUserId: holder.id, heldAt: new Date() }, select: { id: true } });
   orca1 = await mkKey('orca1');
   plainKey = await mkKey('plain');
+  await joinHostForKey(db, orca1.id, 'orca1');
   await M.grantAppKeyScope({}, { id: orca1.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager.id));
   await M.registerHost({}, {
     input: { appRef: app.id, label: 'Orca', pollIntervalSeconds: 600, workers: [{ worker: kit.id, family: 'claude', worktrees: ['hadron-server/kit'] }] },
@@ -160,6 +162,7 @@ describe('GraphQL: a key that ever held host:operate writes no session of its Ap
 
   it('a key whose host:operate was revoked is still refused: revoking the scope never restores the power', async () => {
     const formerHost = await mkKey('former-host');
+    await joinHostForKey(db, formerHost.id, 'orca2');
     await M.grantAppKeyScope({}, { id: formerHost.id, scope: 'host:operate', hostId: 'orca2' }, ctx(manager.id));
     await M.revokeAppKeyScope({}, { id: formerHost.id, scope: 'host:operate' }, ctx(manager.id));
     const s = await ordinarySession();
@@ -253,6 +256,7 @@ describe('#1969: a host key\'s refused session write is recorded as a host-key u
 
   it('GraphQL, the ever-host clause: a live host key and a revoked one, each under its own host', async () => {
     const formerHost = await mkKey('former-host');
+    await joinHostForKey(db, formerHost.id, 'orca2');
     await M.grantAppKeyScope({}, { id: formerHost.id, scope: 'host:operate', hostId: 'orca2' }, ctx(manager.id));
     await M.revokeAppKeyScope({}, { id: formerHost.id, scope: 'host:operate' }, ctx(manager.id));
     const s = await ordinarySession();

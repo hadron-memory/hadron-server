@@ -30,6 +30,6 @@ export async function detachAppOwnerMemories(
       class: { in: ['personal', 'private'] },
       ...(deletingUserId ? { userId: { not: deletingUserId } } : {}),
     },
-    data: { appId: null, userMemoryOfAgentId: null },
+    data: { appId: null, userMemoryOfAgentId: null, appUserMemory: false }, // #5183: a detached memory counts for no App
   });
 }

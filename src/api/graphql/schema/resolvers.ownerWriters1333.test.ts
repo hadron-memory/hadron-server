@@ -12,6 +12,7 @@
  * writes at owner level through it. Interactive human-through-App identity is out of scope: a principal with a
  * userId and no run client keeps the person's own standing (established behavior), never the App's.
  */
+import { activeMemoryWriteGrant } from '../../../test/appGrants5404.js';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
@@ -50,7 +51,7 @@ async function rule(mem: string, role: string, writers: 'ALL' | 'ADMIN' | 'OWNER
   return db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role, writers } });
 }
 const create = (ctx: Context, loc: string, mem = memoryId) =>
-  resolvers.Mutation.createNode(null, { input: { memoryId: mem, loc, name: loc, content: 'x', role: 'vault' } }, ctx);
+  resolvers.Mutation.createNode(null, { input: { memoryRef: mem, loc, name: loc, content: 'x', role: 'vault' } }, ctx);
 const exists = async (loc: string, mem = memoryId) => (await db.node.count({ where: { memoryId: mem, loc } })) > 0;
 
 async function agent(orgId: string | null, ownerUserId: string | null, extra: Record<string, unknown> = {}) {
@@ -129,15 +130,15 @@ describe('the refusal is the OWNER writer level, not the base write gate (blind 
   it('a share grantee never reaches the level on an org memory: the base gate answers first, and the level itself excludes them', async () => {
     await db.memoryShare.create({ data: { memoryId, granteeId: user.grantee!, grantorId: user.owner!, role: 'writer' as never } });
     // The base gate (memory visibility and write access) refuses the grantee of an org memory before any level is read.
-    expect(await code(resolvers.Mutation.createNode(null, { input: { memoryId, loc: 'ctl', name: 'ctl', content: 'x' } }, as('grantee'))))
-      .toBe('MEMORY_NOT_FOUND: ' + memoryId);
+    expect(await code(resolvers.Mutation.createNode(null, { input: { memoryRef: memoryId, loc: 'ctl', name: 'ctl', content: 'x' } }, as('grantee'))))
+      .toBe('MEMORY_NOT_FOUND: nothing found for the given ref.');
     // So the level is pinned where it is judged: the grantee is outside the OWNER audience.
     expect(await refusal({ userId: user.grantee!, roles: [], clientId: `user:${user.grantee}` } as never)).toBe(REFUSED);
   });
 
   it('a contributor passes the base gate and is inside the OWNER audience (positive control)', async () => {
     // Positive control for the base gate, then the level: a contributor writes the ungoverned node AND the OWNER one.
-    expect(await code(resolvers.Mutation.createNode(null, { input: { memoryId, loc: 'plain', name: 'plain', content: 'x' } }, as('contrib')))).toBe('OK');
+    expect(await code(resolvers.Mutation.createNode(null, { input: { memoryRef: memoryId, loc: 'plain', name: 'plain', content: 'x' } }, as('contrib')))).toBe('OK');
     expect(await code(create(as('contrib'), 'owned'))).toBe('OK');
   });
 
@@ -306,7 +307,8 @@ describe('the write doors: generic GraphQL, MCP and the run tool path share the 
 describe('the real run principal: runContext, not a synthesized one (blind review F2)', () => {
   /** A userless run of `appId` with the principal `runContext` builds, optionally holding the write grant on `vault`. */
   async function runOf(appId: string, grant: boolean) {
-    if (grant) await db.appMemoryWriteGrant.create({ data: { appId, memoryId, prefix: 'vault', grantedBy: user.owner! } });
+    // #5404: the App's write grant is a signed `memory.write` grant (ruling 0083's unsigned row is retired).
+    if (grant) await activeMemoryWriteGrant(appId, memoryId, { issuerUserId: user.owner!, prefix: 'vault' });
     const run = await db.appRun.create({
       data: {
         id: generateId(), organizationId: org.id, appId, agentId: await testRunAgentId(db, org.id, appId), triggerKind: 'MANUAL',
@@ -509,7 +511,7 @@ describe('the live headless path: hadron_update_node under the real run principa
 
   /** A userless SCHEDULE run of `runApp`, with the write grant on `vault`, editing `loc` in `target`'s team space. */
   async function liveRun(runApp: string, target: { id: string; urn: string }, loc: string, grant = true): Promise<{ code: string; message: string }> {
-    if (grant) await db.appMemoryWriteGrant.create({ data: { appId: runApp, memoryId: target.id, prefix: 'vault', grantedBy: user.owner! } });
+    if (grant) await activeMemoryWriteGrant(runApp, target.id, { issuerUserId: user.owner!, prefix: 'vault' });
     const schedule = await db.agentSchedule.create({
       data: { id: generateId(), organizationId: org.id, appId: runApp, name: 'S', cron: '* * * * *', entryNodeUrn: ENTRY() },
     });

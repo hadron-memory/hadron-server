@@ -40,7 +40,7 @@ describe('internal#4 durable obligation ownership (real private DB)', () => {
   it.each([false, true])('clone commits its obligations before any resolver backfill (indexed=%s)', async indexed => {
     const memory = await db.memory.update({ where: { id: memoryId }, data: { vectorIndexEnabled: indexed } });
     const sourceToken = await stamp();
-    const cloned = await cloneMemoryGraph(db, {
+    const cloned = await cloneMemoryGraph(db, { ownerLimitCaller: null,
       sourceMemoryId: memoryId, name: 'clone', newUrn: `${memory.organizationId}:synthetic-clone`,
       targetOrganizationId: memory.organizationId!, ownerUserId: null, groupOwnerUserId: null, actorId: null,
       copierReadableMemoryIds: null, // unrestricted synthetic fixture; production supplies the caller's readable set

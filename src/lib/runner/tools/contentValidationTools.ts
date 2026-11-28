@@ -14,6 +14,7 @@
  */
 import { recordContentValidationReport } from '../../../api/graphql/schema/resolvers.contentValidationReport.js';
 import type { RunToolDef } from './types.js';
+import { isOwnedBy, requireOwnerRefOf } from '../../owner.js';
 
 export const hadronRecordContentValidation: RunToolDef = {
   name: 'hadron_record_content_validation',
@@ -50,8 +51,9 @@ export const hadronRecordContentValidation: RunToolDef = {
         // The flow guards of resolveFlowMemory, judged on the memory the resolver will lock. A
         // memory outside them answers the resolver's NODE_NOT_FOUND, exactly like a missing node.
         memoryGuard: async (memoryId) => {
-          const memory = await ctx.db.memory.findUnique({ where: { id: memoryId }, select: { organizationId: true, deletedAt: true, isEncrypted: true } });
-          return !!memory && !memory.deletedAt && memory.organizationId === ctx.run.organizationId && !memory.isEncrypted;
+          const memory = await ctx.db.memory.findUnique({ where: { id: memoryId }, select: { organizationId: true, ownerUserId: true, deletedAt: true, isEncrypted: true } });
+          // #5077: `isOwnedBy` (two persons' memories both have a null organization; `===` would admit either).
+          return !!memory && !memory.deletedAt && isOwnedBy(memory, requireOwnerRefOf(ctx.run)) && !memory.isEncrypted;
         },
       },
     );

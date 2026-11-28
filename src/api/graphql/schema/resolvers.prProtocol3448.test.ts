@@ -35,7 +35,7 @@ const freeze = (head = H, who = author.id) => command('freezePullRequestHead', {
 const events = (id = build.id) => db.agentTeamEvent.findMany({ where: { taskId: id, type: { in: ['review.scheduled', 'pr.frozen', 'review.seat.assigned', 'review.verdict', 'pr.ready'] } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
 const stored = (id = build.id) => db.agentTask.findUniqueOrThrow({ where: { id } });
 async function seat(slot: string, head = H, who = reviewer.id, supersedes?: string) {
-  const t = await M.createAgentTask!({}, { input: { parentTaskId: build.id, title: slot, assignee: { user: who }, source: 'synthetic' } }, ctx(author.id));
+  const t = await M.createAgentTask!({}, { input: { parentTaskRef: build.id, title: slot, assignee: { user: who }, source: 'synthetic' } }, ctx(author.id));
   await command('assignReviewSeat', { taskRef: t.id, slot, head, supersedes }, author.id);
   return t;
 }
@@ -136,7 +136,7 @@ describe('seat binding and verdicts', () => {
   });
   it.each(['CHANGES_REQUESTED', 'FAIL', 'REFUSED'])('cannot shop away %s at the same head, but a new head permits replacement', async value => {
     await schedule(['local']); await freeze(); const old = await seat('local'); await verdict(old, value); await finish(old);
-    const replacement = await M.createAgentTask!({}, { input: { parentTaskId: build.id, title: 'Replacement', assignee: { user: other.id }, source: 'synthetic' } }, ctx(author.id));
+    const replacement = await M.createAgentTask!({}, { input: { parentTaskRef: build.id, title: 'Replacement', assignee: { user: other.id }, source: 'synthetic' } }, ctx(author.id));
     const args = { taskRef: replacement.id, slot: 'local', head: H, supersedes: old.id };
     await expect(command('assignReviewSeat', args, author.id)).rejects.toMatchObject(error('REVIEW_SEAT_NOT_SUPERSEDABLE'));
     expect(await events(replacement.id)).toHaveLength(0); expect((await stored(replacement.id)).properties).toBeNull();
@@ -169,7 +169,7 @@ describe('seat binding and verdicts', () => {
   });
   it('two concurrent first assignments cannot both become current for a slot', async () => {
     await schedule(['local']); await freeze();
-    const tasks = await Promise.all(['one', 'two'].map(title => M.createAgentTask!({}, { input: { parentTaskId: build.id, title, source: 's', assignee: { user: reviewer.id } } }, ctx(author.id))));
+    const tasks = await Promise.all(['one', 'two'].map(title => M.createAgentTask!({}, { input: { parentTaskRef: build.id, title, source: 's', assignee: { user: reviewer.id } } }, ctx(author.id))));
     const results = await Promise.allSettled(tasks.map(t => command('assignReviewSeat', { taskRef: t.id, slot: 'local', head: H }, author.id)));
     expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(1);
     const rejected = results.find(r => r.status === 'rejected') as PromiseRejectedResult;
@@ -455,7 +455,7 @@ describe('LOCAL delta: finished negative verdicts and seat provenance', () => {
     expect((await events()).filter(e => e.type === 'pr.ready')).toHaveLength(0);
   });
   it('only the build assignee can create its seat and cannot give it another owner', async () => {
-    const input = { parentTaskId: build.id, title: 'Seat', source: 'synthetic', assignee: { user: reviewer.id } };
+    const input = { parentTaskRef: build.id, title: 'Seat', source: 'synthetic', assignee: { user: reviewer.id } };
     await expect(M.createAgentTask!({}, { input }, ctx(other.id))).rejects.toMatchObject(error('TASK_NOT_ASSIGNEE'));
     await expect(M.createAgentTask!({}, { input: { ...input, owner: { user: other.id } } }, ctx(author.id)))
       .rejects.toMatchObject(error('TASK_CHILD_OWNER_MISMATCH'));
@@ -499,7 +499,7 @@ describe('SECURITY delta: negative history survives bounce and reassignment', ()
 describe('SECURITY delta: ended rows and mirrored property history', () => {
   async function end(id:string, who:string, ownerId:string, status:string) {
     if (status === 'cancelled') await M.cancelAgentTask!({}, { taskRef:id }, ctx(ownerId));
-    else { await M.startAgentTask!({}, { taskRef:id }, ctx(who)); await M.finishAgentTask!({}, { taskRef:id, result:{outcome:'done'} }, ctx(who)); }
+    else { await M.startAgentTask!({}, { taskRef:id }, ctx(who)); await M.finishAgentTask!({}, { taskRef:id, result:{outcome:'failed'} }, ctx(who)); } // #5036: a seat with no verdict finishes only as failed or cancelled
   }
   it.each(['cancelled','finished'])('schedule and freeze refuse a %s build without an event or property change', async status => {
     await end(build.id, author.id, owner.id, status);
@@ -516,7 +516,7 @@ describe('SECURITY delta: ended rows and mirrored property history', () => {
   });
   it.each(['cancelled','finished'])('assignment refuses a %s seat', async status => {
     await schedule(['local']); await freeze();
-    const t=await M.createAgentTask!({}, {input:{parentTaskId:build.id,title:'Seat',source:'synthetic',assignee:{user:reviewer.id}}},ctx(author.id));
+    const t=await M.createAgentTask!({}, {input:{parentTaskRef:build.id,title:'Seat',source:'synthetic',assignee:{user:reviewer.id}}},ctx(author.id));
     await end(t.id,reviewer.id,author.id,status);
     const before=await events(t.id),properties=(await stored(t.id)).properties;
     await expect(command('assignReviewSeat',{taskRef:t.id,slot:'local',head:H},author.id)).rejects.toMatchObject(error('TASK_ENDED'));
@@ -559,7 +559,7 @@ describe('Worker actor floor and register disclosure', () => {
     worker=await db.worker.create({data:{...WORKER_SIGNATURE_DEFAULTS,appId:app.id,agentId:roleAgent.id,name:'Author',slug:'author',heldByUserId:author.id}});
   });
   async function workerSeat() {
-    const t=await M.createAgentTask!({}, {input:{parentTaskId:build.id,title:'Worker seat',source:'synthetic',assignee:{worker:worker.id}}},ctx(author.id));
+    const t=await M.createAgentTask!({}, {input:{parentTaskRef:build.id,title:'Worker seat',source:'synthetic',assignee:{worker:worker.id}}},ctx(author.id));
     await command('assignReviewSeat',{taskRef:t.id,slot:'local',head:H},author.id);
     return t;
   }
@@ -764,7 +764,7 @@ describe('same-head floor scope controls',()=>{
     const review=await seat('local',H,author.id);
     await M.reassignAgentTask!({}, {taskRef:build.id,assignee:{user:other.id}},ctx());
     await freeze(H2,other.id);
-    const next=await M.createAgentTask!({}, {input:{parentTaskId:build.id,title:'New head',source:'synthetic',assignee:{user:author.id}}},ctx(other.id));
+    const next=await M.createAgentTask!({}, {input:{parentTaskRef:build.id,title:'New head',source:'synthetic',assignee:{user:author.id}}},ctx(other.id));
     await command('assignReviewSeat',{taskRef:next.id,slot:'local',head:H2,supersedes:review.id},other.id);
     await verdict(next,'APPROVE',H2,author.id);await finish(next,author.id);
     expect((await readiness(H2)).ready).toBe(true);

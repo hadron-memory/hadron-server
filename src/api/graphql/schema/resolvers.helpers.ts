@@ -1,10 +1,13 @@
+import { registerOwnRightReader } from '../../../lib/appMemoryLinks.js';
+import { registerWriteGrantGiverCheck } from '../../../lib/grants/writeGrant.js';
+import { MANAGED_MEMORY_SELECT, managesGrantMemory } from '../../../lib/grants/memoryManager.js';
+import { grantReadReachFor } from '../../../lib/grants/readGrant.js';
 import { currentAgentOrgMember } from '../../../lib/auth/personalOrgAgentInstall.js';
 import { requireOrgRole, isAppParticipant } from '../../../lib/auth/appParticipantRead.js';
 import { endGrantsOfAgentsNoLongerInstalled, importedPairsOfParent } from '../../../lib/grants/agentInstallDeparture.js';
 import { lockAppInstallation, readInstallBootPrompt, lockAppAgentCustomization, resolveAppInstallation } from '../../../lib/appInstallations.js';
 import type { AuthoredWith, TaskReadGate } from '../../../lib/authoringAttestation.js';
 import { cachedManagerOrgRole } from '../../../lib/auth/managerOrgRoles.js';
-import { hasReservedProjectionComponent } from '../../../integrations/localFs/pathUnderGraphsRoot.js';
 import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../../../lib/auth/publicKnowledgeRead.js';
 import { PAGE_ARGS_DEFAULT, PAGE_ARGS_MAX, pageTake } from '../pageBounds.js';
 import { LINK_CAP_MEMORY_SELECT, linkWriteTargetAdmits } from '../../../lib/auth/agentMemoryLinkCap.js';
@@ -53,14 +56,19 @@ import { ROLE_ORDER } from '../../../lib/auth/orgRole.js';
 import { sessionScopedMemoryIds } from '../../../lib/auth/sessionScopedMemoryIds.js';
 import { getMemberOrgIds } from '../../../lib/auth/memberOrgIds.js';
 import { foreignIdentityScopedMemoryFilter } from '../../../lib/auth/memoryOwnership.js';
+import { isForeignUserHolding, isUserHolding, userHoldingCreatorMayRead } from '../../../lib/auth/userHolding.js';
 import { isStrictOwner } from '../../../lib/auth/strictOwner.js';
+import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { isRefusedPrincipal } from '../../../lib/auth/requestPrincipal.js';
 import { boundSessionPrivacyFilter } from '../../../lib/auth/sessionPrivacy.js';
 import {
   formatCanonicalUrn,
+  validateUserSlug,
   UrnNotQualifiedError,
+  UrnParseError,
   type CanonicalUrnType,
 } from '../../../lib/urn.js';
+import { derivedSlugBase } from '../../../lib/derivedSlug.js';
 import { safeEntityUrnV2 } from '../../../lib/urnEmit.js';
 import {
   validateEdgeCondition,
@@ -73,7 +81,7 @@ import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { resolveAiConfigByUrn } from '../../../lib/entityRef/aiConfigRef.js';
 import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
-import { resolveUserRefOrEmail } from '../../../lib/entityRef/userRef.js';
+import { resolveUserRef, resolveUserRefOrEmail } from '../../../lib/entityRef/userRef.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import {
   UserNotFoundError,
@@ -84,7 +92,7 @@ import {
   AmbiguousLegacyUrnError,
 } from '../../../lib/entityRef/errors.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
-import type { WriteDestination } from '../../../lib/appWriteGrant.js';
+import type { WriteDestination } from '../../../lib/grants/writeGrant.js';
 import { assertLinkAllowedForPublicAgent, isExcludedFromCoveredSet } from '../../../lib/agentPublicCongruence.js';
 import type { ImpersonationContext } from '../../../lib/auth/impersonation.js';
 import { isReadOnlyImpersonation } from '../impersonationReadOnlyPlugin.js';
@@ -98,6 +106,7 @@ import {
 } from '../../../generated/prisma/index.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { SUBSCRIPTION_WRITE_CLASSES } from '../../../lib/auth/memorySubscriptionAccess.js';
 import { isUserOwnedAgentDefinition } from '../../../lib/auth/userOwnedAgentDefinition.js';
 import { canManageAgentSystemMemory } from '../../../lib/auth/managedSystemMemory.js';
 import { isInstallMemoryRow, readableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
@@ -358,7 +367,8 @@ export function chosenRefArg(args: { ref?: string | null; id?: string | null }):
  * the identical error rather than a copy that could drift.
  */
 export function refArgNotFoundError(label: string, chosen: string): GraphQLError {
-  return new GraphQLError(`No match for ${label}Ref "${chosen}".`, { extensions: { code: 'NOT_FOUND' } });
+  // #5168: names the argument, never quotes the value the caller typed in it.
+  return new GraphQLError(`No match for ${label}Ref.`, { extensions: { code: 'NOT_FOUND' } });
 }
 
 /** #764 — per-entity `resolveRefArg` wrappers (label = the ref arg's name). */
@@ -597,7 +607,7 @@ export function isMemoryReadableFresh(ctx: Context, memoryId: string, tx?: Prism
  * for a surface that does not already hold the caller's accessible set. A
  * surface that computes the full set anyway for its default
  * scope — `listAssets` is the live example — should intersect in memory against
- * that set instead. `listAssets` additionally narrows by `orgId` before checking
+ * that set instead. `listAssets` additionally narrows by `orgRef` before checking
  * refs, so swapping this helper in there would also drop that narrowing and
  * WIDEN the result. Unify the two only if you keep both checks.
  */
@@ -707,6 +717,14 @@ export async function concealUnreadableDenial(
 }
 
 /**
+ * A door that names a target calls this before any lookup, so a signed-out
+ * caller (no user, no App) gets one answer for every target.
+ */
+export function requireCallerIdentity(ctx: Pick<Context, 'userId' | 'appId'>): void {
+  if (!ctx.userId && !ctx.appId) throw unauthenticatedError();
+}
+
+/**
  * The capability an `AgentMemoryItem` row confers (`cor:dmo:050:09`). `read`
  * admits the memory's node CONTENT to the agent's audience; `read-write` is
  * additionally the sole write cap for a knowledge memory.
@@ -770,12 +788,28 @@ function userPrincipalOnly(ctx: Context): Context {
  * audience, which is precisely what this gate exists to stop. Stripping the
  * active App made the reach broader, not narrower.
  */
-function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<boolean> {
-  const self = userPrincipalOnly(ctx);
-  return getAccessibleMemoryIds(self, memoryId, { excludeAppDerived: true }).then(
-    (ids) => ids.includes(memoryId),
-  );
+export function holdsContentReadIndependently(ctx: Context, memoryId: string): Promise<boolean> {
+  return memoryIdsHeldIndependently(ctx, memoryId).then((ids) => ids.includes(memoryId));
 }
+
+/**
+ * #5393: the memories this caller holds CONTENT-READ on in their own right, enumerated — the set
+ * `holdsContentReadIndependently` asks about one memory at a time. Both go through this one function, so the attachable-memory
+ * picker (`attachableMemories`) and `attachMemoryToApp` read the same judgment and cannot drift
+ * (hrn:node:hadronmemory.com:specs:cor:dmo:060:22). `onlyMemoryId` narrows the lookup to that one row.
+ */
+export function memoryIdsHeldIndependently(ctx: Context, onlyMemoryId?: string): Promise<string[]> {
+  return getAccessibleMemoryIds(userPrincipalOnly(ctx), onlyMemoryId, { excludeAppDerived: true });
+}
+
+// #5185: the link judge (src/lib/appMemoryLinks.ts) asks this question for each attacher; registered here so it imports no resolver.
+registerOwnRightReader(holdsContentReadIndependently as never);
+// #5404: the `memory.write` judge (src/lib/grants/writeGrant.ts) asks whether a grant's giver still manages the memory, by the same
+// rule its signer faced (`managesGrantMemory`); registered here for the same reason.
+registerWriteGrantGiverCheck(async (db, giver, memoryId) => {
+  const memory = await db.memory.findFirst({ where: { id: memoryId, deletedAt: null }, select: MANAGED_MEMORY_SELECT });
+  return memory !== null && managesGrantMemory({ db, userId: giver.id, roles: giver.roles } as Context, memory);
+});
 
 /**
  * The same-App attach (#1357; Holger's ruling, 2026-09-26): an appropriately
@@ -1088,6 +1122,7 @@ export async function canOpenMemoryRecordById(ctx: Context, memoryId: string): P
       organizationId: true,
       appId: true,
       userMemoryOfAgentId: true,
+      createdBy: true,
       deletedAt: true,
     },
   });
@@ -1180,8 +1215,8 @@ export async function concealUnreadableNodeDenial(
  * to it (#1316).
  */
 export function nodeNotFoundError(ref: string): GraphQLError {
-  return new GraphQLError(`Node not found: "${ref}"`, {
-    extensions: { code: 'NODE_NOT_FOUND', ref },
+  return new GraphQLError('Node not found', {
+    extensions: { code: 'NODE_NOT_FOUND' },
   });
 }
 
@@ -1218,12 +1253,13 @@ export type MemoryRecordGateRow = {
   organizationId: string | null;
   appId: string | null;
   userMemoryOfAgentId: string | null;
+  createdBy: string | null;
 };
 
 /** The Prisma `select` that yields a {@link MemoryRecordGateRow}; spread it, then add your own fields. */
 export const MEMORY_RECORD_GATE_SELECT = {
   id: true, class: true, userId: true, ownerUserId: true,
-  organizationId: true, appId: true, userMemoryOfAgentId: true,
+  organizationId: true, appId: true, userMemoryOfAgentId: true, createdBy: true,
 } as const satisfies Record<keyof MemoryRecordGateRow, true>;
 
 /**
@@ -1303,6 +1339,8 @@ export async function canReadMemoryRecord(
     if (isStrictOwner(ctx, memory.userId)) return true;
     // No `as never`: the cast is what let a caller omit the fields this reads.
     if (ctx.userId && (await granteeShareAccess(ctx.db, ctx.userId, memory))) return true;
+    // #5321: an attachment gives no access (cor:dmo:060:22), and no read grant names a personal or private memory
+    // (src/lib/grants/readGrant.ts memoryReadTargetRefusal), so a pure App key or a userless run reads none here.
     return false;
   }
   // System records follow the installed/licensed Agent or manager audience,
@@ -1343,6 +1381,11 @@ export async function canReadMemoryRecord(
     const ids = await accessible();
     return ids.includes(memory.id);
   }
+  // A per-user "holding" (userMemoryOfAgentId set, e.g. the startChat no-App downgrade) is read by its CREATOR alone
+  // (cor:cht:010:02), the same identity the node-access set and the write gate use. It sits ABOVE the platform ADMIN/OWNER
+  // short-circuit and the org-member fast path below, so neither can admit it; an impersonated session, an App key and a
+  // run principal never read it. App-class records keep their own shape-aware audience (below).
+  if (isUserHolding(memory)) return userHoldingCreatorMayRead(ctx, memory);
   if (ctx.appId && ctx.sessionId && !ctx.userId) {
     const ids = await accessible();
     return ids.includes(memory.id);
@@ -1384,7 +1427,10 @@ export async function canReadMemoryRecord(
   // exists for, and Query.memory out of step with effectiveAccess. AppMember
   // rows hard-delete on removal (no deletedAt column), so existence is
   // liveness. Identity-scoped — never via impersonation (#876 class).
-  if (ctx.userId && memory.appId && !ctx.impersonation) {
+  // #5027 (Holger R1, cor:acl:010:01): a GROUP made in an App is read through its MemoryMembers only, record and
+  // nodes alike, so App membership alone does not open its record (the org-member fast path above skips group the
+  // same way); a member reaches it through the shared gate below.
+  if (ctx.userId && memory.appId && memory.class !== 'group' && !ctx.impersonation) {
     const appMember = await ctx.db.appMember.findUnique({
       where: { appId_userId: { appId: memory.appId, userId: ctx.userId } },
       select: { userId: true },
@@ -1561,6 +1607,38 @@ export async function requireOwnerOrOrgRole(
 }
 
 /**
+ * #5014 (Billing A6): may this caller read ONE PERSON's money records (their credit ledger), and which person is it?
+ * Resolves `userRef` (cor:api:140:01: an id, a handle or a `hrn:user:` URN) and returns the user id. Admits the person
+ * themselves in an ordinary user session, and a platform ADMIN/OWNER (hrn:node:hadronmemory.com:specs:cor:acl:100:03,
+ * Proposed access notes of cor:api:010:01, ruling 3). Everyone else is refused with the one `FORBIDDEN`, and a caller who
+ * is not a platform admin gets that SAME answer whether the named person exists, so the refusal is no user-existence
+ * oracle (cor:api:140:02). A platform admin, for whom nothing is concealed, gets the typed not-found for a missing
+ * person, and may name a soft-deleted one (their entries are kept, cor:dmo:170:08, so a dispute after deletion can still
+ * be answered; ruling 4).
+ *
+ * Why this is NOT `requireOwnerOrOrgRole`: that gate is strictly owner-only for a user-owned entity, with no
+ * platform-admin arm (spec 047). A ledger is a money record an operator must read for refunds and disputes; it holds no
+ * content. A7a's `ownerLimits(userRef:)` and A13's `aiSpend(userRef:)` reuse this rule.
+ *
+ * Judged on the CREDENTIAL, before the ref is resolved: an impersonated session (the target's identity does not admit
+ * the shared-org-only support session, cor:acl:100:03) and an App key (acts for an App, never for a person, even when its
+ * context carries a userId) are refused first, so neither learns anything from the lookup.
+ */
+export async function requirePersonRecordRead(ctx: Context, userRef: string): Promise<string> {
+  if (ctx.impersonation || ctx.appKeyId || ctx.appId) throw authorizationDenied();
+  const admin = isPlatformAdmin(ctx);
+  let id: string;
+  try {
+    ({ id } = await resolveUserRef(ctx.db, userRef, { includeDeleted: admin }));
+  } catch (e) {
+    if (e instanceof UserNotFoundError && !admin) throw authorizationDenied();
+    throw e;
+  }
+  if (admin || isStrictOwner(ctx, id)) return id;
+  throw authorizationDenied();
+}
+
+/**
  * The Agent-management gate (#1787, cor:dmo:050:13 — Holger, team chat #8895:
  * "we have to be able to shut down a rogue agent"). Whatever an org's
  * ADMIN/OWNER may do to an org-owned Agent, a platform ADMIN/OWNER may do to
@@ -1723,6 +1801,8 @@ export async function requireMemoryManageAccess(
     userId: string | null;
     organizationId: string | null;
     ownerUserId: string | null;
+    userMemoryOfAgentId: string | null;
+    createdBy: string | null;
   },
   required: 'OWNER' | 'ADMIN' | 'CONTRIBUTOR' | 'READER' = 'ADMIN',
 ): Promise<void> {
@@ -1730,6 +1810,12 @@ export async function requireMemoryManageAccess(
     if (!ctx.impersonation && ctx.userId && memory.userId === ctx.userId) return;
     throw authorizationDenied();
   }
+  // hadron-internal#88: a per-user chat holding is managed by its creator alone, acting as themselves (the read rule's predicate: no
+  // impersonated session, no run principal, no App key). No organisation role and no platform role reaches it through this gate (a
+  // source and a push would publish it, a grant would serve it). Doors that do not call this gate (delete, the source-memory delete of a
+  // merge) keep their own org-admin gates; a sweep of the other direct role checks is hadron-internal#89's residual (a private issue:
+  // the tracker for the management-door class that #88 fixed through this gate).
+  if (isUserHolding(memory) && !userHoldingCreatorMayRead(ctx, memory)) throw authorizationDenied();
   await requireOwnerOrOrgRole(ctx, memory, required);
 }
 
@@ -2394,11 +2480,13 @@ export async function resolveOrgScope(
  * revoked-membership cross-org share can't admit a non-member (which would also
  * expose the org's nested app/key/member objects via `Memory.organization`).
  *
- * Only `personal` is shareable (`private` never is), and agent-scoped personal
- * "holding" memories (`userMemoryOfAgentId` set) are deliberately excluded here
- * — their share additionally requires an active AgentSubscription
- * (resolveMemoryAuthorization step 3c), which this portal surface doesn't model;
- * excluding them is the safe, no-regression direction.
+ * Only `personal` is shareable (`private` never is). #5389: a personal memory
+ * made in an App (`userMemoryOfAgentId` set, which `chk_memory_personal_agent_id`
+ * requires whenever `app_id` is) is shared exactly like a free-standing one: the
+ * share alone admits, at its role, with no AgentSubscription licence
+ * (cor:dmo:060:20 and its S6, "unless the therapist shares it"; cor:acl:010:01;
+ * the specs engineer's read on #5389). Before #5389 such a share was accepted and
+ * listed to its grantor but granted nothing here.
  *
  * @param opts.requireWrite when true, only a `writer` share qualifies.
  */
@@ -2413,7 +2501,7 @@ export async function granteeShareAccess(
   },
   opts?: { requireWrite?: boolean },
 ): Promise<boolean> {
-  if (memory.class !== 'personal' || memory.userMemoryOfAgentId !== null) return false;
+  if (memory.class !== 'personal') return false;
   const share = await db.memoryShare.findUnique({
     where: { memoryId_granteeId: { memoryId: memory.id, granteeId: userId } },
     select: { role: true },
@@ -2461,7 +2549,7 @@ export async function granteeShareAccess(
  *
  * The filter is also what keeps this gate's own contract: `getAccessibleMemoryIds`
  * admits personal/private ONLY through its identity-scoped clauses (owner,
- * holdings, share grantee). Nothing App-derived may add to that set.
+ * holdings, share grantee). Nothing App-derived may add to that set, EXCEPT the App's links for a pure key (#5185), which `getAccessibleMemoryIds` unions in after this filter through `src/lib/appMemoryLinks.ts`, the one judge of them.
  *
  * Both strict-owner axes live upstream as well (PR #1102 and #1260 reviews):
  * a map carrying rows the canonical point gate hard-denies is wrong for every
@@ -2611,7 +2699,12 @@ export async function getAccessibleMemoryIds(
     // right, so an attachment gate asking "what does this caller hold?" gets
     // the empty set rather than that App's fold (#1349).
     if (options?.excludeAppDerived) return [];
-    const derived = await appDerivedMemoryIds(ctx, onlyMemoryId);
+    // #5321 (cor:acl:140:02, cor:agt:010:01): plus what the App's read grants let a pure key (holding grant:read) or a userless
+    // run read, judged at use by the one judge MCP shares. An attachment adds nothing (cor:dmo:060:22).
+    const derived = [...new Set([
+      ...await appDerivedMemoryIds(ctx, onlyMemoryId),
+      ...await grantReadReachFor(ctx.db, ctx, onlyMemoryId ? [onlyMemoryId] : undefined),
+    ])];
     // #3306 / ruling 0104: a pure App key or userless run also reads PUBLIC knowledge (App-less, ownerless, live),
     // read-only. One shared predicate with the MCP point gate; reads only (no list surface returns these ids).
     if (!readsPublicKnowledgeWithoutUser(ctx)) return derived;
@@ -2654,7 +2747,8 @@ export async function getAccessibleMemoryIds(
         deletedAt: null,
         OR: [
           { class: { in: ['personal', 'private'] as any }, userId: ctx.userId },
-          { class: 'knowledge', userMemoryOfAgentId: { not: null }, createdBy: ctx.userId },
+          // hadron-internal#88: a run principal carrying the creator's id does not read a holding by virtue of it.
+          ...(isRunPrincipal(ctx) ? [] : [{ class: 'knowledge' as const, userMemoryOfAgentId: { not: null }, createdBy: ctx.userId }]),
           // spec 047: a user-owned memory is readable ONLY by its owner.
           //
           // NON-personal classes, for the reason MCP's `getMemoryAccess` states
@@ -2682,7 +2776,7 @@ export async function getAccessibleMemoryIds(
       select: { id: true },
     });
     // #778 — personal memories shared WITH the caller (they are a grantee).
-    // Only `personal` is shareable; agent-scoped holdings are excluded (see
+    // Only `personal` is shareable, App personal memories included (#5389, see
     // granteeShareAccess). Org-owned shares are additionally membership-gated so
     // a legacy/revoked cross-org share can't admit a non-member — mirrors the
     // create rule and keeps this node-read gate in lockstep with Query.memory.
@@ -2692,7 +2786,6 @@ export async function getAccessibleMemoryIds(
         ...scope,
         deletedAt: null,
         class: 'personal',
-        userMemoryOfAgentId: null,
         shares: { some: { granteeId: ctx.userId } },
         OR: [{ organizationId: null }, { organizationId: { in: memberOrgIds } }],
       },
@@ -2963,7 +3056,7 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, d
   if (ctx.appId) {
     const memory = await ctx.db.memory.findUnique({
       where: { id: memoryId },
-      select: { id: true, ownerUserId: true, userId: true, class: true, appId: true, organizationId: true, installOfAgentId: true, isInstallMemory: true },
+      select: { id: true, ownerUserId: true, userId: true, class: true, appId: true, organizationId: true, installOfAgentId: true, isInstallMemory: true, userMemoryOfAgentId: true, createdBy: true },
     });
     if (!memory) throw memoryWriteForbidden();
     // #2044: an install memory has its own write audience; no platform-role
@@ -2978,7 +3071,8 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, d
     // reference to the owner's memory in another App is evaluated as that App,
     // with isolation and the subscription check. An inline identity shortcut
     // here (#1500) let GraphQL drift from MCP, so there is no second copy.
-    if (!strictOwner && memory.ownerUserId === null &&
+    // hadron-internal#88: the platform role does not reach another user's chat holding (it would read it back).
+    if (!strictOwner && memory.ownerUserId === null && !isForeignUserHolding(memory, ctx.userId) &&
         !(ctx.appId && ctx.sessionId && !ctx.userId) &&
         (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))) return;
     // A write always names its target: an explicit reference (#1503).
@@ -3036,8 +3130,9 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, d
     throw memoryWriteForbidden();
   }
 
-  // Non-personal/private, org-owned: global ADMIN/OWNER bypass.
-  if (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER')) return;
+  // Non-personal/private, org-owned: global ADMIN/OWNER bypass, except another user's chat holding (hadron-internal#88:
+  // it falls through to the creator-only holding rule below, which refuses it).
+  if (!isForeignUserHolding(memory, ctx.userId) && (ctx.roles?.includes('ADMIN') || ctx.roles?.includes('OWNER'))) return;
 
   // The app class contains team, Worker, and session rows with distinct
   // audiences. Use the same shape-aware gate as MCP rather than allowing a
@@ -3052,7 +3147,10 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, d
   // below (which key on organizationId, ignoring app_id). App-scoped write goes
   // through the App-key/agent path (canWriteToMemory via getAppMemoryAccess); a
   // JWT org contributor who isn't ADMIN gets no write here (codex review, #660).
-  if (memory.appId !== null && (memory.class === 'knowledge' || memory.class === 'group')) {
+  // #5027 (Holger R1): an App-scoped GROUP is written by its MemoryMember writers, so a group row falls through to
+  // the shared writable set below, whose group arm is MemoryMember-only; the org and subscription arms keep
+  // `appId: null` (knowledge only), so an org role still adds nothing.
+  if (memory.appId !== null && memory.class === 'knowledge') {
     throw memoryWriteForbidden();
   }
 
@@ -3079,9 +3177,11 @@ export async function requireMemoryWriteAccess(ctx: Context, memoryId: string, d
   // live org CONTRIBUTOR+, group via its MemoryMember writer/owner grant.
   if ((await getOrgWritableMemoryIds(ctx.db, ctx.userId, memoryId)).includes(memoryId)) return;
 
-  // A subscription grants writes only to ordinary shared knowledge. Group
-  // membership stays the exclusive group-write arm (cor:acl:010:01).
-  if (memory.class === 'knowledge' && memory.userMemoryOfAgentId === null) {
+  // A subscription grants writes only to ordinary shared knowledge — the SAME
+  // exported list the audit and getSubscribedWritableMemoryIds use, so the
+  // writable class cannot drift between the copies. Group membership stays the
+  // exclusive group-write arm (cor:acl:010:01).
+  if ((SUBSCRIPTION_WRITE_CLASSES as readonly string[]).includes(memory.class) && memory.userMemoryOfAgentId === null) {
     const userOrgs = await ctx.db.orgMember.findMany({
       where: {
         userId: ctx.userId,
@@ -4298,6 +4398,52 @@ export interface UpdateNodeInput
   name?: string;
 }
 
+/**
+ * #5080: the GraphQL (wire) shape of a node write names its refs `memoryRef`, `ref` and `targetRef`. The write core keeps
+ * `memoryId`, `id` and `targetId` (internal names, and every Prisma key), so each door maps at the edge and nothing below it moves.
+ */
+export interface NodeEdgeDoorInput extends Omit<NodeEdgeInput, 'targetId'> {
+  targetRef: string;
+}
+export type CreateNodeDoorInput = Omit<CreateNodeInput, 'memoryId' | 'edges'> & {
+  memoryRef?: string | null;
+  edges?: NodeEdgeDoorInput[] | null;
+};
+export type UpdateNodeDoorInput = Omit<UpdateNodeInput, 'id' | 'memoryId' | 'edges'> & {
+  ref?: string | null;
+  memoryRef?: string | null;
+  edges?: NodeEdgeDoorInput[] | null;
+};
+
+function edgesFromDoor(edges: NodeEdgeDoorInput[] | null | undefined): NodeEdgeInput[] | undefined {
+  return Array.isArray(edges) ? edges.map(({ targetRef, ...e }) => ({ ...e, targetId: targetRef })) : (edges as undefined);
+}
+
+/** A wire create input to the core's shape: `memoryRef` -> `memoryId`, `edges[].targetRef` -> `targetId`. Absent stays absent. */
+export function toCreateNodeInput<R extends { memoryRef?: string | null; edges?: NodeEdgeDoorInput[] | null }>(
+  input: R,
+): Omit<R, 'memoryRef' | 'edges'> & { memoryId?: string; edges?: NodeEdgeInput[] } {
+  const { memoryRef, edges, ...rest } = input;
+  return {
+    ...rest,
+    ...(memoryRef !== undefined ? { memoryId: memoryRef as string } : {}),
+    ...(edges !== undefined ? { edges: edgesFromDoor(edges) } : {}),
+  };
+}
+
+/** A wire update input to the core's shape: `ref` -> `id`, `memoryRef` -> `memoryId`, `edges[].targetRef` -> `targetId`. */
+export function toUpdateNodeInput<R extends { ref?: string | null; memoryRef?: string | null; edges?: NodeEdgeDoorInput[] | null }>(
+  input: R,
+): Omit<R, 'ref' | 'memoryRef' | 'edges'> & { id?: string; memoryId?: string; edges?: NodeEdgeInput[] } {
+  const { ref, memoryRef, edges, ...rest } = input;
+  return {
+    ...rest,
+    ...(ref !== undefined ? { id: ref as string } : {}),
+    ...(memoryRef !== undefined ? { memoryId: memoryRef as string } : {}),
+    ...(edges !== undefined ? { edges: edgesFromDoor(edges) } : {}),
+  };
+}
+
 export type NodeTextField = 'content' | 'name' | 'alias' | 'description' | 'abstract' | 'tags';
 
 export interface SearchReplaceInNodesInput {
@@ -4305,8 +4451,8 @@ export interface SearchReplaceInNodesInput {
   authoredWith?: AuthoredWith | null;
   oldText: string;
   newText: string;
-  nodeIds?: string[];
-  memoryIds?: string[];
+  nodeRefs?: string[];
+  memoryRefs?: string[];
   prefix?: string;
   fields: NodeTextField[];
   caseInsensitive?: boolean;
@@ -4418,27 +4564,44 @@ export interface UsageEventInput {
   tokensOut?: number;
 }
 
-/** The longest filesystem path component the root projection can write. */
-const ROOT_LOC_ATOM_MAX_BYTES = 255;
+/**
+ * #5203 S1 — a slug the CALLER supplied is not derived (cor:urn:010:01): it is validated, and a reserved word, an empty
+ * string or any other bad slug is refused BAD_USER_INPUT (UrnParseError, formatError). A taken one is refused by the
+ * door's own existing check. Lowercase is required, as at every create boundary.
+ */
+export function suppliedSlug(slug: string): string {
+  try {
+    validateUserSlug(slug);
+  } catch (err) {
+    if (!(err instanceof UrnParseError)) throw err;
+    // The reason is the contract (#5168); the slug is the caller's own text and is not relayed.
+    throw new GraphQLError('Invalid slug.', { extensions: { code: 'BAD_USER_INPUT', reason: err.reason } });
+  }
+  return slug;
+}
 
 /**
- * #2730: a memory's root node takes the caller's `name` as its loc, and the
- * projection throws a server fault for a loc it cannot write. Refuse exactly
- * those inputs as BAD_USER_INPUT before any write: an empty last atom, an atom
- * over the filesystem's component limit, a reserved path component, or a NUL
- * or slash. Other inputs (spaces, Unicode, internal empty atoms) stay legal,
- * so this is not the shared loc grammar (`validateLoc`).
+ * #5149 / #5203 S3 — the slug BASE a new memory takes from the caller's display name, or a typed BAD_USER_INPUT before
+ * any write. The name itself has no grammar (hrn:node:hadronmemory.com:specs:cor:dmo:060:01) and reaches no path: the
+ * mirror checkout is placed by the memory's URN, so only the slug is judged (hrn:node:hadronmemory.com:specs:cor:urn:010:02).
+ *
+ * A supplied slug is validated and returned as is (S1). Otherwise the NAME is judged first: one that cannot be stored
+ * (a NUL or an unpaired surrogate) or that is empty or blank is refused, as an invalid name. Then the base is derived,
+ * and a name that yields no slug gets the fallback base: the derivation never refuses (hrn:node:hadronmemory.com:specs:cor:urn:010:01).
+ * The base may still be a reserved word or taken; the door mints the final slug from it ({@link nextFreeDerivedSlug},
+ * or `mintMemoryUrnV2`, which skip both).
+ * Call it after the authorization gates and before the door's first write.
  */
-export function assertMemoryRootLoc(name: string): void {
-  const atoms = name.split(':');
-  let reason: string | null = null;
-  if (atoms[atoms.length - 1] === '') reason = 'its last ":"-separated segment is empty';
-  else if (atoms.some(hasReservedProjectionComponent)) reason = 'it contains a reserved path segment';
-  else if (/[\0/]/.test(name)) reason = 'it contains a NUL or "/" character';
-  else if (atoms.some(a => Buffer.byteLength(a, 'utf8') > ROOT_LOC_ATOM_MAX_BYTES)) {
-    reason = `a ":"-separated segment is longer than ${ROOT_LOC_ATOM_MAX_BYTES} bytes`;
-  }
-  if (reason) {
-    throw new GraphQLError(`Invalid memory name: ${reason}.`, { extensions: { code: 'BAD_USER_INPUT' } });
+export function deriveMemorySlug(name: string, supplied?: string | null): string {
+  assertStorableText({ name });
+  if (supplied != null) return suppliedSlug(supplied);
+  assertNameNotBlank(name, 'Memory');
+  return derivedSlugBase(name);
+}
+
+/** #5203 S3: an empty or whitespace-only name is an invalid NAME, refused before any slug is derived from it. */
+export function assertNameNotBlank(name: string, entity: 'Memory' | 'Agent' | 'App'): void {
+  if (!name.trim()) {
+    throw new GraphQLError(`${entity} name must not be empty.`, { extensions: { code: 'BAD_USER_INPUT' } });
   }
 }

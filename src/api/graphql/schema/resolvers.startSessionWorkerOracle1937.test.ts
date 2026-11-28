@@ -27,6 +27,7 @@ import { composeWorkerUrn } from '../../../lib/entityRef/workerRef.js';
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { LAUNCH_GRANT_PREFIX } from '../../../lib/hostOperations/launch.js';
 import { resolvers, type Context } from './resolvers.js';
+import { joinHostForKey } from '../../../test/agentTeamHost.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../integrations/github/syncGraphFromGithub.js', () => ({ syncGraphFromGithub: vi.fn().mockResolvedValue({ error: null }) }));
@@ -45,7 +46,8 @@ async function envelope(p: Promise<unknown>): Promise<string> {
   }
   throw new Error('expected a refusal');
 }
-const absentEnvelope = (ref: string) => JSON.stringify({ message: `Worker not found: ${ref}`, extensions: { code: 'WORKER_NOT_FOUND' } });
+// #5168: the absent envelope no longer quotes the ref, so it is one text for every ref.
+const absentEnvelope = (_ref: string) => JSON.stringify({ message: 'Worker not found', extensions: { code: 'WORKER_NOT_FOUND' } });
 const start = (c: Context, input: Record<string, unknown>) =>
   M.startSession({}, { input: { id: generateId(), tool: 'vitest', ...input } }, c);
 
@@ -227,6 +229,7 @@ describe('#1945: the one exception, the worker the caller\'s own launch grant na
     kit = await worker(app, 'Kit', { heldByUserId: holder, heldAt: new Date() });
     const raw = `${APP_KEY_PREFIX}${randomBytes(32).toString('hex')}`;
     hostKey = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: hashAppKey(raw), keyPreview: raw.slice(-4), label: 'host' }, select: { id: true } });
+    await joinHostForKey(db, hostKey.id, 'orca1');
     await M.grantAppKeyScope({}, { id: hostKey.id, scope: 'host:operate', hostId: 'orca1' }, ctx(manager));
     await M.registerHost({}, {
       input: { appRef: app.id, label: 'Orca', pollIntervalSeconds: 600, workers: [{ worker: kit.id, family: 'claude', worktrees: ['hadron-server/kit'] }] },

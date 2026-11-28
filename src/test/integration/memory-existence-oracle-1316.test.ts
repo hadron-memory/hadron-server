@@ -124,19 +124,19 @@ beforeAll(async () => {
       ownerUserId: owner.id,
     },
   });
-  // A creator-owned knowledge holding retains the record-vs-node shape.
-  // System records no longer admit ordinary org readers (#1807).
-  const holdingAgent = await db.agent.create({ data: { organizationId: org.id, urn: org.urn + ':holding-agent', name: 'Holding fixture' } });
+  // App-attached knowledge keeps the record-vs-node shape: an org member opens the record (member fast path), but the
+  // org node set admits only unattached knowledge. System records no longer split this way (#1807), and a per-user chat
+  // holding is now creator-only at the record gate too, so neither can stand in.
+  const shapeApp = await db.app.create({ data: { organizationId: org.id, urn: org.urn + ':shape-app', name: 'Shape fixture' } });
   const recordOnly = await db.memory.create({
     data: {
       id: generateId(),
       organizationId: org.id,
-      urn: `${org.urn}:record-only-holding`,
+      urn: `${org.urn}:record-only-attached`,
       name: 'record-readable, nodes-unreadable',
       class: 'knowledge',
       visibility: 'ORGANIZATION',
-      userMemoryOfAgentId: holdingAgent.id,
-      createdBy: owner.id,
+      appId: shapeApp.id,
       acceptsUploads: false,
     },
   });
@@ -208,7 +208,7 @@ const MUTATION_SURFACES = SURFACES.slice(4);
 /**
  * Principal × target pairs that MUST be indistinguishable from a missing
  * memory. The outsider can open nothing in the org; for the NODE-data reads the
- * reader's record-only knowledge holding is also concealed (they may open the
+ * reader's record-only attached knowledge is also concealed (they may open the
  * record, but these surfaces return node data, gated on node content).
  */
 const OUTSIDER_CASES: Array<[string, 'urn' | 'id']> = [

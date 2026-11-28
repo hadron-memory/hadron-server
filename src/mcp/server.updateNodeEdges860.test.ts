@@ -232,7 +232,7 @@ describe('removeEdges (#860)', () => {
       norm(await ask(foreign.id), foreign.id),
       norm(await ask(hidden.id), hidden.id),
     ];
-    expect(outs[0]).toBe('Edge not found: "<ref>"');
+    expect(outs[0]).toBe('Edge not found'); // #5168: the ref is not quoted back
     expect(outs[1]).toBe(outs[0]);
     expect(outs[2]).toBe(outs[0]);
     // deleteEdge's own answer for the same unknown ref is the same text.
@@ -269,7 +269,7 @@ describe('removeEdges (#860)', () => {
       data: { id: generateId(), sourceId: source.id, targetId: 'not:there:yet', name: 'later', loc: `${source.loc}:later:nt` },
     });
     const out = await call('hadron_update_node', { urn: nodeUrnOf(source.loc), removeEdges: [pending.id] });
-    expect(out).toBe(`Edge not found: "${pending.id}"`);
+    expect(out).toBe('Edge not found');
     expect(await db.pendingEdge.count({ where: { id: pending.id } })).toBe(1);
   });
 });
@@ -341,7 +341,7 @@ describe('removeEdges\' refusal mappings are scoped to the removal loop (#860, B
     // An edge of `source` whose own memory column names another memory (never written by the product; a damaged or legacy row).
     const odd = await db.edge.create({ data: { id: generateId(), memoryId: mem4.id, sourceId: source.id, targetId: t4.id, name: 'odd', loc: `${source.loc}:odd:x` } });
     const out = await call('hadron_update_node', { urn: nodeUrnOf(source.loc), removeEdges: [odd.id] });
-    expect(out).toBe(`Edge not found: "${odd.id}"`);
+    expect(out).toBe('Edge not found');
     expect(await db.edge.count({ where: { id: odd.id } })).toBe(1);
   });
 });

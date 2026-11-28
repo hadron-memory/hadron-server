@@ -51,6 +51,7 @@ import { sendResendEmail } from '../lib/resendToolClient.js';
 import { encryptResendApiKey } from '../lib/resendSenders.js';
 import { mintAppRun, executeAppRun, type RunExecutionDeps } from './appRuns.js';
 import { makeProdRunDeps } from './appRunDeps.js';
+import { activeMemoryWriteGrant } from '../test/appGrants5404.js';
 
 const ORG_URN = 'script-org';
 const ENTRY = `${ORG_URN}::flowmem::flow:s`;
@@ -83,10 +84,9 @@ beforeEach(async () => {
   await db.agentMemoryItem.create({ data: { agentId, memoryId, role: 'read-write' } });
   const grantor = await createDbRunConsentPrincipal(db, orgId, appId);
   await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: grantor.userId } }, data: { role: 'ADMIN' } });
-  await db.appMemoryWriteGrant.createMany({ data: ['tasks', 'runs'].map(prefix => ({
-    appId, memoryId, prefix, grantedBy: grantor.userId,
-    registerNodeUrn: 'hrn:node:example.com:fixture:authority',
-  })) });
+  // #5404: the App's write authority is a signed `memory.write` grant per prefix (ruling 0083's unsigned rows are retired),
+  // signed by the org ADMIN, who manages the memory.
+  for (const prefix of ['tasks', 'runs']) await activeMemoryWriteGrant(appId, memoryId, { issuerUserId: grantor.userId, prefix });
 });
 
 function deps(opts: { noConfig?: boolean } = { noConfig: true }) {
@@ -103,7 +103,7 @@ function deps(opts: { noConfig?: boolean } = { noConfig: true }) {
 
 const mint = async (eventData: Record<string, unknown> = {}) =>
   mintAppRun(db, {
-    organizationId: orgId, appId, agentId, triggerKind: 'MANUAL', entryNodeUrn: ENTRY, eventData,
+    owner: { organizationId: orgId }, appId, agentId, triggerKind: 'MANUAL', entryNodeUrn: ENTRY, eventData,
     consentPrincipal: await createDbRunConsentPrincipal(db, orgId, appId),
   });
 

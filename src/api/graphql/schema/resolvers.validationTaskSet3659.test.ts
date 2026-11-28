@@ -89,7 +89,7 @@ beforeEach(async () => {
   wUrn = 'hrn:node:vt-org:mem:validate-w';
   configId = (await db.memoryConfig.create({ data: { id: generateId(), memoryId } })).id;
   await addRule('guide', { validationTaskId: v, validationTaskRequired: true });
-  nodeId = (await M.createNode({}, { input: { memoryId, loc: 'doc', name: 'Doc', content: 'body', role: 'guide' } }, person(leo))).id;
+  nodeId = (await M.createNode({}, { input: { memoryRef: memoryId, loc: 'doc', name: 'Doc', content: 'body', role: 'guide' } }, person(leo))).id;
 });
 
 describe('#3659 what a writer reads', () => {

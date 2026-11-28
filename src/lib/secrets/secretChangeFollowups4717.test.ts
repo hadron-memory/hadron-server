@@ -5,9 +5,9 @@
  * hrn:node:hadronmemory.com:specs:cor:sec:070:01, hrn:node:hadronmemory.com:specs:cor:sec:070:02.
  * Real database and real software-passkey assertions, no production or provider calls.
  */
-import { beforeEach, describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import pg from 'pg';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb } from '../../test/helpers.js';
@@ -48,15 +48,17 @@ const member = async () => {
   return id;
 };
 
+// #4626 item 14: stubbed, not written, so afterEach restores the worker process's environment for the next file.
 beforeEach(async () => {
-  process.env.SECRET_ROOT_KEY = '22'.repeat(32); process.env.PASSKEY_SIGNING_ENABLED = 'true';
-  process.env.PASSKEY_RP_ID = RP; process.env.SIGNING_CEREMONY_ORIGINS = ORIGIN;
+  vi.stubEnv('SECRET_ROOT_KEY', '22'.repeat(32)); vi.stubEnv('PASSKEY_SIGNING_ENABLED', 'true');
+  vi.stubEnv('PASSKEY_RP_ID', RP); vi.stubEnv('SIGNING_CEREMONY_ORIGINS', ORIGIN);
   await cleanDb(db); await upsertPlatformActions(db);
   userId = (await db.user.create({ data: { email: `${generateId()}@s4.test` } })).id;
   appId = (await db.app.create({ data: { ownerUserId: userId, name: 'S4 follow-ups', urn: `${generateId().toLowerCase()}:s4f` } })).id;
   secretId = (await resolvers.Mutation.createSecret({}, { ownerType: 'app', ownerRef: appId, name: 'canary', kind: 'generic', value: 'original' }, ctx())).id;
   await insertSoftPasskey(db, userId, key, { rpId: RP });
 });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
 describe('#4717 item 1: a protected create records its protection', () => {
   it('records the STORE and exactly one PROTECT event', async () => {
@@ -110,14 +112,30 @@ describe('#4717 item 3: a protected create of a taken name refuses at staging', 
 
 describe('#4717 item 4: the change-request objects apply by either path, in either order, twice', () => {
   const read = (p: string) => readFileSync(new URL(`../../../prisma/${p}`, import.meta.url), 'utf8');
-  const MIGRATION = 'migrations/20261120180000_secret_change_requests/migration.sql';
+  // #5392 item 5 (Brooks BLIND P3-7/F8): find the newest carrier the way resolvers.appSecrets3997.test.ts does, instead of a
+  // name updated by hand whenever the carrier moves (#5335 had to repoint this pin at its own migration; a hand-pointed name
+  // keeps testing the OLD migration's file after the source moves, silently). Called INSIDE the tests (#5406 blind F6), so a
+  // missing carrier fails the test, not the collection of the file.
+  const carrierMigration = () => {
+    const invariants = read('secret-change-requests-invariants.sql');
+    const first = invariants.split('\n')[0]!;
+    const migrations = new URL('../../../prisma/migrations/', import.meta.url);
+    // A candidate dir whose migration.sql is unreadable or lacks the header line is not the carrier; if NO candidate
+    // matches, the loud throw below fires rather than a silent pass.
+    const dir = readdirSync(migrations).sort().reverse()
+      .find((d) => { try { return readFileSync(new URL(`${d}/migration.sql`, migrations), 'utf8').includes(first); } catch { return false; } });
+    if (!dir) throw new Error('no migration carries secret-change-requests-invariants.sql');
+    return `migrations/${dir}/migration.sql`;
+  };
   it('the migration and post-push share one source for these objects', () => {
+    const MIGRATION = carrierMigration();
     const invariants = read('secret-change-requests-invariants.sql');
     expect(read(MIGRATION)).toContain(invariants);
     expect(read('post-push.sql')).toContain('\\ir secret-change-requests-invariants.sql');
     expect(read('post-push.sql')).not.toContain('CREATE TABLE IF NOT EXISTS secret_change_requests');
   });
   it('the migration and the shared file apply twice each, in both orders, over a post-push database', async () => {
+    const MIGRATION = carrierMigration();
     // The test database was built by post-push.sql, so every order starts from "post-push applied".
     const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
     await client.connect();

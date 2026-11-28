@@ -43,6 +43,13 @@ const UNGOVERNED_BULK_WRITERS: ReadonlyArray<{ file: string; why: string }> = [
       "(the only way to ensure a parent inside a transaction without aborting it). It copies no node, so there " +
       "is no source row whose role or isRunnable could be carried; it mints a plain nodeType 'system' container.",
   },
+  {
+    file: 'lib/chatbotAncestors.ts',
+    why:
+      "#5390: its one createMany inserts the missing chatbot container parents (`conversations`, `prompts`, " +
+      "`prompts:<name>`) as empty nodeType 'info' rows with ON CONFLICT DO NOTHING, so a concurrent keyless insert of " +
+      "the same root does not abort the write. It copies no node, so there is no source role or isRunnable to carry.",
+  },
 ];
 
 /** The sites we know must be found — the positive control. */

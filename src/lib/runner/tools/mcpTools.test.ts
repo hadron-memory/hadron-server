@@ -64,7 +64,7 @@ describe('unknownMcpToolNames', () => {
     await registerServer({ toolAllowlist: ['generate_image'] });
     await registerServer({ slug: 'disabled', enabled: false });
 
-    const unknown = await unknownMcpToolNames(db, orgId, [
+    const unknown = await unknownMcpToolNames(db, { organizationId: orgId }, [
       'mcp__everart__generate_image', // OK
       'mcp__everart__list_models', // not in allowlist
       'mcp__disabled__anything', // disabled server
@@ -94,7 +94,7 @@ describe('unknownMcpToolNames', () => {
         url: 'https://mcp.everart.example/mcp',
       },
     });
-    expect(await unknownMcpToolNames(db, orgId, ['mcp__everart__generate_image'])).toEqual([
+    expect(await unknownMcpToolNames(db, { organizationId: orgId }, ['mcp__everart__generate_image'])).toEqual([
       'mcp__everart__generate_image',
     ]);
   });

@@ -74,25 +74,25 @@ describe('#40 the oversize rule', () => {
 describe('#40 GraphQL writes warn, never refuse', () => {
   it('create and update over the limit commit and carry the warning; under the limit they do not', async () => {
     const big = '{{x}} ' + 'a'.repeat(40);
-    const created = await execute(CREATE('{ id }'), { i: { memoryId, loc: 'big', name: 'Big', content: big } });
+    const created = await execute(CREATE('{ id }'), { i: { memoryRef: memoryId, loc: 'big', name: 'Big', content: big } });
     expect(created.errors).toBeUndefined();
     expect(codes(created)).toEqual([CODE]);
     const id = (created.data as any).createNode.id;
     expect((await db.node.findUniqueOrThrow({ where: { id } })).content).toBe(big);
 
-    const updated = await execute(UPDATE('{ id }'), { i: { id, content: big + 'b' } });
+    const updated = await execute(UPDATE('{ id }'), { i: { ref: id, content: big + 'b' } });
     expect(updated.errors).toBeUndefined();
     expect(codes(updated)).toEqual([CODE]);
 
-    const small = await execute(CREATE('{ id }'), { i: { memoryId, loc: 'small', name: 'Small', content: '{{x}} ok' } });
+    const small = await execute(CREATE('{ id }'), { i: { memoryRef: memoryId, loc: 'small', name: 'Small', content: '{{x}} ok' } });
     expect(codes(small)).toEqual([]);
-    const plain = await execute(CREATE('{ id }'), { i: { memoryId, loc: 'plain', name: 'Plain', content: 'p'.repeat(40) } });
+    const plain = await execute(CREATE('{ id }'), { i: { memoryRef: memoryId, loc: 'plain', name: 'Plain', content: 'p'.repeat(40) } });
     expect(codes(plain)).toEqual([]);
   });
 
   it('a response that selects content: the write commits, content refuses as a field error, the warning stays', async () => {
     const big = '{{x}} ' + 'a'.repeat(40);
-    const created = await execute(CREATE('{ id content }'), { i: { memoryId, loc: 'big', name: 'Big', content: big } });
+    const created = await execute(CREATE('{ id content }'), { i: { memoryRef: memoryId, loc: 'big', name: 'Big', content: big } });
     expect((created.data as any).createNode.id).toBeTruthy();
     expect((created.data as any).createNode.content).toBeNull();
     expect(created.errors?.map((e) => e.extensions?.code)).toEqual([CONTENT_RESOLUTION_LIMIT_EXCEEDED]);

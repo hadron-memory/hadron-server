@@ -13,9 +13,11 @@ import {
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
-import { listAgentProcesses, listAgentTasks, reverifyServed, type ListedNode } from '../../../lib/agentDefinitionLists.js';
+import { assertAgentTaskSearch, listAgentProcesses, listAgentTasks, reverifyServed, type ListedNode } from '../../../lib/agentDefinitionLists.js';
 import { readAgentRevisionList } from '../../../lib/agentRevisionSnapshot.js';
 import { decryptNodesBatch } from '../../../lib/nodeCrypto.js';
+import { loadAgentInstructions } from '../../../lib/taskMatch/instructions.js';
+import { resolveNodeContent } from '../../../lib/includes/resolveNodeContent.js';
 import { isAgentInstalledAndLicensed } from '../../../lib/appAgent.js';
 import {
   type Context,
@@ -134,7 +136,11 @@ export const agentQueries = {
       const read = await readAgentRevisionList(ctx.db, agent.id);
       // #5039: an Agent deleted (or gone) after the gate answers exactly as the gate answers an unreadable one (no existence oracle).
       if (read.kind === 'absent') throw new AgentNotFoundError(agentRef);
-      if (read.kind === 'no-system-memory') throw new Error('Agent has no system memory');
+      // #5110: typed, so the wire does not mask it as a server fault; repairAgentSystemMemory's code for the same state.
+      // Reached only past the read gate and ADMIN, so it tells a non-manager nothing (cor:dmo:050:23 S5, S6).
+      if (read.kind === 'no-system-memory') {
+        throw new GraphQLError('Agent has no system memory', { extensions: { code: 'AGENT_HAS_NO_SYSTEM_MEMORY', agentId: agent.id } });
+      }
       return read.list;
     },
 
@@ -144,10 +150,29 @@ export const agentQueries = {
      * index lists, each once, with the listing edge's trigger where one exists.
      * hadron_agent_tasks returns the same list (src/lib/agentDefinitionLists.ts).
      */
-    agentTaskList: async (_: unknown, { ref, symptom, limit }: { ref: string; symptom?: string | null; limit?: number | null }, ctx: Context) => {
+    agentTaskList: async (_: unknown, { ref, phrase, limit }: { ref: string; phrase?: string | null; limit?: number | null }, ctx: Context) => {
+      // #5360 B7: the argument check runs BEFORE the ref is resolved (and the gate read), so bad input is named
+      // BAD_USER_INPUT even for an unknown Agent. listAgentTasks re-asserts it for its direct callers.
+      assertAgentTaskSearch({ phrase, limit });
       const { id } = await resolveAgentRef(ctx.db, ref);
-      return listedEntries(ctx, id, await listAgentTasks(ctx.db, ctx, id, ref, { symptom, limit }));
+      return listedEntries(ctx, id, await listAgentTasks(ctx.db, ctx, id, ref, { phrase, limit }));
     },
+
+    /**
+     * #5284 (S4 of #4360; Proposed cor:dmo:050:24) — the role task to follow, with its body, or that no task fits.
+     * The logic is src/lib/taskMatch/instructions.ts; this binds it to the list's own serving path: candidates are
+     * hydrated and re-verified exactly as agentTaskList serves them, and the body is `Node.content`'s own resolution
+     * (resolveNodeContent, includes resolved with the caller's access) of the row served as candidates[0].
+     * hadron_get_instructions calls this resolver.
+     */
+    agentInstructions: async (
+      _: unknown,
+      args: { agentRef?: string | null; appRef?: string | null; phrase?: string | null; eventCode?: string | null },
+      ctx: Context,
+    ) => loadAgentInstructions(ctx, args, {
+      serve: (agentId, entries) => listedEntries(ctx, agentId, entries),
+      body: (served) => resolveNodeContent(ctx, served.node as Parameters<typeof resolveNodeContent>[1]),
+    }),
 
     /**
      * #1892 (cor:dmo:050:16) — an Agent's processes: those it starts or owns
@@ -240,13 +265,13 @@ export const agentQueries = {
 
     // #473 — the uniform paginated agent list. Scope: Agents owned by the
     // caller's member orgs; platform ADMIN/OWNER unscoped get every live
-    // Agent. orgId follows cor:api:100:01 (member -> scope, non-member ->
+    // Agent. orgRef follows cor:api:100:01 (member -> scope, non-member ->
     // empty page, no disclosure, no admin bypass).
     agents: async (
       _: unknown,
       {
         filter,
-        orgId,
+        orgRef,
         limit,
         offset,
       }: {
@@ -255,7 +280,7 @@ export const agentQueries = {
           visibility?: string | null;
           ownedByMe?: boolean | null;
         } | null;
-        orgId?: string | null;
+        orgRef?: string | null;
         limit?: number | null;
         offset?: number | null;
       },
@@ -274,7 +299,7 @@ export const agentQueries = {
         // #782 — the caller's OWN user-owned (org-less) agents only, for ALL
         // callers INCLUDING platform ADMIN/OWNER: owner scope is never an
         // admin-bypass surface (mirrors the owner-only personal/private
-        // memories slice). Org-less by definition, so orgId is not consulted;
+        // memories slice). Org-less by definition, so orgRef is not consulted;
         // App-key callers (no ctx.userId) get an empty page.
         // #876: user-owned agents are identity-scoped, so an impersonated
         // session sees none — matching callerReadableAgentFilter, which drops
@@ -284,10 +309,10 @@ export const agentQueries = {
         if (!ctx.userId || ctx.impersonation) return { items: [], total: 0 };
         where = { ...filters, organizationId: null, ownerUserId: ctx.userId };
       } else {
-        const scope = await resolveOrgScope(ctx, orgId);
+        const scope = await resolveOrgScope(ctx, orgRef);
         if (!scope) return { items: [], total: 0 };
         const scopedToOrg = scope.scopedOrgId != null;
-        // Admin unscoped reach applies only WITHOUT an orgId — the active-org
+        // Admin unscoped reach applies only WITHOUT an orgRef — the active-org
         // selection is a membership concept (cor:api:100:01).
         if (isPlatformAdmin(ctx) && !scopedToOrg) {
           // Every live agent EXCEPT another user's user-owned agent — spec 047
@@ -301,14 +326,14 @@ export const agentQueries = {
             OR: [{ ownerUserId: null }, { ownerUserId: ctx.userId ?? '__none__' }],
           };
         } else {
-          // Org-scoped view. In the DEFAULT (no orgId) view, also surface the
+          // Org-scoped view. In the DEFAULT (no orgRef) view, also surface the
           // caller's OWN user-owned agents (org NULL) — otherwise a personal
           // agent the caller just created is invisible in their agent list. A
           // specific-org selection excludes them (they belong to no org).
           const ownerClauses: Record<string, unknown>[] = [
             { organizationId: { in: scope.memberOrgIds } },
           ];
-          // #876: the DEFAULT view (no orgId) folded the caller's user-owned
+          // #876: the DEFAULT view (no orgRef) folded the caller's user-owned
           // agents in too, so the leak did not require filter.ownedByMe —
           // an unfiltered `agents { items }`, which is what the portal issues,
           // exposed them. Identity-scoped ⇒ dropped under impersonation.
@@ -390,7 +415,7 @@ export const agentQueries = {
         limit,
         offset,
       }: {
-        filter?: { ownerType: AiConfigOwnerType; ownerId: string } | null;
+        filter?: { ownerType: AiConfigOwnerType; ownerRef: string } | null;
         limit?: number | null;
         offset?: number | null;
       },
@@ -400,7 +425,7 @@ export const agentQueries = {
       try {
         let ownerWhere: Record<string, string> = {};
         if (filter) {
-          ({ ownerWhere } = await requireAiConfigOwnerAdmin(ctx, filter.ownerType, filter.ownerId));
+          ({ ownerWhere } = await requireAiConfigOwnerAdmin(ctx, filter.ownerType, filter.ownerRef));
         } else if (!isPlatformAdmin(ctx)) {
           // No owner filter = the cross-owner ops view — platform staff only.
           throw forbiddenError();

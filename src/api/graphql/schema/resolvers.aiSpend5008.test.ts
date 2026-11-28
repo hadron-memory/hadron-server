@@ -11,7 +11,7 @@ import { ApolloServer } from '@apollo/server';
 import { buildASTSchema, isObjectType, isEnumType, getNamedType, isScalarType, parse } from 'graphql';
 
 import { db } from '../../../integrations/db/client.js';
-import { cleanDb } from '../../../test/helpers.js';
+import { cleanDb, createPriceRowForTest } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
 import { typeDefs } from './typeDefs.js';
 import { resolvers, type Context } from './resolvers.js';
@@ -207,7 +207,7 @@ describe('#5008 aiSpend — a missing organization answers as a denied one (P2 o
   it('a platform admin, who passes the gate for every organization, still learns that the reference names nothing', async () => {
     const res = await spend(platformCtx(), { orgRef: 'no-such-org-slug' });
     expect(res.errors?.[0]?.extensions?.code).not.toBe('FORBIDDEN');
-    expect(res.errors?.[0]?.message).toContain('no-such-org-slug');
+    expect(res.errors?.[0]?.message).not.toContain('no-such-org-slug'); // #5168: the ref is not quoted back
   });
 });
 
@@ -278,9 +278,18 @@ describe('#5008 aiSpend — what is left out (pins 5, 6, 11 and the ledger rulin
   });
 
   it('a soft-deleted debit is not charged (the balance leaves it out too)', async () => {
+    // #5010: the database now refuses a soft-deleted entry (CHECK chk_credit_ledger_not_soft_deleted). This pin keeps the
+    // filter honest for a deployment whose migration refused (HDPRF) and still holds one, so it lifts the CHECK for its
+    // own duration and puts it back (a per-worker database, dropped at teardown; the table is truncated before the CHECK is re-added so it validates).
     const id = await ev();
-    await debit(id, 125n, { deletedAt: new Date() });
-    expect(rowOf(summaryOf(await spend(adminACtx())), 'HADRON_SERVER').chargedMicroCents).toBe('0');
+    await db.$executeRawUnsafe('ALTER TABLE credit_ledger_entries DROP CONSTRAINT chk_credit_ledger_not_soft_deleted');
+    try {
+      await debit(id, 125n, { deletedAt: new Date() });
+      expect(rowOf(summaryOf(await spend(adminACtx())), 'HADRON_SERVER').chargedMicroCents).toBe('0');
+    } finally {
+      await db.$executeRawUnsafe('TRUNCATE credit_ledger_entries');
+      await db.$executeRawUnsafe('ALTER TABLE credit_ledger_entries ADD CONSTRAINT chk_credit_ledger_not_soft_deleted CHECK (deleted_at IS NULL)');
+    }
   });
 
   it("another organization's ledger row naming this organization's event is not charged", async () => {
@@ -402,7 +411,7 @@ describe('#5008 aiSpend — ids only, scalars only (pin 10)', () => {
 describe('#5008 aiSpend — a real debit through the write path (pin 12)', () => {
   it('recordLlmUsage on the platform key with debits on shows its cost and the marked-up charge', async () => {
     vi.stubEnv('BILLING_DEBIT_ENABLED', 'true');
-    await db.aiModelPrice.create({
+    await createPriceRowForTest(db, {
       data: {
         id: generateId(), provider: 'anthropic', model: 'claude-spend', tier: 1, inputMicroCentsPerMTok: 30_000_000n, outputMicroCentsPerMTok: 150_000_000n,
         markupBasisPoints: 2500, effectiveAt: new Date('2026-01-01T00:00:00Z'), createdBy: platformAdmin,
@@ -410,7 +419,7 @@ describe('#5008 aiSpend — a real debit through the write path (pin 12)', () =>
     });
     clearPriceCache();
     const rec = await recordLlmUsage(db, {
-      type: 'app-run', organizationId: orgA, provider: 'anthropic', model: 'claude-spend', tokensIn: 1000, tokensOut: 1000, keyOwnerType: 'HADRON_SERVER',
+      type: 'app-run', billableAccount: { organizationId: orgA }, provider: 'anthropic', model: 'claude-spend', tokensIn: 1000, tokensOut: 1000, keyOwnerType: 'HADRON_SERVER',
     });
     expect(rec).not.toBeNull();
     const debitRow = await db.creditLedgerEntry.findFirstOrThrow({ where: { sourceType: 'usage-event', sourceId: rec!.id } });

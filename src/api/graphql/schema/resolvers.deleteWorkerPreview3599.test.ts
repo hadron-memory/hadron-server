@@ -133,7 +133,7 @@ describe('#3599 deleteWorkerPreview contract', () => {
   const refusal = await error(preview(bound({db:client}),f.target.id,instruction));
   expect(deleted).toBe(true);
   // #3608: the preview door answers as the delete would. Other writers keep the fence refusal.
-  expect(refusal).toEqual({message:'Worker not found.',extensions:{code:'WORKER_NOT_FOUND',workerRef:f.target.id}});
+  expect(refusal).toEqual({message:'Worker not found.',extensions:{code:'WORKER_NOT_FOUND'}});
   expect(await db.worker.findUnique({where:{id:f.target.id}})).toBeNull();
   expect(await db.agentTeamEvent.count({where:{appId:f.app.id,type:'worker.instruction-claimed'}})).toBe(0);
   expect(await db.agentTeamEvent.count({where:{appId:f.app.id,type:'worker.deleted'}})).toBe(1);
@@ -226,7 +226,7 @@ describe('#3599 deleteWorkerPreview contract', () => {
    };
    const v=(t as any)[k];return typeof v==='function'?v.bind(t):v;
   }});
-  expect(await error(preview(ctx({db:client})))).toEqual({message:'Worker not found.',extensions:{code:'WORKER_NOT_FOUND',workerRef:f.target.id}});
+  expect(await error(preview(ctx({db:client})))).toEqual({message:'Worker not found.',extensions:{code:'WORKER_NOT_FOUND'}});
  });
  it('an uninstalled App in-use target has byte-identical refusal parity',async()=>{
   await db.node.create({data:{memoryId:f.agent.systemMemoryId,loc:'used',name:'Used',createdByWorkerId:f.target.id}});

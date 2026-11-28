@@ -51,8 +51,16 @@ beforeEach(async () => {
   await db.node.create({ data: { id: generateId(), memoryId: memories.definition, loc: 'conversations:default', name: 'Default', data: { stageOrder: ['start'] } } });
   await db.node.create({ data: { id: generateId(), memoryId: memories.definition, loc: 'conversations:default:start', name: 'Start', content: 'Hello' } });
   await serveEveryAgent(db); // #2712: the chat is served the Agent's boot prompt
-  // Provision through the shipped path, not a synthetic ownership shortcut.
-  await resolvers.Mutation.startChat({}, { agentRef: agentId }, ctx('owner'));
+  // #5394: this provisioned the no-App knowledge holding through the shipped path (the Agent manager's direct route).
+  // That route is retired: a start with no App identified refuses CHAT_APP_NOT_IDENTIFIED and writes nothing, so the
+  // holding is written in the exact shape the retired route wrote (such rows still exist and keep their write rules).
+  const refused = await resolvers.Mutation.startChat({}, { agentRef: agentId }, ctx('owner')).then(() => null, (e: { extensions?: { code?: string } }) => e);
+  expect(refused?.extensions?.code).toBe('CHAT_APP_NOT_IDENTIFIED');
+  expect(await db.memory.count({ where: { userMemoryOfAgentId: agentId } })).toBe(0);
+  await db.memory.create({ data: {
+    id: generateId(), organizationId: orgId, urn: `auth1795.example:${generateId().toLowerCase()}`, name: `Agent — ${users.owner}`,
+    userId: null, class: 'knowledge', visibility: 'ORGANIZATION', userMemoryOfAgentId: agentId, createdBy: users.owner,
+  } });
   memories.holding = (await db.memory.findFirstOrThrow({ where: { userMemoryOfAgentId: agentId, createdBy: users.owner } })).id;
   expect(await db.memory.findUniqueOrThrow({ where: { id: memories.holding } })).toMatchObject({ class: 'knowledge', appId: null, ownerUserId: null, userId: null });
   for (const memoryId of Object.values(memories)) {
@@ -163,7 +171,7 @@ describe('#1795 public GraphQL boundary', () => {
     const { rawKey } = await mintUserApiKey(db, { userId: users.owner, label: null, createdBy: users.owner, issuedVia: 'test' });
     const response = await fetch(`${baseUrl}/graphql`, {
       method: 'POST', headers: { authorization: `Bearer ${rawKey}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ query: 'mutation($input: CreateNodeInput!) { createNode(input: $input) { id } }', variables: { input: { memoryId: memories.holding, loc: 'owner-authored', name: 'Owner authored' } } }),
+      body: JSON.stringify({ query: 'mutation($input: CreateNodeInput!) { createNode(input: $input) { id } }', variables: { input: { memoryRef: memories.holding, loc: 'owner-authored', name: 'Owner authored' } } }),
     });
     const body = await response.json() as { errors?: unknown; data?: { createNode?: { id: string } } };
     expect(response.status).toBe(200);
@@ -180,13 +188,13 @@ describe('#1795 public GraphQL boundary', () => {
     const { rawKey } = await mintUserApiKey(db, { userId: users.contributor, label: null, createdBy: users.contributor, issuedVia: 'test' });
       const response = await fetch(`${baseUrl}/graphql`, {
         method: 'POST', headers: { authorization: `Bearer ${rawKey}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ query: `mutation($input: ${field === 'createNode' ? 'CreateNodeInput' : 'UpdateNodeInput'}!) { ${field}(input: $input) { id } }`, variables: { input: { memoryId, loc, name: 'Changed', content: 'Changed' } } }),
+        body: JSON.stringify({ query: `mutation($input: ${field === 'createNode' ? 'CreateNodeInput' : 'UpdateNodeInput'}!) { ${field}(input: $input) { id } }`, variables: { input: { memoryRef: memoryId, loc, name: 'Changed', content: 'Changed' } } }),
       });
       expect(response.status).toBe(200);
       const body = await response.json() as { errors?: Array<{ extensions?: { code?: string } }>; data?: Record<string, unknown> };
-      // #1807: an uninstalled contributor cannot open the system record;
-      // conceal it rather than distinguishing its write refusal.
-      expect(body.errors?.[0]?.extensions?.code).toBe(key === 'definition' ? 'MEMORY_NOT_FOUND' : 'FORBIDDEN');
+      // #1807: an uninstalled contributor cannot open the system record; conceal it rather than distinguishing its
+      // write refusal. A per-user holding's record is its creator's alone (cor:cht:010:02), so it is concealed the same way.
+      expect(body.errors?.[0]?.extensions?.code).toBe('MEMORY_NOT_FOUND');
       expect(body.data?.[field]).toBeFalsy();
     expect(await db.node.count({ where: { memoryId, loc: 'new' } })).toBe(0);
     expect(await db.node.findUniqueOrThrow({ where: { loc_memoryId: { memoryId, loc: 'existing' } } })).toMatchObject({ name: 'Original', content: 'Original' });

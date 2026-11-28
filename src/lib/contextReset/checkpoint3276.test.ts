@@ -16,6 +16,7 @@ vi.mock('../../services/embedding/enqueue.js',async original=>({...await origina
 import { sweepUnreportedHostOperations } from '../hostOperations/settle.js';
 import { CLAIM_LEASE_MS } from './types.js';
 import { sweepContextResets, registerContextResetRecovery } from './contextReset.js';
+import { joinHostForKey } from '../../test/agentTeamHost.js';
 vi.mock('../../integrations/github/writeNodeToGit.js',()=>({writeNodeToGit:vi.fn().mockResolvedValue(undefined)}));
 vi.mock('../bus/index.js',()=>({getBusClient:vi.fn(async()=>null)}));
 let f:ResetFixture;
@@ -84,7 +85,7 @@ it.each(['epoch','phase','lease','collected','host','app','missing','malformed',
  else if(kind==='lease'){await db.contextReset.update({where:{id:s.resetId},data:{claimedAt:new Date(0)}});p=call(s,{checkpoint:{title:'',content:''}});expected='CLAIM_LAPSED';}
  else if(kind==='collected'){p=call(s,{epoch:0});expected='HOST_OPERATION_NOT_COLLECTED';}
  else if(kind==='host'){const k=await f.hostKey('other');auditKey=k.id;p=call(s,{},k);expected='CONTEXT_RESET_NOT_FOUND';}
- else if(kind==='app'){const other=await db.app.create({data:{organizationId:f.orgId,name:'Other',urn:`other-${generateId()}`}});const key=await db.appKey.create({data:{appId:other.id,keyHash:generateId(),keyPreview:'test'}});auditKey=key.id;await M.grantAppKeyScope({}, {id:key.id,scope:'host:operate',hostId:'orca1'},ctx(f.manager.id));p=M.registerContextResetRecovery({}, {input:{...input(s),appRef:other.id}}, {...f.keyCtx(key),appId:other.id});expected='CONTEXT_RESET_NOT_FOUND';}
+ else if(kind==='app'){const other=await db.app.create({data:{organizationId:f.orgId,name:'Other',urn:`other-${generateId()}`}});const key=await db.appKey.create({data:{appId:other.id,keyHash:generateId(),keyPreview:'test'}});auditKey=key.id;await joinHostForKey(db,key.id,'orca1');await M.grantAppKeyScope({}, {id:key.id,scope:'host:operate',hostId:'orca1'},ctx(f.manager.id));p=M.registerContextResetRecovery({}, {input:{...input(s),appRef:other.id}}, {...f.keyCtx(key),appId:other.id});expected='CONTEXT_RESET_NOT_FOUND';}
  else if(kind==='missing'||kind==='malformed'){p=call(s,{resetId:kind==='missing'?generateId():'invalid/id'});expected='CONTEXT_RESET_NOT_FOUND';}
  else if(kind==='scope'||kind==='revoked'){if(kind==='scope')await M.revokeAppKeyScope({}, {id:f.orca1.id,scope:'host:operate'},ctx(f.manager.id));else await db.appKey.update({where:{id:f.orca1.id},data:{revokedAt:new Date()}});p=call(s);expected='APP_KEY_SCOPE_REQUIRED';}
  else if(kind==='person'){auditKey=null;p=M.registerContextResetRecovery({}, {input:{appRef:f.app.id,...input(s)}},ctx(f.manager.id));}
@@ -105,11 +106,11 @@ it.each([false,true])('generic GraphQL and MCP writes stay refused, claimed=%s',
  for(const mem of memories){
   const node=await f.checkpoint(mem.id),before=await db.node.findMany({orderBy:{id:'asc'}}),edgeCount=await db.edge.count();
   for(const loc of ['ordinary:probe','sheds:auto-test']){
-   await expect(M.createNode({}, {input:{memoryId:mem.id,loc,name:'No',content:'No'}},f.keyCtx())).rejects.toBeDefined();
+   await expect(M.createNode({}, {input:{memoryRef:mem.id,loc,name:'No',content:'No'}},f.keyCtx())).rejects.toBeDefined();
    const text=await server.callToolText('hadron_create_node',{urn:`hrn:node:${mem.urn}:${loc}`,name:'No',content:'No'});
    expect(text).toMatch(/forbidden|not found|cannot write|does not have write/i);
   }
-  await expect(M.updateNode({}, {input:{id:node.id,name:'No'}},f.keyCtx())).rejects.toBeDefined();
+  await expect(M.updateNode({}, {input:{ref:node.id,name:'No'}},f.keyCtx())).rejects.toBeDefined();
   await expect(M.deleteNode({}, {nodeRef:node.id},f.keyCtx())).rejects.toBeDefined();
   for(const verb of ['hadron_update_node','hadron_delete_node']){
    const row=await db.node.findUniqueOrThrow({where:{id:node.id}});

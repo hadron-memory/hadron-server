@@ -5,7 +5,7 @@
  * `matchRunTaskMemoryUrn` (src/mcp/server.ts) parses the hint with the shared
  * URN parser and returns null for every non-memory type
  * (`if (parsed.type !== 'memory') return null;`), so an `hrn:agent:…` hint
- * falls through to loose ranking and answers `No memory matching "<hint>"` —
+ * falls through to loose ranking and answers `No memory matches.` (#5168: the hint is no longer quoted) —
  * exactly the refusal an unknown memory URN gets. Under the URN grammar
  * (hrn:node:hadronmemory.com:specs:cor:urn:010:01) `hrn:agent:<org>:<x>`
  * addresses an Agent, never a memory, so its VALUE (`<org>:<x>`) must never be
@@ -35,8 +35,8 @@ const AGENT_HINT = `hrn:agent:${MEM_URN}`;
 /** A well-formed memory URN that matches nothing: the control refusal. */
 const UNKNOWN_MEM_HINT = `hrn:mem:${ORG_URN}:no-such`;
 /** The exact refusal an unresolvable `memory` hint gets (server.ts). */
-const REFUSAL = (hint: string) =>
-  `No memory matching "${hint}". Use hadron_list_memories to see what is available.`;
+const REFUSAL = (_hint: string) =>
+  'No memory matches. Use hadron_list_memories to see what is available.'; // #5168: the hint is not quoted back
 
 let admin: { id: string };
 

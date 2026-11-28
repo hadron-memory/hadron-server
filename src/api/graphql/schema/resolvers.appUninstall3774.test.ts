@@ -298,7 +298,7 @@ describe('#3774 A1/A4 the gate-named write families: refused while uninstalled, 
       task: () => M.createAgentTask({}, { input: { appRef: app.id, title: 'T3774' } }, ctx(admin.id)),
       appMemory: () => M.createAppMemory({}, { appRef: app.id, name: 'am3774' }, ctx(admin.id)),
       session: () => M.startSession({}, { input: { id: generateId(), tool: 'vitest', appRef: app.id, workerRef: w.id, description: 's' } }, ctx(admin.id)),
-      memoryWrite: () => M.createNode(null, { input: { memoryId: mem.id, loc: `n${generateId().slice(-6).toLowerCase()}`, name: 'n', content: 'c' } }, ctx(admin.id)),
+      memoryWrite: () => M.createNode(null, { input: { memoryRef: mem.id, loc: `n${generateId().slice(-6).toLowerCase()}`, name: 'n', content: 'c' } }, ctx(admin.id)),
       install: () => M.installAgentIntoApp({}, { appRef: app.id, agentRef: agentId }, ctx(admin.id)),
     };
     await M.uninstallApp({}, { ref: app.id }, ctx(admin.id));

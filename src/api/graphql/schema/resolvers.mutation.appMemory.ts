@@ -34,6 +34,8 @@ import { resolveAppInstallation, listAppInstallations } from '../../../lib/appIn
 import { GraphQLError } from 'graphql';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
 import { isRunPrincipal } from '../../../lib/auth/runPrincipal.js';
+import { admitOperationRate } from '../../../lib/rateLimit/index.js';
+import { transportRateIdentity } from '../../../lib/rateLimit/identity.js';
 import { generateId } from '../../../lib/id.js';
 import { mintMemoryUrnV2 } from '../../../lib/mintMemoryUrnV2.js';
 import { Prisma, type EmbeddingSource } from '../../../generated/prisma/index.js';
@@ -45,12 +47,16 @@ import { isAppRefResolutionFailure } from '../../../lib/auth/workerRead.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { AgentNotFoundError } from '../../../lib/entityRef/errors.js';
 import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
-import { agentSlugFromUrn, deriveSlugFromName } from '../../../lib/urn.js';
-import { createNode } from '../../../controller/operations/createNode.js';
+import { agentSlugFromUrn, normalizeUrnForLookup } from '../../../lib/urn.js';
+import { refusedAppUserMemoryPrincipal, heldAppUserMemoryClasses, appAdmitsUserMemories } from './appUserMemoryEligibility.js';
+import { appUserMemorySlug, APP_USER_MEMORY_MAX_TAIL } from '../../../lib/appUserMemoryName.js';
 import { withFsProjectionRollback } from '../../../lib/fsProjectionRollback.js';
-import { reclaimTombstonedMemory } from '../../../lib/mintedSpecPermanence.js';
+import { reclaimTombstonedMemory, SPEC_MINTED_PERMANENT } from '../../../lib/mintedSpecPermanence.js';
 import { assertStorableText } from '../../../lib/unstorableTextInput.js';
-import { type Context, requireOrgRole, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches, assertMemoryRootLoc } from './resolvers.helpers.js';
+import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
+import { managesApp } from '../../../lib/auth/appManagement.js';
+import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
+import { type Context, holdsContentReadIndependently, memoryIdsHeldIndependently, clampListTake, requireOrgRole, requireOwnerOrOrgRole, MEMORY_INCLUDE, concealUnreadableDenial, withoutRequestCaches, deriveMemorySlug } from './resolvers.helpers.js';
 
 /** App-associable memory classes (the DB CHECK forbids app_id only on system). */
 type AppMemoryClass = 'app' | 'knowledge' | 'personal' | 'private';
@@ -198,6 +204,97 @@ async function requireAppMemoryCreator(ctx: Context, app: { organizationId: stri
   else if (!ctx.userId || app.ownerUserId !== ctx.userId) throw authorizationDenied();
 }
 
+
+/** #5183: a collision answer for a personal/private memory carries no URN: the holder may not be the caller's. */
+export function conflictWithoutUrn(): GraphQLError {
+  return new GraphQLError('That memory name is taken. Try again.', { extensions: { code: 'MEMORY_URN_CONFLICT' } });
+}
+
+/**
+ * Remove every one of the caller's own tombstones in `ids`, all or none. A tombstone the reclaim refuses because it holds a
+ * question (QUESTION_CONTAINED) or a protected minted spec (SPEC_MINTED_PERMANENT) answers false with nothing removed: a
+ * savepoint undoes any tombstone already removed. Any other error undoes the savepoint too, then rethrows.
+ */
+async function reclaimAllOrKeep(tx: Prisma.TransactionClient, ids: string[], userId: string): Promise<boolean> {
+  await tx.$executeRaw`SAVEPOINT app_user_memory_reclaim`;
+  try {
+    for (const id of [...ids].sort((x, y) => x.localeCompare(y))) await reclaimTombstonedMemory(tx, id, [userId]);
+  } catch (e) {
+    await tx.$executeRaw`ROLLBACK TO SAVEPOINT app_user_memory_reclaim`;
+    const held = e instanceof GraphQLError
+      && (e.extensions?.code === 'QUESTION_CONTAINED' || e.extensions?.code === SPEC_MINTED_PERMANENT);
+    if (held) return false;
+    throw e;
+  }
+  await tx.$executeRaw`RELEASE SAVEPOINT app_user_memory_reclaim`;
+  return true;
+}
+
+/** A P2002 whose violated unique is the memory URN (Prisma reports the column list, or the index name, in meta.target). */
+export function isUrnUniqueViolation(err: unknown): boolean {
+  if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') return false;
+  const target = err.meta?.target;
+  const names = Array.isArray(target) ? target.map(String) : [String(target ?? '')];
+  // Exactly the memories.urn unique: the column list or its index name. A substring match would also take another constraint (e.g. a legacy_urn one).
+  return names.some((n) => n === 'urn' || n === 'memories_urn_key');
+}
+
+type UrnBlocker = { id: string; userId: string | null; appId: string | null; class: string; deletedAt: Date | null };
+
+/**
+ * #5183: every memory that holds `urn` as its `urn` or `legacyUrn` (live or soft-deleted) or that an alias row of type
+ * MEMORY points the URN at. The mint takes a candidate only when this list is empty, or holds only the caller's own
+ * soft-deleted memory of the same App and class, which the caller reclaims.
+ */
+async function findUrnBlockers(tx: Prisma.TransactionClient, urn: string): Promise<UrnBlocker[]> {
+  const select = { id: true, userId: true, appId: true, class: true, deletedAt: true } as const;
+  const direct = await tx.memory.findMany({ where: { OR: [{ urn }, { legacyUrn: urn }] }, select });
+  const aliases = await tx.urnAlias.findMany({
+    where: { urn: normalizeUrnForLookup(urn), entityType: 'MEMORY' },
+    select: { entityId: true },
+  });
+  const known = new Set(direct.map((m) => m.id));
+  const viaAlias = aliases.filter((a) => !known.has(a.entityId)).map((a) => a.entityId);
+  const aliased = viaAlias.length > 0 ? await tx.memory.findMany({ where: { id: { in: viaAlias } }, select }) : [];
+  // An alias whose memory row no longer exists (hard-deleted, e.g. reclaimed) resolves to nothing: it is not a holder.
+  return [...direct, ...aliased];
+}
+
+/**
+ * #5183 (cor:dmo:060:20): the derived address of a person's personal or private memory in an App: the first free
+ * `<handle>:<app>-<handle>-<class>[-n]` whose only holders, if any, are the person's OWN soft-deleted memory of this App
+ * and class (reclaimed to make room, R6). Run inside the authority transaction after the caller's app_members row is
+ * locked and the one-per-class count is judged, so a handle or App rename that won the race is seen. Shared by
+ * createMemoryInApp and, #5027, startChat's Agent default home. No free tail is the URN-free conflict answer.
+ */
+export async function mintAppUserMemoryAddress(
+  tx: Prisma.TransactionClient,
+  appId: string,
+  userId: string,
+  klass: 'personal' | 'private',
+): Promise<{ urn: string; name: string }> {
+  const lockedApp = await tx.app.findUniqueOrThrow({ where: { id: appId }, select: { urn: true } });
+  const owner = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { handle: true } });
+  const appSlug = lockedApp.urn.split(':').pop()!;
+  for (let n = 1; n <= APP_USER_MEMORY_MAX_TAIL; n++) {
+    const candidate = appUserMemorySlug({ appSlug, handle: owner.handle, memoryClass: klass }, n);
+    const urn = `${owner.handle}:${candidate}`;
+    const blockers = await findUrnBlockers(tx, urn);
+    if (blockers.length > 0) {
+      // Taken, unless every holder is the caller's OWN soft-deleted memory of this App and class (R6): that row is
+      // removed to make room. Any other holder (another user's tombstone included) is taken, and nothing of it is touched.
+      const ownTombstones = blockers.filter((b) =>
+        b.deletedAt !== null && b.userId === userId && b.appId === appId && b.class === klass);
+      if (ownTombstones.length !== blockers.length) continue;
+      // A tombstone the reclaim refuses to remove keeps its address: that candidate is taken and the next tail is
+      // tried, so a name collision never refuses (R2).
+      if (!(await reclaimAllOrKeep(tx, ownTombstones.map((b) => b.id), userId))) continue;
+    }
+    return { urn, name: candidate };
+  }
+  throw conflictWithoutUrn();
+}
+
 export const appMemoryMutations = {
   /**
    * #2661 / cor:acl:010:01: NEW free-standing app memory, not an Agent's
@@ -227,8 +324,8 @@ export const appMemoryMutations = {
     if (observed.deletedAt || observed.uninstalledAt) throw authorizationDenied();
     await requireAppMemoryCreator(ctx, observed);
     if (!name.trim()) throw new GraphQLError('Memory name must not be empty.', { extensions: { code: 'BAD_USER_INPUT' } });
-    // #2730: refuse an unprojectable root after authorization, before any write.
-    assertMemoryRootLoc(name);
+    // #5149: the name's only refusals besides empty, after authorization and before any write.
+    const desiredSlug = deriveMemorySlug(name);
     assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
     return withFsProjectionRollback(() => withAuthorizedTx(ctx, [
       ...(observed.organizationId ? [{ kind: 'org' as const, id: observed.organizationId }] : []),
@@ -254,7 +351,7 @@ export const appMemoryMutations = {
         ? (await tx.organization.findUniqueOrThrow({ where: { id: locked.organizationId }, select: { urn: true } })).urn
         : locked.urn.split(':')[0]!;
       const urn = await mintMemoryUrnV2(tx, {
-        root, desiredSlug: deriveSlugFromName(name), authorRoot: locked.urn.split(':').pop()!,
+        root, desiredSlug, authorRoot: locked.urn.split(':').pop()!,
       });
       const memory = await tx.memory.create({ data: {
         id: generateId(), organizationId: observed.organizationId, ownerUserId: observed.ownerUserId, appId: id,
@@ -262,8 +359,9 @@ export const appMemoryMutations = {
         visibility: null, isInstallMemory: false, installOfAgentId: null,
         createdBy: ctx.userId,
       }, include: MEMORY_INCLUDE });
-      await createNode({ memoryId: memory.id, loc: name, name: name.split(':').pop() ?? name,
-        description: 'Root node for this memory.' }, tx);
+      // #3952 (R11): no root node on create. The memory row is this door's ONLY write: no org defaults, owner or
+      // member row, agent grant or audit row follows it, so there is no later step whose failure needs a rollback pin
+      // (resolvers.noRootNode3952.test.ts pins the doors that do have one). A write added after this row needs that pin.
       return memory;
     }));
   },
@@ -286,7 +384,7 @@ export const appMemoryMutations = {
       appRef: string;
       agentRef: string;
       memoryClass: string;
-      name: string;
+      name?: string | null;
       shortDescription?: string;
       description?: string;
       data?: unknown;
@@ -318,68 +416,50 @@ export const appMemoryMutations = {
       });
     }
 
+    const isUserOwned = klass === 'personal' || klass === 'private';
+    // #5183 (cor:dmo:060:20 S12, "Person only"): only the signed-in member acting as themselves creates a personal or
+    // private memory. A run principal (even one carrying the member's user id), a worker session, a refused session
+    // binding, an App key and an impersonation are refused the way createAppMemory refuses them, before any read of
+    // the App. No user id at all keeps its own UNAUTHENTICATED answer from the class gate below.
+    if (isUserOwned && ctx.userId && refusedAppUserMemoryPrincipal(ctx)) {
+      throw authorizationDenied();
+    }
+
     const app = await loadAppAndAuthorize(ctx, appRef, klass);
     const agent = await resolveInstalledAgent(ctx, app.id, agentRef);
-    // #2730: the root node's loc is `name`; refuse an unprojectable one after the
-    // gates and before the tombstone reclaim or any create.
-    assertMemoryRootLoc(name);
-    assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
-    const agentSlug = agentSlugFromUrn(agent.urn);
-    const slug = deriveSlugFromName(name);
-
-    // URN uses a registered role marker so :↔:: canonicalization stays correct
-    // (MEMORY_ROLE_MARKERS). app-class is shared and name-addressable, hung under
-    // the App URN (distinct from the runtime `:shared` memory); a duplicate name
-    // is a real conflict. personal/private are per-owner, so the URN MUST be
-    // owner-unique — reuse the runtime per-user scheme (`app-user:<opaqueId>`,
-    // hung under the org URN) rather than the name-slug, so two members can name
-    // their own memories the same and one owner's names never leak to another.
-    const isUserOwned = klass === 'personal' || klass === 'private';
-    if (isUserOwned && !app.organizationUrn) {
+    // A user-owned App is A4's (#5186): its personal/private creation stays refused.
+    if (isUserOwned && !appAdmitsUserMemories(app)) {
       throw new GraphQLError(
         'Personal/private App-scoped memories are not yet supported for a user-owned App.',
         { extensions: { code: 'BAD_USER_INPUT' } },
       );
     }
-    // #697 Stage 3: mint a FLAT single-atom v2 urn (`<root>:<slug>`). The
-    // app-user/app-mem scope lives in the row columns (class/appId/userId/
-    // userMemoryOfAgentId), not the URN path, so node URNs in the memory
-    // round-trip through splitNodeUrn. Root is the owning org or user (from
-    // the App URN); the Memory inherits the matching tenant-owner column.
-    const memRoot = app.organizationUrn ?? app.urn.split(':')[0]!;
-    // Recreate-after-delete keeps its clean slug: hard-delete an EXACT
-    // soft-deleted collision on the desired slug before minting, so the mint
-    // reuses the freed slug rather than aliasing around its own tombstone.
-    // (app-user's fresh opaque id can't collide, so this only ever fires for a
-    // named app-mem slug.)
-    const desiredSlug = isUserOwned ? generateId() : slug;
-    const tombstone = await ctx.db.memory.findFirst({
-      where: { urn: `${memRoot}:${desiredSlug}`, deletedAt: { not: null } },
-      select: { id: true },
-    });
-    // #1468 — refused for a stamped corpus still holding a spec.
-    if (tombstone) await ctx.db.$transaction((tx) => reclaimTombstonedMemory(tx, tombstone.id));
-    // A LIVE collision on a name-addressable app-mem slug now DETERMINISTICALLY
-    // aliases (`<slug>-<agent>`) via mintLocalSlug — replacing the pre-v2 hard
-    // MEMORY_URN_CONFLICT — so two apps/agents in one org can each name a memory
-    // the same (they differ by the `appId`/agent columns). The mint probe covers
-    // live + soft-deleted rows, so the minted urn is never already occupied.
-    const memoryUrn = await mintMemoryUrnV2(ctx.db, {
-      root: memRoot,
-      desiredSlug,
-      authorRoot: agentSlug,
-    });
+    // #5183: a personal or private memory's slug and display name are derived by the server; `name` sets neither and
+    // is not judged. app and knowledge keep the caller's name, so a missing one is refused after the gates.
+    let slug = '';
+    if (!isUserOwned) {
+      if (name == null) {
+        throw new GraphQLError('A name is required for an app or knowledge memory.', { extensions: { code: 'BAD_USER_INPUT' } });
+      }
+      // #5149: the name's only refusals, after the gates and before any create (#5203 S3 removed the tombstone reclaim).
+      slug = deriveMemorySlug(name);
+    }
+    assertStorableText({ shortDescription, description, tags }); // #4106: caller text, refused typed before any write
+    const agentSlug = agentSlugFromUrn(agent.urn);
 
-    let memory;
-    try {
-      memory = await withFsProjectionRollback(() => withAppMemoryAuthorityTx(ctx, app, agent.id, klass, async (tx) => {
+    // The write shared by both paths: the row's columns are the caller's, `urn`/`name`/tenancy/marker come from the path.
+    const createRow = async (
+      tx: Prisma.TransactionClient,
+      own: { urn: string; name: string; organizationId: string | null; ownerUserId: string | null; appUserMemory: boolean },
+    ) => {
       const created = await tx.memory.create({
         data: {
           id: generateId(),
-          organizationId: app.organizationId,
-          ownerUserId: app.ownerUserId,
-          urn: memoryUrn,
-          name,
+          organizationId: own.organizationId,
+          ownerUserId: own.ownerUserId,
+          urn: own.urn,
+          name: own.name,
+          appUserMemory: own.appUserMemory,
           shortDescription,
           description,
           ...(data !== undefined ? { data: data as InputJsonValue } : {}),
@@ -420,12 +500,83 @@ export const appMemoryMutations = {
           },
         });
       }
-      // #2728: the root node joins the anchored transaction (as createAppMemory's does), so a root failure rolls
-      // the Memory back and a retry cannot mint a second one.
-      await createNode({ memoryId: created.id, loc: name, name: name.split(':').pop() ?? name,
-        description: 'Root node for this memory.' }, tx);
+      // #3952 (R11): no root node on create.
       return created;
-      }));
+    };
+
+    if (isUserOwned) {
+      // #5183: a personal or private memory is always the person's own: owner and tenant are the user, the URN roots
+      // on their handle. One live marked memory per (App, user, class); the name is derived INSIDE the authority
+      // transaction, after every wait, so a handle or App rename that won the race is seen.
+      const memoryClass2 = klass as 'personal' | 'private';
+      // A concurrent create in ANOTHER App of the same slug can take our candidate between the probe and the insert
+      // (the two lock different member rows). The loser re-runs the whole transaction and takes the next tail:
+      // a name collision never refuses (R2).
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          return await withFsProjectionRollback(() => withAppMemoryAuthorityTx(ctx, app, agent.id, klass, async (tx) => {
+            // Lock order: advisory anchors, org/user/App/Agent rows FOR SHARE (the helper), then the caller's
+            // app_members row, then an own tombstone row. A merge holds the users rows first, so this never
+            // takes app_members before the helper.
+            const member = await tx.$queryRaw<Array<{ user_id: string }>>`
+              SELECT user_id FROM app_members WHERE app_id = ${app.id} AND user_id = ${ctx.userId!} FOR UPDATE`;
+            if (member.length === 0) {
+              throw new GraphQLError(
+                'You must be a member of this App to add a personal/private memory to it.',
+                { extensions: { code: 'FORBIDDEN' } },
+              );
+            }
+            // A new statement after the lock: READ COMMITTED sees a winner that committed while we waited.
+            if ((await heldAppUserMemoryClasses(tx, app.id, ctx.userId!)).includes(memoryClass2)) {
+              throw new GraphQLError(
+                `You already have a ${klass} memory in this App.`,
+                { extensions: { code: 'APP_USER_MEMORY_ALREADY_EXISTS', memoryClass: klass } },
+              );
+            }
+            const own = await mintAppUserMemoryAddress(tx, app.id, ctx.userId!, memoryClass2);
+            return createRow(tx, { ...own, organizationId: null, ownerUserId: ctx.userId!, appUserMemory: true });
+          }));
+        } catch (err) {
+          // Only a collision on the URN is a name collision: any other unique violation is a real fault.
+          if (isUrnUniqueViolation(err)) {
+            if (attempt < 2) continue;
+            throw conflictWithoutUrn();
+          }
+          throw err;
+        }
+      }
+      // Unreachable: the last attempt returns or throws. Kept so the function's return type is total.
+      throw conflictWithoutUrn();
+    }
+
+    // app / knowledge: unchanged. URN uses a registered role marker so :↔:: canonicalization stays correct
+    // (MEMORY_ROLE_MARKERS). app-class is shared and name-addressable, hung under
+    // the App URN (distinct from the runtime `:shared` memory); a duplicate name
+    // is a real conflict.
+    // #697 Stage 3: mint a FLAT single-atom v2 urn (`<root>:<slug>`). The
+    // app-user/app-mem scope lives in the row columns (class/appId/userId/
+    // userMemoryOfAgentId), not the URN path, so node URNs in the memory
+    // round-trip through splitNodeUrn. Root is the owning org or user (from
+    // the App URN); the Memory inherits the matching tenant-owner column.
+    const memRoot = app.organizationUrn ?? app.urn.split(':')[0]!;
+    // #5203 S3: the slug is derived from the name, so a deleted holder of it is never reclaimed: the mint aliases
+    // past it like a live one, which keeps the deleted memory restorable (hrn:node:hadronmemory.com:specs:cor:urn:010:01;
+    // gate answers on #5203, section 3). A collision, live or deleted, DETERMINISTICALLY aliases (`<slug>-<agent>`)
+    // via mintLocalSlug, and so does a reserved word, so two apps/agents in one org can each name a memory the same
+    // (they differ by the `appId`/agent columns). The personal and private classes take the #5183 path above.
+    const desiredSlug = slug;
+    const memoryUrn = await mintMemoryUrnV2(ctx.db, {
+      root: memRoot,
+      desiredSlug,
+      authorRoot: agentSlug,
+    });
+
+    let memory;
+    try {
+      memory = await withFsProjectionRollback(() => withAppMemoryAuthorityTx(ctx, app, agent.id, klass, async (tx) =>
+        createRow(tx, {
+          urn: memoryUrn, name: name!, organizationId: app.organizationId, ownerUserId: app.ownerUserId, appUserMemory: false,
+        })));
     } catch (err) {
       // Race backstop: a concurrent create claimed the just-minted urn between
       // the mint probe and this insert (mintMemoryUrnV2 aliases around known
@@ -441,93 +592,259 @@ export const appMemoryMutations = {
     return memory;
   },
 
+  /**
+   * #5185 (A3 of #5182; cor:dmo:060:20, "An attached memory"): LINK a memory the caller can read to an App. The memory row is not
+   * written. The App's key and userless runs may then READ it (`src/lib/appMemoryLinks.ts` is the one judge of that, at use).
+   * `agentRef` is accepted and ignored so deployed clients keep working.
+   *
+   * Judged top to bottom before any write, and again inside the authority transaction:
+   *   person only (UNAUTHENTICATED / FORBIDDEN) -> memory unknown, deleted or unreadable in the caller's OWN right (one
+   *   MEMORY_NOT_FOUND) -> class `system` (UNSUPPORTED_MEMORY_CLASS) -> App unknown, deleted or the caller not a member (one
+   *   FORBIDDEN) -> uninstalled App (APP_UNINSTALLED). A link already held is success with nothing written.
+   */
   attachMemoryToApp: async (
     _: unknown,
-    { memoryRef, appRef, agentRef }: { memoryRef: string; appRef: string; agentRef: string },
+    { memoryRef, appRef }: { memoryRef: string; appRef: string; agentRef?: string | null },
     ctx: Context,
   ) => {
+    if (!ctx.userId) {
+      throw new GraphQLError('Attaching a memory to an App requires a signed-in user.', { extensions: { code: 'UNAUTHENTICATED' } });
+    }
+    if (ctx.appKeyId || ctx.sessionId || ctx.sessionBindingRefused || ctx.impersonation || isRunPrincipal(ctx)) {
+      throw authorizationDenied();
+    }
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
-    const memory = await ctx.db.memory.findUniqueOrThrow({
-      where: { id: memoryId },
-      select: { id: true, class: true, appId: true, userId: true, organizationId: true },
+    const memory = await ctx.db.memory.findUniqueOrThrow({ where: { id: memoryId }, select: { class: true } });
+    const notFound = () => new MemoryNotFoundError(memoryRef);
+    if (!(await holdsContentReadIndependently(ctx, memoryId))) throw notFound();
+    if (memory.class === 'system') {
+      throw new GraphQLError('A system memory cannot be attached to an App.', {
+        extensions: { code: 'UNSUPPORTED_MEMORY_CLASS', memoryClass: 'system' },
+      });
+    }
+    const app = await resolveAttachApp(ctx, appRef);
+    const anchors = (memoryOwner: { organizationId: string | null; ownerUserId: string | null; userId: string | null }) => [
+      { kind: 'app' as const, id: app.id },
+      ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+      ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+      { kind: 'memory' as const, id: memoryId },
+      ...(memoryOwner.organizationId ? [{ kind: 'org' as const, id: memoryOwner.organizationId }] : []),
+      ...(memoryOwner.ownerUserId ? [{ kind: 'user' as const, id: memoryOwner.ownerUserId }] : []),
+      ...(memoryOwner.userId ? [{ kind: 'user' as const, id: memoryOwner.userId }] : []),
+    ];
+    const owner = await ctx.db.memory.findUniqueOrThrow({
+      where: { id: memoryId }, select: { organizationId: true, ownerUserId: true, userId: true },
     });
-
-    // OWNERSHIP FIRST — before revealing anything about the memory's class or
-    // app-scoped state. Attach is owner-only, so a non-owner must get a uniform
-    // FORBIDDEN whatever the memory is; leaking class/appId here would let any
-    // caller enumerate other users' (incl. private) memories.
-    // #1381: a caller who cannot open this memory gets resolveMemoryRef's miss.
-    await concealUnreadableDenial(ctx, memoryId, memoryRef, async () => {
-      if (!ctx.userId || memory.userId !== ctx.userId) {
-        throw new GraphQLError('You can only attach a memory you own.', {
-          extensions: { code: 'FORBIDDEN' },
-        });
-      }
-    });
-
-    // Attach only applies to the owner-owned free-standing classes.
-    if (memory.class !== 'personal' && memory.class !== 'private') {
-      throw new GraphQLError(
-        `Only personal/private memories can be attached to an App; this memory is class='${memory.class}'.`,
-        { extensions: { code: 'UNSUPPORTED_MEMORY_CLASS' } },
-      );
-    }
-    if (memory.appId) {
-      throw new GraphQLError('This memory is already scoped to an App.', {
-        extensions: { code: 'MEMORY_ALREADY_APP_SCOPED' },
-      });
-    }
-
-    // Authorize against the target App (App membership — personal/private path).
-    const app = await loadAppAndAuthorize(ctx, appRef, memory.class as AppMemoryClass);
-    const agent = await resolveInstalledAgent(ctx, app.id, agentRef);
-
-    if (memory.organizationId !== app.organizationId) {
-      throw new GraphQLError("The memory does not belong to this App's organization.", {
-        extensions: { code: 'ORGANIZATION_MISMATCH' },
-      });
-    }
-
-    // Transfer can change the owner, class and organization after the
-    // preflight checks. Recheck them under its Memory-row fence before setting
-    // the App/Agent pivot; a stale attachment must not scope the new tenant's
-    // knowledge or group memory to the former tenant's App.
-    return withAppMemoryAuthorityTx(ctx, app, agent.id, memory.class as AppMemoryClass, async (tx) => {
-      await tx.$queryRaw`SELECT id FROM memories WHERE id = ${memory.id} FOR NO KEY UPDATE`;
-      const current = await tx.memory.findUniqueOrThrow({
-        where: { id: memory.id },
-        select: { class: true, appId: true, userId: true, organizationId: true, deletedAt: true },
-      });
-      const txCtx = withoutRequestCaches(ctx, tx);
-      await concealUnreadableDenial(txCtx, memoryId, memoryRef, async () => {
-        if (!ctx.userId || current.deletedAt || current.userId !== ctx.userId) {
-          throw new GraphQLError('You can only attach a memory you own.', {
-            extensions: { code: 'FORBIDDEN' },
+    // The anchors fence a transfer, an App delete and the loss of membership: the second of two such writers waits here, and
+    // the judgement below is repeated on the transaction's own view.
+    return withAuthorizedTx(
+      ctx,
+      anchors(owner),
+      async (txCtx) => {
+        const live = await txCtx.db.memory.findFirst({ where: { id: memoryId, deletedAt: null }, select: { class: true } });
+        if (!live || !(await holdsContentReadIndependently(withoutRequestCaches(txCtx, txCtx.db), memoryId))) throw notFound();
+        if (live.class === 'system') {
+          throw new GraphQLError('A system memory cannot be attached to an App.', {
+            extensions: { code: 'UNSUPPORTED_MEMORY_CLASS', memoryClass: 'system' },
           });
         }
-      });
-      if (current.class !== 'personal' && current.class !== 'private') {
-        throw new GraphQLError(`Only personal/private memories can be attached to an App; this memory is class='${current.class}'.`, {
-          extensions: { code: 'UNSUPPORTED_MEMORY_CLASS' },
+        // The App, re-read under its anchor: a delete or an uninstall that committed while this waited ends the attach.
+        const liveApp = await txCtx.db.app.findUnique({ where: { id: app.id }, select: { deletedAt: true, uninstalledAt: true } });
+        if (!liveApp || liveApp.deletedAt) throw authorizationDenied();
+        await requireAttachMembership(txCtx, app.id);
+        if (liveApp.uninstalledAt) {
+          throw new GraphQLError('This App has been uninstalled and cannot be written to.', { extensions: { code: 'APP_UNINSTALLED' } });
+        }
+      },
+      async (tx) => {
+        await tx.appMemoryLink.createMany({
+          data: [{ appId: app.id, memoryId, attachedBy: ctx.userId! }],
+          skipDuplicates: true,
         });
-      }
-      if (current.appId) {
-        throw new GraphQLError('This memory is already scoped to an App.', {
-          extensions: { code: 'MEMORY_ALREADY_APP_SCOPED' },
-        });
-      }
-      if (current.organizationId !== app.organizationId) {
-        throw new GraphQLError("The memory does not belong to this App's organization.", {
-          extensions: { code: 'ORGANIZATION_MISMATCH' },
-        });
-      }
-      // Keep URN/class/userId. Setting the agent satisfies
-      // chk_memory_personal_agent_id (app-scoped ⇒ agent required).
-      return tx.memory.update({
-        where: { id: memory.id },
-        data: { appId: app.id, userMemoryOfAgentId: agent.id, updatedBy: ctx.userId },
-        include: MEMORY_INCLUDE,
-      });
+        return tx.memory.findUniqueOrThrow({ where: { id: memoryId }, include: MEMORY_INCLUDE });
+      },
+      // The anchor would refuse a deleted or uninstalled App with its own FORBIDDEN; the judgement above answers it, so a
+      // member of an uninstalled App still gets APP_UNINSTALLED (table row 6) when the uninstall lands during the wait.
+      { allowInactiveApp: true },
+    );
+  },
+
+  /**
+   * #5185: remove links, never the memory. The attacher removes their own link (even after losing read); the memory's strict
+   * owner and the person who manages the App remove every link of that memory in that App. A caller with no authority over
+   * the link gets FORBIDDEN when they can read the memory and MEMORY_NOT_FOUND when they cannot (the same answer as an
+   * unknown memory); an unknown or deleted App answers like that too (the memory is judged first, so the App side is no existence
+   * oracle). No link to remove is success. The links of a soft-deleted memory cannot be detached (the anchor refuses it); they sit
+   * inert until the memory is restored or hard-deleted.
+   */
+  detachMemoryFromApp: async (
+    _: unknown,
+    { memoryRef, appRef }: { memoryRef: string; appRef: string },
+    ctx: Context,
+  ) => {
+    if (!ctx.userId) {
+      throw new GraphQLError('Detaching a memory from an App requires a signed-in user.', { extensions: { code: 'UNAUTHENTICATED' } });
+    }
+    if (ctx.appKeyId || ctx.sessionId || ctx.sessionBindingRefused || ctx.impersonation || isRunPrincipal(ctx)) {
+      throw authorizationDenied();
+    }
+    // The memory first, as attach does: a caller who cannot read it gets the missing-memory answer whatever the App, so the
+    // App-side answer is never an existence oracle for someone who has nothing to do with the memory.
+    const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
+    const missingApp = async (): Promise<never> => {
+      if (await holdsContentReadIndependently(ctx, memoryId)) throw authorizationDenied();
+      throw new MemoryNotFoundError(memoryRef);
+    };
+    let appId: string;
+    try { ({ id: appId } = await resolveAppRef(ctx.db, appRef)); }
+    catch (error) {
+      if (isAppRefResolutionFailure(error)) return missingApp();
+      throw error;
+    }
+    const app = await ctx.db.app.findUniqueOrThrow({
+      where: { id: appId }, select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true },
     });
+    if (app.deletedAt) return missingApp();
+    const first = await ctx.db.memory.findUniqueOrThrow({
+      where: { id: memoryId }, select: { organizationId: true, ownerUserId: true, userId: true },
+    });
+    const notFound = () => new MemoryNotFoundError(memoryRef);
+    // Judged on the rows as the given context sees them (inside the transaction: re-read, never the pre-lock copies).
+    //   owner:    the memory's owner, an administrator of the memory's organization, or the person who manages the App:
+    //             every link of that memory in that App
+    //   attacher: only their own link
+    const authority = async (c: Context): Promise<'owner' | 'attacher' | null> => {
+      const memory = await c.db.memory.findUnique({ where: { id: memoryId }, select: { organizationId: true, ownerUserId: true, userId: true, deletedAt: true } });
+      const currentApp = await c.db.app.findUnique({ where: { id: appId }, select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true } });
+      if (!memory || memory.deletedAt || !currentApp || currentApp.deletedAt) return null;
+      if (memory.userId === ctx.userId || memory.ownerUserId === ctx.userId) return 'owner';
+      // c.roles: inside the transaction these are the transaction context's reloaded platform roles, never the request's.
+      if (await managesApp({ db: c.db, userId: ctx.userId, roles: c.roles }, currentApp)) return 'owner';
+      if (memory.organizationId) {
+        const admin = await c.db.orgMember.findFirst({
+          where: { organizationId: memory.organizationId, userId: ctx.userId!, ...LIVE_ORG_MEMBERSHIP, role: { in: ['ADMIN', 'OWNER'] } },
+          select: { userId: true },
+        });
+        if (admin) return 'owner';
+      }
+      const own = await c.db.appMemoryLink.findUnique({
+        where: { appId_memoryId_attachedBy: { appId, memoryId, attachedBy: ctx.userId! } }, select: { appId: true },
+      });
+      return own ? 'attacher' : null;
+    };
+    const denyOrHide = async (c: Context) => {
+      if (await holdsContentReadIndependently(withoutRequestCaches(c, c.db), memoryId)) throw authorizationDenied();
+      throw notFound();
+    };
+    if (!(await authority(ctx))) return denyOrHide(ctx);
+    return withAuthorizedTx(
+      ctx,
+      [
+        { kind: 'app', id: app.id },
+        ...(app.organizationId ? [{ kind: 'org' as const, id: app.organizationId }] : []),
+        ...(app.ownerUserId ? [{ kind: 'user' as const, id: app.ownerUserId }] : []),
+        { kind: 'memory', id: memoryId },
+        ...(first.organizationId ? [{ kind: 'org' as const, id: first.organizationId }] : []),
+        ...(first.ownerUserId ? [{ kind: 'user' as const, id: first.ownerUserId }] : []),
+        ...(first.userId ? [{ kind: 'user' as const, id: first.userId }] : []),
+      ],
+      async (txCtx) => {
+        if (!(await authority(txCtx))) await denyOrHide(txCtx);
+      },
+      async (tx, txCtx) => {
+        const kind = await authority(txCtx);
+        // Fails closed: no authority here removes nothing, and only an owner or manager removes every link of the memory.
+        if (kind === null) throw authorizationDenied();
+        await tx.appMemoryLink.deleteMany({
+          where: { appId, memoryId, ...(kind === 'attacher' ? { attachedBy: ctx.userId! } : {}) },
+        });
+        return true;
+      },
+    );
   },
 };
+
+/** Classes the attachable-memory picker never offers: `system` (refused by attach) and `app` (R3, Decided; cor:dmo:060:22). */
+const UNATTACHABLE_CLASSES = ['system', 'app'] as const;
+
+/**
+ * #5393 (hrn:node:hadronmemory.com:specs:cor:dmo:060:22; envelope hrn:node:hadronmemory.com:specs:cor:api:120:02): the
+ * attachable-memory picker's search door, `attachableMemories(appRef, query, limit, offset)`. One page of the memories the
+ * caller could attach to the App with `attachMemoryToApp`.
+ *
+ * Judged in `attachMemoryToApp`'s own order with its own predicates, so the door has no gate of its own to drift:
+ *   person only (UNAUTHENTICATED / one FORBIDDEN for an App key, worker session, impersonation or run; these read nothing)
+ *   -> one FAN_OUT_READS admission (the #1793 findNodes pattern; a refused call reads nothing) -> `resolveAttachApp`
+ *   (unknown, deleted or not a member: one FORBIDDEN; uninstalled: APP_UNINSTALLED).
+ * Candidates are `memoryIdsHeldIndependently`, the enumeration `holdsContentReadIndependently` judges one row of, minus deleted
+ * rows, classes `system` and `app`, and every memory with ANY link row for this App (any attacher, active or inactive: a
+ * surface never offers a memory as attachable while its attachment exists). `query` is a case-insensitive contains over the
+ * name or the URN (a leading `hrn:mem:` is ignored for the URN, which is stored without it); blank means no text filter.
+ * Ordered by name then id; limit default 20, cap 200, 0 = count only.
+ */
+export async function attachableMemoriesPage(
+  ctx: Context,
+  { appRef, query, limit, offset }: { appRef: string; query?: string | null; limit?: number | null; offset?: number | null },
+) {
+  // The principal checks read nothing, so they precede the admission (findNodes' order: side-effect-free checks first).
+  if (!ctx.userId) {
+    throw new GraphQLError('Listing attachable memories requires a signed-in user.', { extensions: { code: 'UNAUTHENTICATED' } });
+  }
+  if (ctx.appKeyId || ctx.sessionId || ctx.sessionBindingRefused || ctx.impersonation || isRunPrincipal(ctx)) {
+    throw authorizationDenied();
+  }
+  await admitOperationRate(ctx, ctx.db, 'FAN_OUT_READS', ctx.limiterIdentity ?? transportRateIdentity(ctx));
+  const app = await resolveAttachApp(ctx, appRef);
+  const take = clampListTake(limit);
+  const skip = Math.max(0, offset ?? 0);
+  const ids = await memoryIdsHeldIndependently(ctx);
+  // Prisma's `contains` puts the value between `%` unescaped, so the LIKE metacharacters are escaped here: the query is
+  // matched literally, never as a pattern.
+  const literal = (text: string) => text.replace(/[\\%_]/g, (c) => `\\${c}`);
+  const raw = query?.trim() ?? '';
+  const needle = literal(raw);
+  const urnNeedle = literal(raw.replace(/^hrn:mem:/i, ''));
+  const where: Prisma.MemoryWhereInput = {
+    id: { in: ids },
+    deletedAt: null,
+    class: { notIn: [...UNATTACHABLE_CLASSES] },
+    appLinks: { none: { appId: app.id } },
+    ...(raw
+      ? { OR: [{ name: { contains: needle, mode: 'insensitive' } }, { urn: { contains: urnNeedle, mode: 'insensitive' } }] }
+      : {}),
+  };
+  const [total, items] = await Promise.all([
+    ctx.db.memory.count({ where }),
+    take === 0
+      ? Promise.resolve([])
+      : ctx.db.memory.findMany({ where, include: MEMORY_INCLUDE, orderBy: [{ name: 'asc' }, { id: 'asc' }], skip, take }),
+  ]);
+  return { items, total };
+}
+
+/** The attach target: unknown or deleted App, or a caller who is not a member, are ONE refusal; an uninstalled App then answers APP_UNINSTALLED. */
+async function resolveAttachApp(ctx: Context, appRef: string) {
+  let appId: string;
+  try { ({ id: appId } = await resolveAppRef(ctx.db, appRef)); }
+  catch (error) {
+    if (isAppRefResolutionFailure(error)) throw authorizationDenied();
+    throw error;
+  }
+  const app = await ctx.db.app.findUniqueOrThrow({
+    where: { id: appId }, select: { id: true, organizationId: true, ownerUserId: true, deletedAt: true, uninstalledAt: true },
+  });
+  if (app.deletedAt) throw authorizationDenied();
+  await requireAttachMembership(ctx, app.id);
+  if (app.uninstalledAt) {
+    throw new GraphQLError('This App has been uninstalled and cannot be written to.', { extensions: { code: 'APP_UNINSTALLED' } });
+  }
+  return app;
+}
+
+/** A live App member: today's bar for attach, now for every admitted class. No platform-admin bypass. */
+async function requireAttachMembership(ctx: Context, appId: string): Promise<void> {
+  const member = await ctx.db.appMember.findUnique({
+    where: { appId_userId: { appId, userId: ctx.userId! } }, select: { appId: true },
+  });
+  if (!member) throw authorizationDenied();
+}

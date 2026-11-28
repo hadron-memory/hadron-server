@@ -247,7 +247,7 @@ describe('createNode with encryption', () => {
       {},
       {
         input: {
-          memoryId: session.memoryId!,
+          memoryRef: session.memoryId!,
           loc: 'profile',
           name: 'profile',
           content: 'My deepest secret',
@@ -281,7 +281,7 @@ describe('createNode with encryption', () => {
       {},
       {
         input: {
-          memoryId: session.memoryId!,
+          memoryRef: session.memoryId!,
           loc: 'profile',
           name: 'profile',
           data: { age: 42, city: 'Portland' },
@@ -319,7 +319,7 @@ describe('createNode with encryption', () => {
       {},
       {
         input: {
-          memoryId: session.memoryId!,
+          memoryRef: session.memoryId!,
           loc: 'sensitive',
           name: 'sensitive',
           abstract: ABSTRACT_PLAINTEXT,
@@ -352,7 +352,7 @@ describe('createNode with encryption', () => {
     ));
     const sessionCtx = await sessionOwnerCtx(secretApp.id, session.id);
     const node = await resolvers.Mutation.createNode({}, {
-      input: { memoryId: session.memoryId!, loc: 'locked-reaffirm', name: 'locked-reaffirm',
+      input: { memoryRef: session.memoryId!, loc: 'locked-reaffirm', name: 'locked-reaffirm',
         abstract: 'Summary', content: 'Original body' },
     }, sessionCtx);
 
@@ -372,7 +372,7 @@ describe('createNode with encryption', () => {
     }) as never);
     try {
       await writeNodeCore({ memoryId: session.memoryId!, loc: 'locked-reaffirm',
-        abstract: 'Summary' }, sessionCtx, 'update', { authoring: attestedAuthoring(null) });
+        abstract: 'Summary' }, sessionCtx, 'update', { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: attestedAuthoring(null) });
     } finally {
       probe.mockRestore();
     }
@@ -397,7 +397,7 @@ describe('createNode with encryption', () => {
         {},
         {
           input: {
-            memoryId: session.memoryId!,
+            memoryRef: session.memoryId!,
             loc: 'profile',
             name: 'profile',
             content: 'should fail',
@@ -418,7 +418,7 @@ describe('createNode with encryption', () => {
     const sessionCtx = await sessionOwnerCtx(secretApp.id, session.id);
     const node = await resolvers.Mutation.createNode(
       {},
-      { input: { memoryId: session.memoryId!, loc: 'profile', name: 'profile', data: { a: 1 } } },
+      { input: { memoryRef: session.memoryId!, loc: 'profile', name: 'profile', data: { a: 1 } } },
       sessionCtx,
     );
     // End the session — key evicted.
@@ -443,7 +443,7 @@ describe('createNode with encryption', () => {
     const sessionCtx = await sessionOwnerCtx(secretApp.id, session.id);
     const node = await resolvers.Mutation.createNode(
       {},
-      { input: { memoryId: session.memoryId!, loc: 'profile', name: 'profile', properties: { a: 1 } } },
+      { input: { memoryRef: session.memoryId!, loc: 'profile', name: 'profile', properties: { a: 1 } } },
       sessionCtx,
     );
     const res = await (resolvers.Mutation as any).updateNodeProperties(
@@ -467,7 +467,7 @@ describe('createNode with encryption', () => {
     const sessionCtx = await sessionOwnerCtx(secretApp.id, session.id);
     const node = await resolvers.Mutation.createNode(
       {},
-      { input: { memoryId: session.memoryId!, loc: 'profile', name: 'profile', properties: { a: 1 } } },
+      { input: { memoryRef: session.memoryId!, loc: 'profile', name: 'profile', properties: { a: 1 } } },
       sessionCtx,
     );
     // End the session — key evicted.
@@ -499,7 +499,7 @@ describe('read path decryption', () => {
     const written = await resolvers.Mutation.createNode(
       {},
       {
-        input: { memoryId: session.memoryId!, loc: 'n1', name: 'n1', content: 'plain' },
+        input: { memoryRef: session.memoryId!, loc: 'n1', name: 'n1', content: 'plain' },
       },
       sessionCtx,
     );
@@ -520,7 +520,7 @@ describe('read path decryption', () => {
     const written = await resolvers.Mutation.createNode(
       {},
       {
-        input: { memoryId: session.memoryId!, loc: 'n2', name: 'n2', content: 'secret' },
+        input: { memoryRef: session.memoryId!, loc: 'n2', name: 'n2', content: 'secret' },
       },
       sessionCtx,
     );
@@ -554,12 +554,12 @@ describe('encryptMemory', () => {
     const sessionCtx = await sessionOwnerCtx(plaintextApp.id, session.id);
     await resolvers.Mutation.createNode(
       {},
-      { input: { memoryId: session.memoryId!, loc: 'a', name: 'a', content: 'alpha' } },
+      { input: { memoryRef: session.memoryId!, loc: 'a', name: 'a', content: 'alpha' } },
       sessionCtx,
     );
     await resolvers.Mutation.createNode(
       {},
-      { input: { memoryId: session.memoryId!, loc: 'b', name: 'b', content: 'beta', data: { n: 1 } } },
+      { input: { memoryRef: session.memoryId!, loc: 'b', name: 'b', content: 'beta', data: { n: 1 } } },
       sessionCtx,
     );
 
@@ -620,7 +620,7 @@ describe('encryptMemory', () => {
       appCtx(secretApp.id),
     ));
     const original = await resolvers.Mutation.createNode(
-      {}, { input: { memoryId: first.memoryId!, loc: 'original', name: 'original', content: 'original secret' } },
+      {}, { input: { memoryRef: first.memoryId!, loc: 'original', name: 'original', content: 'original secret' } },
       await sessionOwnerCtx(secretApp.id, first.id),
     );
     await db.memory.update({ where: { id: first.memoryId! }, data: { keyVerifier: null } });
@@ -677,7 +677,7 @@ describe('encryptMemory', () => {
     const sessionCtx = await sessionOwnerCtx(plaintextApp.id, session.id);
     await resolvers.Mutation.createNode(
       {},
-      { input: { memoryId: session.memoryId!, loc: 'x', name: 'x', content: 'gamma' } },
+      { input: { memoryRef: session.memoryId!, loc: 'x', name: 'x', content: 'gamma' } },
       sessionCtx,
     );
 
@@ -792,7 +792,7 @@ describe('linkMemoryToUser with encryption', () => {
     await resolvers.Mutation.createNode(
       {},
       {
-        input: { memoryId: anonSession.memoryId!, loc: 'note', name: 'note', content: 'first draft' },
+        input: { memoryRef: anonSession.memoryId!, loc: 'note', name: 'note', content: 'first draft' },
       },
       sessionCtx,
     );

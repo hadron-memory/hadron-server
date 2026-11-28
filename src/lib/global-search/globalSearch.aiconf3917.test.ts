@@ -209,13 +209,13 @@ describe('#3917 — an org-confined search narrows, never widens', () => {
   it('orgId confines a platform admin to that org\'s configs (no server-owned, no user-owned)', async () => {
     // orgId is member-only (no platform bypass), so the admin joins the org first.
     await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: u.padmin!.id, role: 'READER' } });
-    const r = await search('padmin', 'gsdefault', { fields: ['name'], orgId: org.id });
+    const r = await search('padmin', 'gsdefault', { fields: ['name'], orgRef: org.id });
     expect(idsOf(r)).toEqual(new Set([cfg.org!.id, cfg.orgApp!.id, cfg.orgAgent!.id]));
     expect(r.total).toBe(3);
   });
   it('orgId drops a user-owned App\'s config even for its owner', async () => {
     await db.orgMember.create({ data: { id: generateId(), organizationId: org.id, userId: u.appOwner!.id, role: 'READER' } });
-    expect((await search('appOwner', 'gsdefault', { fields: ['name'], orgId: org.id })).hits).toEqual([]);
+    expect((await search('appOwner', 'gsdefault', { fields: ['name'], orgRef: org.id })).hits).toEqual([]);
     expect(idsOf(await search('appOwner', 'gsdefault', { fields: ['name'] }))).toEqual(new Set([cfg.userApp!.id]));
   });
 });

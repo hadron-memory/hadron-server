@@ -119,20 +119,19 @@ beforeAll(async () => {
     data: { memoryId: sharedMemory.id, granteeId: grantee.id, grantorId: owner.id, role: 'writer' },
   });
 
-  // A creator-owned knowledge holding has a readable record but excludes
-  // this reader from its nodes. System records no longer have that audience
-  // split (#1807); retain the independent node-gate regression.
-  const holdingAgent = await db.agent.create({ data: { organizationId: org.id, urn: org.urn + ':holding-agent', name: 'Holding fixture' } });
+  // App-attached knowledge has a readable record but excludes this reader from its nodes (the org node set admits only
+  // unattached knowledge). System records no longer have that audience split (#1807), and a per-user chat holding is now
+  // creator-only at the record gate, so neither can stand in; retain the independent node-gate regression.
+  const shapeApp = await db.app.create({ data: { organizationId: org.id, urn: org.urn + ':shape-app', name: 'Shape fixture' } });
   const recordOnlyMemory = await db.memory.create({
     data: {
       id: generateId(),
       organizationId: org.id,
-      urn: `${org.urn}:record-only-holding`,
-      name: 'record-readable, nodes-unreadable holding',
+      urn: `${org.urn}:record-only-attached`,
+      name: 'record-readable, nodes-unreadable attached knowledge',
       class: 'knowledge',
       visibility: 'ORGANIZATION',
-      userMemoryOfAgentId: holdingAgent.id,
-      createdBy: owner.id,
+      appId: shapeApp.id,
       acceptsUploads: false,
     },
   });
@@ -163,7 +162,7 @@ beforeAll(async () => {
   missingMemoryUrn = `${memoryUrn}-missing`;
 
   const anchor = await gql(key.owner!, CREATE_SPEC, {
-    input: { memoryId, loc: 'anchor', name: 'edge anchor', role: 'spec' },
+    input: { memoryRef: memoryId, loc: 'anchor', name: 'edge anchor', role: 'spec' },
   });
   expect(anchor.errors, JSON.stringify(anchor.errors)).toBeUndefined();
   anchorId = anchor.data!.createSpecNode.id;
@@ -185,13 +184,13 @@ describe('#1312 — hierarchy-neutral governed spec doors', () => {
     it(`creates and updates a ${label} loc without changing identity or supplied edges`, async () => {
       const created = await gql(key.owner!, CREATE_SPEC, {
         input: {
-          memoryId,
+          memoryRef: memoryId,
           loc,
           name: `created ${label}`,
           role: 'spec',
           content: 'first body',
           data: { version: '0.0.1', shape: label },
-          edges: [{ targetId: anchorId, name: 'evidence-for' }],
+          edges: [{ targetRef: anchorId, name: 'evidence-for' }],
         },
       });
       expect(created.status).toBe(200);
@@ -210,11 +209,11 @@ describe('#1312 — hierarchy-neutral governed spec doors', () => {
 
       const updated = await gql(key.owner!, UPDATE_SPEC, {
         input: {
-          id,
+          ref: id,
           name: `updated ${label}`,
           content: 'second body',
           data: { version: '0.0.2', shape: label },
-          edges: [{ targetId: anchorId, name: 'still-evidence-for' }],
+          edges: [{ targetRef: anchorId, name: 'still-evidence-for' }],
         },
       });
       expect(updated.status).toBe(200);
@@ -240,13 +239,13 @@ describe('#1312 — hierarchy-neutral governed spec doors', () => {
     expect(read.data!.memory.id).toBe(memoryId);
 
     const create = await gql(key.reader!, CREATE_SPEC, {
-      input: { memoryId: memoryUrn, loc, name: 'must not exist', role: 'spec' },
+      input: { memoryRef: memoryUrn, loc, name: 'must not exist', role: 'spec' },
     });
     expectCode(create, 'FORBIDDEN');
     expect(await db.node.findFirst({ where: { memoryId, loc } })).toBeNull();
 
     const update = await gql(key.reader!, UPDATE_SPEC, {
-      input: { id: anchorId, content: 'must not land' },
+      input: { ref: anchorId, content: 'must not land' },
     });
     expectCode(update, 'FORBIDDEN');
     expect((await db.node.findUniqueOrThrow({ where: { id: anchorId } })).content).toBeNull();
@@ -258,7 +257,7 @@ describe('#1312 — hierarchy-neutral governed spec doors', () => {
     expect(read.data!.memory.id).toBe(sharedMemoryId);
 
     const create = await gql(key.grantee!, CREATE_NODE, {
-      input: { memoryId: sharedMemoryId, loc: 'shared:writer', name: 'allowed' },
+      input: { memoryRef: sharedMemoryId, loc: 'shared:writer', name: 'allowed' },
     });
     expect(create.errors, JSON.stringify(create.errors)).toBeUndefined();
     expect(await db.node.findUnique({ where: { id: create.data!.createNode.id } })).toEqual(
@@ -285,11 +284,11 @@ describe('#1312 — hierarchy-neutral governed spec doors', () => {
       it(`${surface} conceals an unreadable memory exactly like a missing memory`, async () => {
         const loc = `oracle:${surface.toLowerCase()}`;
         const input = (ref: string) => ({
-          memoryId: ref,
+          memoryRef: ref,
           loc,
           name: 'must not exist',
           ...(role ? { role } : {}),
-          edges: [{ targetId: anchorId, name: 'must-not-land' }],
+          edges: [{ targetRef: anchorId, name: 'must-not-land' }],
         });
         const edgesBefore = await db.edge.count();
         const existing = await gql(key.outsider!, mutation, { input: input(memoryUrn) });
@@ -311,9 +310,9 @@ describe('#1312 — hierarchy-neutral governed spec doors', () => {
       it(`${surface} conceals an unreadable node exactly like a missing node`, async () => {
         const missingNodeId = generateId();
         const input = (id: string) => ({
-          id,
+          ref: id,
           content: 'must not land',
-          edges: [{ targetId: anchorId, name: 'must-not-land' }],
+          edges: [{ targetRef: anchorId, name: 'must-not-land' }],
         });
         const edgesBefore = await db.edge.count();
         const existing = await gql(key.outsider!, mutation, { input: input(anchorId) });
@@ -339,10 +338,10 @@ describe('#1312 — hierarchy-neutral governed spec doors', () => {
     ] as const) {
       it(`${surface} by (memoryId, loc) conceals an unreadable memory exactly like a missing one`, async () => {
         const input = (ref: string, loc: string) => ({
-          memoryId: ref,
+          memoryRef: ref,
           loc,
           content: 'must not land',
-          edges: [{ targetId: anchorId, name: 'must-not-land' }],
+          edges: [{ targetRef: anchorId, name: 'must-not-land' }],
         });
         const edgesBefore = await db.edge.count();
         const existing = await gql(key.outsider!, mutation, { input: input(memoryUrn, 'anchor') });
@@ -366,7 +365,7 @@ describe('#1312 — hierarchy-neutral governed spec doors', () => {
       // This caller may read the Memory RECORD, so its existence is not a
       // secret from them; what must not leak is which locs exist. The write
       // gate refuses before the node lookup, so both answer the same.
-      const input = (loc: string) => ({ memoryId: recordOnlyMemoryId, loc, content: 'must not land' });
+      const input = (loc: string) => ({ memoryRef: recordOnlyMemoryId, loc, content: 'must not land' });
       const existing = await gql(key.reader!, UPDATE_NODE, { input: input('private:node') });
       const missing = await gql(key.reader!, UPDATE_NODE, { input: input('private:no-such-node') });
 
@@ -397,8 +396,8 @@ describe('#1312 — hierarchy-neutral governed spec doors', () => {
       });
       const missingNodeId = generateId();
       for (const k of [key.outsider!, key.owner!]) {
-        const existing = await gql(k, UPDATE_NODE, { input: { id: orphan.id, content: 'must not land' } });
-        const missing = await gql(k, UPDATE_NODE, { input: { id: missingNodeId, content: 'must not land' } });
+        const existing = await gql(k, UPDATE_NODE, { input: { ref: orphan.id, content: 'must not land' } });
+        const missing = await gql(k, UPDATE_NODE, { input: { ref: missingNodeId, content: 'must not land' } });
 
         expect(normalizeSentRef(existing, orphan.id)).toEqual(normalizeSentRef(missing, missingNodeId));
         expectCode(existing, 'NODE_NOT_FOUND');
@@ -414,10 +413,10 @@ describe('#1312 — hierarchy-neutral governed spec doors', () => {
 
       const missingNodeId = generateId();
       const existing = await gql(key.reader!, UPDATE_NODE, {
-        input: { id: recordOnlyNodeId, content: 'must not land' },
+        input: { ref: recordOnlyNodeId, content: 'must not land' },
       });
       const missing = await gql(key.reader!, UPDATE_NODE, {
-        input: { id: missingNodeId, content: 'must not land' },
+        input: { ref: missingNodeId, content: 'must not land' },
       });
 
       expect(normalizeSentRef(existing, recordOnlyNodeId)).toEqual(
@@ -429,7 +428,7 @@ describe('#1312 — hierarchy-neutral governed spec doors', () => {
 
     it('does not disguise malformed refs or internal DB faults as not-found', async () => {
       const malformed = await gql(key.outsider!, CREATE_SPEC, {
-        input: { memoryId: 'relative-memory', loc: 'oracle:malformed', name: 'bad', role: 'spec' },
+        input: { memoryRef: 'relative-memory', loc: 'oracle:malformed', name: 'bad', role: 'spec' },
       });
       expectCode(malformed, 'URN_NOT_QUALIFIED');
 
@@ -446,7 +445,7 @@ describe('#1312 — hierarchy-neutral governed spec doors', () => {
         .mockRejectedValueOnce(new Error('injected write-gate db failure'));
       try {
         const fault = await gql(key.outsider!, CREATE_SPEC, {
-          input: { memoryId: memoryUrn, loc: 'oracle:db-fault', name: 'must not exist', role: 'spec' },
+          input: { memoryRef: memoryUrn, loc: 'oracle:db-fault', name: 'must not exist', role: 'spec' },
         });
         expectCode(fault, 'INTERNAL_SERVER_ERROR');
         expect(await db.node.findFirst({ where: { memoryId, loc: 'oracle:db-fault' } })).toBeNull();
@@ -458,7 +457,7 @@ describe('#1312 — hierarchy-neutral governed spec doors', () => {
 
   it('keeps the role-governed boundary: generic createNode cannot mint a spec', async () => {
     const result = await gql(key.owner!, CREATE_NODE, {
-      input: { memoryId, loc: 'generic:must-refuse', name: 'must not exist', role: 'spec' },
+      input: { memoryRef: memoryId, loc: 'generic:must-refuse', name: 'must not exist', role: 'spec' },
     });
     expectCode(result, 'ROLE_GOVERNED');
     expect(await db.node.findFirst({ where: { memoryId, loc: 'generic:must-refuse' } })).toBeNull();
@@ -466,14 +465,14 @@ describe('#1312 — hierarchy-neutral governed spec doors', () => {
 
   it('still rejects a loc that fails the generic loc grammar', async () => {
     const result = await gql(key.owner!, CREATE_SPEC, {
-      input: { memoryId, loc: 'bad::loc', name: 'must not exist', role: 'spec' },
+      input: { memoryRef: memoryId, loc: 'bad::loc', name: 'must not exist', role: 'spec' },
     });
     expectCode(result, 'BAD_USER_INPUT');
     expect(await db.node.findFirst({ where: { memoryId, loc: 'bad::loc' } })).toBeNull();
   });
 
   it('still rejects duplicate identity and leaves the original untouched', async () => {
-    const input = { memoryId, loc: 'duplicate', name: 'original', role: 'spec' };
+    const input = { memoryRef: memoryId, loc: 'duplicate', name: 'original', role: 'spec' };
     const first = await gql(key.owner!, CREATE_SPEC, { input });
     expect(first.errors, JSON.stringify(first.errors)).toBeUndefined();
     const originalId = first.data!.createSpecNode.id as string;
@@ -491,11 +490,11 @@ describe('#1312 — hierarchy-neutral governed spec doors', () => {
     const loc = 'atomic:missing-target';
     const result = await gql(key.owner!, CREATE_SPEC, {
       input: {
-        memoryId,
+        memoryRef: memoryId,
         loc,
         name: 'must not exist',
         role: 'spec',
-        edges: [{ targetId: 'nowhere:missing', name: 'evidence-for' }],
+        edges: [{ targetRef: 'nowhere:missing', name: 'evidence-for' }],
       },
     });
     expectCode(result, 'NodeNotFoundError');

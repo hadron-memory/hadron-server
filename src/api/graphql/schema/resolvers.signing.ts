@@ -3,7 +3,7 @@ import type { Prisma } from '../../../generated/prisma/index.js';
 import { GraphQLError } from 'graphql';
 import type { PrismaClient } from '../../../generated/prisma/index.js';
 import type { Context } from './resolvers.helpers.js';
-import { isMemoryReadableCached, requireMemoryWriteAccess } from './resolvers.helpers.js';
+import { isMemoryReadableCached, requireMemoryWriteAccess, requireCallerIdentity } from './resolvers.helpers.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { resolveNodeUrnField, resolveRevisionEditor } from './resolvers.types.js';
 import { withAuthorizedMemoryTx } from './authorizedTx.js';
@@ -37,12 +37,13 @@ type SigningRequestRow = {
   createdAt: Date; expiresAt: Date; endedAt: Date | null;
 };
 
-function nodeNotFound(nodeRef: string): GraphQLError {
-  return new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND', nodeRef } });
+function nodeNotFound(_nodeRef: string): GraphQLError {
+  return new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
 }
 
-function requestNotFound(id: string): GraphQLError {
-  return new GraphQLError('Signing request not found', { extensions: { code: 'SIGNING_REQUEST_NOT_FOUND', id } });
+function requestNotFound(_id: string): GraphQLError {
+  // #5168: the miss does not relay the caller's id.
+  return new GraphQLError('Signing request not found', { extensions: { code: 'SIGNING_REQUEST_NOT_FOUND' } });
 }
 
 function refusalToGraphQL(error: SigningRefusal, ref: Record<string, string>): GraphQLError {
@@ -117,6 +118,7 @@ export const signingMutations = {
     { nodeRef, expectedRevision, signerRef }: { nodeRef: string; expectedRevision?: number | null; signerRef?: string | null },
     ctx: Context,
   ) => {
+    requireCallerIdentity(ctx);
     refuseImpersonation(ctx);
     const { id, memoryId } = await resolveReadableNode(ctx, nodeRef);
     try {

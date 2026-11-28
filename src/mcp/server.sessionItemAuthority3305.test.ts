@@ -83,9 +83,9 @@ describe.each([false, true])('#3305 session selected=%s', selected => {
     const user = session(selected);
     const call = () => door === 'memory' ? queryResolvers.memory({}, { ref: fixtureState.write.id }, user)
       : door === 'node' ? queryResolvers.node({}, { ref: urn(fixtureState.write) }, user)
-      : door === 'find' ? queryResolvers.findNodes({}, { filter: { memoryIds: [fixtureState.write.id] }, query: 'needle3305', mode: 'keyword', limit: 10 }, user)
+      : door === 'find' ? queryResolvers.findNodes({}, { filter: { memoryRefs: [fixtureState.write.id] }, query: 'needle3305', mode: 'keyword', limit: 10 }, user)
       : door === 'appNodes' ? queryResolvers.appNodes({}, { appRef: fixtureState.app.id }, user)
-      : mutationResolvers.createNode({}, { input: { memoryId: fixtureState.write.id, loc: 'docs:gql-new', name: 'unauthorized' } }, user);
+      : mutationResolvers.createNode({}, { input: { memoryRef: fixtureState.write.id, loc: 'docs:gql-new', name: 'unauthorized' } }, user);
     const linked = await result(call);
     await db.agentMemoryItem.delete({ where: { agentId_memoryId: { agentId: fixtureState.agent.id, memoryId: fixtureState.write.id } } });
     const unlinked = await result(call);
@@ -136,7 +136,7 @@ describe.each([false, true])('#3305 session selected=%s', selected => {
     await db.memoryShare.create({ data: { memoryId: memory.id, granteeId: fixtureState.user.id, grantorId: fixtureState.admin.id, role } });
     await db.agentMemoryItem.create({ data: { agentId: fixtureState.agent.id, memoryId: memory.id, role: 'read-write' } });
     expect(await queryResolvers.memory({}, { ref: memory.id }, session(selected))).toMatchObject({ id: memory.id });
-    const written = await result(() => mutationResolvers.createNode({}, { input: { memoryId: memory.id, loc: 'shared:entry', name: 'shared' } }, session(selected)));
+    const written = await result(() => mutationResolvers.createNode({}, { input: { memoryRef: memory.id, loc: 'shared:entry', name: 'shared' } }, session(selected)));
     if (role === 'writer' && !selected) expect(written).toHaveProperty('value');
     else expect(written).toMatchObject({ error: { code: 'FORBIDDEN' } });
     // Selected-App writer-share refusal is reproduced on base2eb466b2,

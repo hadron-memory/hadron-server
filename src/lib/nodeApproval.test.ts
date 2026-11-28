@@ -2,7 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../integrations/db/client.js';
-import { cleanDb } from '../test/helpers.js';
+import { cleanDb, seedRootNode } from '../test/helpers.js';
 import { waitForLockWaitersOfType } from '../test/lockWait.js';
 import { generateId } from './id.js';
 import { computeApprovalHash } from './approvalHash.js';
@@ -42,7 +42,7 @@ const statusOf = async (id: string) => {
   return resolvers.Node.approvalStatus(row, {}, as());
 };
 const edit = (id: string, content: string) =>
-  resolvers.Mutation.updateNode(null, { input: { id, content } }, as());
+  resolvers.Mutation.updateNode(null, { input: { ref: id, content } }, as());
 const codeOf = async (p: Promise<unknown>) => {
   try { await p; return 'NO_ERROR'; } catch (e) {
     return e instanceof GraphQLError ? String(e.extensions.code) : (e as Error).message;
@@ -64,6 +64,7 @@ beforeEach(async () => {
     { organizationId: org.id, userId: reader.id, role: 'READER' },
   ] });
   memory = await resolvers.Mutation.createMemory(null, { orgRef: org.id, name: 'approvals' }, as());
+  await seedRootNode(db, memory.id, 'approvals');
 });
 
 describe('approveNode (#1591)', () => {
@@ -341,7 +342,7 @@ describe('findNodes approvalState filter (#1591)', () => {
         ...(opts.limit ? { limit: opts.limit } : {}),
         // A `where` predicate routes the no-query browse through the SQL path.
         filter: {
-          memoryIds: [memory.id], approvalState,
+          memoryRefs: [memory.id], approvalState,
           ...(opts.viaSql ? { where: { path: ['k'], eq: 'v' } } : {}),
         },
       }, as());
@@ -463,12 +464,12 @@ describe('approvals on an encrypted memory (#1591)', () => {
 
     for (const viaSql of [false,true]) {
       for (const minted of [false,true]) {
-        const result = await resolvers.Query.findNodes(null,{filter:{memoryIds:[memory.id],minted,...(viaSql?{where:{path:['marker'],eq:'yes'}}:{})}},as());
+        const result = await resolvers.Query.findNodes(null,{filter:{memoryRefs:[memory.id],minted,...(viaSql?{where:{path:['marker'],eq:'yes'}}:{})}},as());
         expect(result.hits.some((h:{node:{id:string}})=>h.node.id===n.id)).toBe(!minted);
       }
 
       for (const state of ['APPROVED','SUPERSEDED','NOT_APPROVED','NOT_APPLICABLE'] as NodeApprovalState[]) {
-        const result = await resolvers.Query.findNodes(null, {filter:{memoryIds:[memory.id],approvalState:state,...(viaSql?{where:{path:['marker'],eq:'yes'}}:{})}}, as());
+        const result = await resolvers.Query.findNodes(null, {filter:{memoryRefs:[memory.id],approvalState:state,...(viaSql?{where:{path:['marker'],eq:'yes'}}:{})}}, as());
         expect(result.hits.some((h: {node:{id:string}})=>h.node.id===n.id)).toBe(state==='NOT_APPLICABLE');
       }
     }

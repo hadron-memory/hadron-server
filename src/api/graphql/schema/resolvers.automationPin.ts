@@ -17,7 +17,7 @@ import { canReadMemory } from '../../../mcp/access-control.js';
 import { withAuthorizedTx } from './authorizedTx.js';
 import { requireOwnerOrOrgRole, type Context } from './resolvers.helpers.js';
 
-import { projectAutomationReadGrant } from './automationReadGrantProjection.js';
+import { isOwnedBy, requireOwnerRefOf, sameOwnerRef } from '../../../lib/owner.js';
 
 export type AutomationTriggerKind = 'SCHEDULE' | 'WEBHOOK' | 'MANUAL';
 export interface AutomationTriggerRef { triggerKind: AutomationTriggerKind; triggerRef: string }
@@ -55,7 +55,10 @@ export async function requireAdopterContext(ctx: Context): Promise<string> {
 }
 
 type App = NonNullable<Awaited<ReturnType<Context['db']['app']['findFirst']>>>;
-type TriggerRow = { id: string; appId: string; organizationId: string; userId: string | null; entryNodeUrn: string; entryNodeId?: string | null };
+/** #5077: a MANUAL row is an AppRun, whose owner may be a person (`organizationId` null, `ownerUserId` set); schedule and webhook rows are an organization's until F3b. */
+type TriggerRow = { id: string; appId: string; organizationId: string | null; ownerUserId?: string | null; userId: string | null; entryNodeUrn: string; entryNodeId?: string | null };
+/** The owner a trigger row states (throws on a row naming none or both: fails closed). */
+const triggerOwner = (row: { organizationId: string | null; ownerUserId?: string | null }) => requireOwnerRefOf({ organizationId: row.organizationId, ownerUserId: row.ownerUserId ?? null });
 /**
  * May this caller adopt this trigger? THE one admission predicate (#2436) behind every adoption surface —
  * preview, the approval detail, approve, decline, re-adopt, and the adoptable list's run-as-user arm —
@@ -77,9 +80,13 @@ async function canAdopt(ctx: Context, app: App, row: TriggerRow): Promise<boolea
   }
 }
 /** The live App behind a trigger. An org-owned App must be the trigger's own org; a user-owned App has no organization (#2441), so any trigger org is accepted and the owner's strict-owner gate decides. */
-async function liveApp(ctx: Context, row: { appId: string; organizationId: string }) {
+async function liveApp(ctx: Context, row: { appId: string; organizationId: string | null; ownerUserId?: string | null }) {
   const app = await ctx.db.app.findFirst({ where: { id: row.appId, deletedAt: null, uninstalledAt: null } });
-  return app && (app.organizationId === null || app.organizationId === row.organizationId) ? app : null;
+  if (!app) return null;
+  // #5077: a person's run (a MANUAL row with no organization) belongs to an App that same person owns, compared by owner
+  // (`isOwnedBy`), never by two nullable organization ids.
+  if (row.organizationId === null) return isOwnedBy(app, triggerOwner(row)) ? app : null;
+  return app.organizationId === null || app.organizationId === row.organizationId ? app : null;
 }
 async function load(ctx: Context, input: AutomationTriggerRef) {
   const actorId = await requireAdopterContext(ctx);
@@ -103,7 +110,7 @@ async function load(ctx: Context, input: AutomationTriggerRef) {
 const entryRefOf = (row: TriggerRow, format: AutomationPinFormat) =>
   format === 'hadron-automation-pin-v3' ? row.entryNodeUrn : row.entryNodeId ?? row.entryNodeUrn;
 async function preview(ctx: Context, row: Awaited<ReturnType<typeof load>>, format: AutomationPinFormat = 'hadron-automation-pin-v4') {
-  const pin = await captureAutomationPin(ctx.db, row.appId, row.userId, entryRefOf(row, format), row.organizationId, ctx, configSelection(row), { format });
+  const pin = await captureAutomationPin(ctx.db, row.appId, row.userId, entryRefOf(row, format), triggerOwner(row), ctx, configSelection(row), { format });
   const memories = new Set(Object.values(pin.nodes).map(n => String(n.state.memoryId)));
   for (const id of memories) if (!await canReadMemory(ctx.db, ctx, id)) throw callerCannotRead();
   return pin;
@@ -238,7 +245,7 @@ export const automationPinQueries = {
       // #2503: a legacy row (no stamped id, nothing to resolve by) whose stored URN is dead is UNADOPTED, with that
       // URN, which the row already stores, as the detail. Missing and unreadable are one answer (cor:api:140:03).
       // Only the ENTRY decides it: an error from deeper in the graph is not "the entry is gone" and rethrows.
-      if ((e instanceof NodeNotFoundError || e instanceof AutomationPinError) && !row.entryNodeId && !byStoredId && await entryUnavailable(ctx, row.entryNodeUrn)) return staleEntryApproval(row.entryNodeUrn, await liveReadGrants(ctx, input.triggerKind, row));
+      if ((e instanceof NodeNotFoundError || e instanceof AutomationPinError) && !row.entryNodeId && !byStoredId && await entryUnavailable(ctx, row.entryNodeUrn)) return staleEntryApproval(row.entryNodeUrn, await liveReadGrants());
       throw e;
     }
     let state: AdoptionState = stored.state;
@@ -253,28 +260,18 @@ export const automationPinQueries = {
         catch (e) { if (e instanceof NodeNotFoundError || e instanceof AutomationPinError) state = 'CHANGED'; else throw e; }
       }
     }
-    return { state, hash: pin.hash, summary: summarizeAutomation(pin, factsOf(input.triggerKind, row as never).facts), depth: approvalDepth(pin), readGrants: await liveReadGrants(ctx, input.triggerKind, row) };
+    return { state, hash: pin.hash, summary: summarizeAutomation(pin, factsOf(input.triggerKind, row as never).facts), depth: approvalDepth(pin), readGrants: await liveReadGrants() };
   },
 };
 
 /**
- * #2883 (ruling 0081 A): the live read grants this trigger holds, shown to the adopter, who is approving what the
- * automation may read. Revoked rows are not shown (they read nothing). The target's URN is named only when the adopter
- * can read that memory; otherwise it is null, as on every other grant projection. A MANUAL run holds none.
+ * #5404 (hrn:node:hadronmemory.com:specs:cor:acl:140:02; Holger 2026-11-27, "Drop them", "Retire all"): the per-automation read grant
+ * of #2883 is retired and its rows are deleted at deploy, so a trigger holds none. An App's runs read outside it through a signed
+ * `memory.read` grant, which is held by the App, not by one automation. The `readGrants` field stays, deprecated, until the doors'
+ * deprecation window ends, and is always empty.
  */
-async function liveReadGrants(ctx: Context, kind: AutomationTriggerRef['triggerKind'], row: { id: string; appId: string }) {
-  if (kind !== 'SCHEDULE' && kind !== 'WEBHOOK') return [];
-  const rows = await ctx.db.appAutomationReadGrant.findMany({
-    where: { appId: row.appId, triggerKind: kind, triggerId: row.id, revokedAt: null },
-    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-  });
-  const out = [];
-  for (const g of rows) {
-    const memory = await canReadMemory(ctx.db, ctx as never, g.memoryId)
-      ? await ctx.db.memory.findFirst({ where: { id: g.memoryId, deletedAt: null }, select: { urn: true } }) : null;
-    out.push(projectAutomationReadGrant(g, memory));
-  }
-  return out;
+async function liveReadGrants(): Promise<never[]> {
+  return [];
 }
 
 type Row = Awaited<ReturnType<typeof load>>;
@@ -286,10 +283,12 @@ type Row = Awaited<ReturnType<typeof load>>;
 async function adoptionDoor<T>(ctx: Context, input: AutomationTriggerRef, write: (tx: Prisma.TransactionClient, txCtx: Context, row: Row) => Promise<T>): Promise<T> {
   const observed = await load(ctx, input);
   let row = observed;
+  const observedOwner = triggerOwner(observed);
   return withAuthorizedTx(ctx, [ { kind: 'app', id: observed.appId },
-    { kind: 'org', id: observed.organizationId },
+    // #5077: the owner's anchor, an organization or a person.
+    'organizationId' in observedOwner ? { kind: 'org' as const, id: observedOwner.organizationId } : { kind: 'user' as const, id: observedOwner.userId },
     ...(observed.userId ? [{ kind: 'user' as const, id: observed.userId }] : []) ],
-    async txCtx => { row = await load(txCtx, input); if (row.appId !== observed.appId || row.userId !== observed.userId || row.organizationId !== observed.organizationId) throw denied(); },
+    async txCtx => { row = await load(txCtx, input); if (row.appId !== observed.appId || row.userId !== observed.userId || !sameOwnerRef(triggerOwner(row), observedOwner)) throw denied(); },
     (tx, txCtx) => write(tx, txCtx, row),
     { afterLock: async tx => {
       if (input.triggerKind === 'SCHEDULE') await tx.$queryRaw`SELECT id FROM agent_schedules WHERE id = ${observed.id} FOR UPDATE`;

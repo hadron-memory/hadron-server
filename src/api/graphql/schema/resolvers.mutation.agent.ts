@@ -1,4 +1,6 @@
 // agentMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
+import { softDeleteMemoryAssets } from '../../../lib/asset/memoryDelete.js';
+import { requireOwnerHeadroom } from '../../../lib/ownerLimits/gate.js';
 import { endHeldGrants } from '../../../lib/grants/departure.js';
 import { encryptToken } from '../../../lib/tokenCrypto.js';
 import { refuseLegacyBaseUrl, requireEndpointFor, requireKeyFor, validateApiStyle, validateEndpoint } from '../../../lib/aiEndpoint.js';
@@ -56,6 +58,8 @@ import { resolveMemoryRef } from '../../../lib/entityRef/memoryRef.js';
 import { MemoryNotFoundError } from '../../../lib/asset/gate.js';
 import { resolveOrgRef } from '../../../lib/entityRef/orgRef.js';
 import { deriveSlugFromName } from '../../../lib/urn.js';
+import { derivedSlugBase, nextFreeDerivedSlug } from '../../../lib/derivedSlug.js';
+import { assertStorableText } from '../../../lib/unstorableTextInput.js';
 import { normalizeHandleOrNull } from '../../../lib/userHandle.js';
 import { generateId } from '../../../lib/id.js';
 import { seedAgentSkeleton } from '../../../lib/agentSkeleton.js';
@@ -84,6 +88,8 @@ import {
   AGENT_INCLUDE,
   assertAiConfigAppOwnerInstalled,
   lockAiConfigAppOwnerInstalled,
+  suppliedSlug,
+  assertNameNotBlank,
 } from './resolvers.helpers.js';
 import { recordUrnRename } from '../../../lib/urnAlias.js';
 import { authorizationDenied } from '../../../lib/auth/authorizationDenied.js';
@@ -129,6 +135,8 @@ export interface CreateAgentCoreInput {
   ownerUserId: string | null;
   namespace: string;
   name: string;
+  /** #5203 S1: a slug the caller supplied; validated, never derived. Omitted or null: derived from the name. */
+  slug?: string | null;
   description?: string;
   systemMemoryId?: string;
   /** #4140: the caller's own reference to `systemMemoryId`, the only thing a not-found names. */
@@ -344,14 +352,30 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
   // #574: slugify the display name — a raw name would persist a
   // case-sensitive / space-bearing URN (and the system memory URN derives
   // from this one, so it inherits the clean slug).
-  const agentSlug = deriveSlugFromName(name);
+  // #5203 S1: a supplied slug skips the name-derived check, so the name's own storability is judged here, typed, before any write.
+  assertStorableText({ name });
+  const supplied = input.slug != null;
+  if (!supplied) assertNameNotBlank(name, 'Agent');
+  // #5203 S3: a slug DERIVED from the name never refuses the create (hrn:node:hadronmemory.com:specs:cor:urn:010:01).
+  // It skips a reserved word, an Agent row holding the URN (live or deleted) and, when the system memory is
+  // auto-provisioned, any memory holding `<urn>-system` (as `urn` or `legacyUrn`). A deleted holder is never
+  // reclaimed, so it stays restorable. A SUPPLIED slug keeps today's answers below.
+  const agentSlug = supplied
+    ? suppliedSlug(input.slug!)
+    : await nextFreeDerivedSlug(derivedSlugBase(name), async (candidate) => {
+      const urn = `${namespace}:${candidate}`;
+      if (await ctx.db.agent.count({ where: { urn } })) return true;
+      return !systemMemoryId && (await ctx.db.memory.count({
+        where: { OR: [{ urn: `${urn}-system` }, { legacyUrn: `${urn}-system` }] },
+      })) > 0;
+    });
   const agentUrn = `${namespace}:${agentSlug}`;
-  // Check for existing agent with the same URN. A tombstone is reclaimed —
-  // worker-name permanence lives on Worker rows (cor:agt:020:02), never on
+  // Check for existing agent with the same URN (a supplied slug only: a derived one was minted free above). A tombstone
+  // is reclaimed — worker-name permanence lives on Worker rows (cor:agt:020:02), never on
   // agent tombstones (the #974 re-cut removed the persona-reservation branch
   // here; a Worker's agent FK is Restrict, so a casting's agent can't be a
   // hard-deletable tombstone anyway).
-  const existing = await ctx.db.agent.findUnique({ where: { urn: agentUrn } });
+  const existing = supplied ? await ctx.db.agent.findUnique({ where: { urn: agentUrn } }) : null;
   if (existing) {
     if (existing.deletedAt) {
       // A retained install memory still needs this identity to enforce its org-text audience.
@@ -471,7 +495,7 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
       // #1468 — reclaim through the shared guard: a deleted mint-stamped
       // corpus holding a protected spec refuses. A holder revived since the
       // read above is live, the same slot-occupied case as below.
-      const reclaimed = !!staleHolder?.deletedAt && await reclaimTombstonedMemory(tx, staleHolder.id);
+      const reclaimed = !!staleHolder?.deletedAt && await reclaimTombstonedMemory(tx, staleHolder.id, [ctx.userId]);
       if (staleHolder && !reclaimed) {
         // #935: typed — under racing creates of the same name, the loser
         // can land HERE (the winner's system memory committed between the
@@ -500,6 +524,9 @@ export async function createAgentCore(ctx: Context, input: CreateAgentCoreInput)
       resolvedSystemMemoryId = systemMemory.id;
     }
 
+    // #5016: one Agent more for its owner, the last lock this door takes. A refusal rolls back the system memory written above and, with it,
+    // the skeleton; promoting an existing memory (`systemMemoryRef`) takes one out of the `memories` count and is never refused on that key.
+    await requireOwnerHeadroom(tx, { owner: resolvedOrgId ? { organizationId: resolvedOrgId } : { userId: ownerUserId! }, key: 'agents', caller: ctx.userId ? { userId: ctx.userId } : null });
     const agent = await tx.agent.create({
       data: {
         // #2171 (R211): a NEW Agent offers owner and member unless told otherwise.
@@ -655,7 +682,7 @@ function parseContextCap(v: unknown): number {
 export const agentMutations = {
     createAgent: async (
       _: unknown,
-      { orgRef: orgId, name, description, systemMemoryRef, visibility, type, surfaces, personaRole, usesTasks, resetContextAfterTask, lifecycle, contextCap, memberRoles }: { orgRef?: string | null; name: string; description?: string; systemMemoryRef?: string | null; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; lifecycle?: 'LONG_LIVED' | 'SHORT_LIVED' | null; contextCap?: number | null; memberRoles?: string[] | null },
+      { orgRef: orgId, name, slug, description, systemMemoryRef, visibility, type, surfaces, personaRole, usesTasks, resetContextAfterTask, lifecycle, contextCap, memberRoles }: { orgRef?: string | null; name: string; slug?: string | null; description?: string; systemMemoryRef?: string | null; visibility?: string; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; lifecycle?: 'LONG_LIVED' | 'SHORT_LIVED' | null; contextCap?: number | null; memberRoles?: string[] | null },
       ctx: Context,
     ) => {
       // spec 047: an agent is owned by EXACTLY ONE of an org or a user. `orgRef`
@@ -719,6 +746,7 @@ export const agentMutations = {
         ownerUserId,
         namespace,
         name,
+        slug,
         description,
         systemMemoryId,
         systemMemoryRef: systemMemoryRef || undefined,
@@ -736,7 +764,7 @@ export const agentMutations = {
 
     updateAgent: async (
       _: unknown,
-      { ref, name, urn, description, systemMemoryRef, visibility, listedOnMarketplace, type, surfaces, personaRole, usesTasks, resetContextAfterTask, lifecycle, contextCap, registerDefaults, memberRoles }: { ref: string; name?: string; urn?: string; description?: string; systemMemoryRef?: string | null; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; lifecycle?: 'LONG_LIVED' | 'SHORT_LIVED' | null; contextCap?: number | null; registerDefaults?: { mentionOnly?: boolean | null } | null; memberRoles?: string[] | null },
+      { ref, name, urn, description, systemMemoryRef, visibility, listedOnMarketplace, type, surfaces, personaRole, usesTasks, resetContextAfterTask, lifecycle, contextCap, registerDefaults, memberRoles, defaultChatHome }: { ref: string; name?: string; urn?: string; description?: string; systemMemoryRef?: string | null; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; lifecycle?: 'LONG_LIVED' | 'SHORT_LIVED' | null; contextCap?: number | null; registerDefaults?: { mentionOnly?: boolean | null } | null; memberRoles?: string[] | null; defaultChatHome?: 'APP_SHARED' | 'PERSONAL' | 'PRIVATE' | null },
       ctx: Context,
     ) => {
       // #929 review: normalize persona dressing (blank-after-trim clears).
@@ -1154,6 +1182,9 @@ export const agentMutations = {
           // #4225 (S4b of #4229): the same gate and lock as usesTasks. Omitted leaves it; an explicit null clears it (no
           // cap). Lowering or removing it cancels nothing in flight: a reset's claim re-reads it (SETTING_OFF).
           ...(contextCap === null ? { contextCap: null } : contextCap !== undefined ? { contextCap: parseContextCap(contextCap) } : {}),
+          // #5027 (cor:acl:030:01): the same gate and lock as usesTasks. Omitted leaves it; an explicit null clears it
+          // (today's behaviour). The enum is checked by the schema, so no other value reaches here.
+          ...(defaultChatHome !== undefined ? { defaultChatHome } : {}),
           // Spec 049 Phase 5: the install-row defaults — a scalar declaration,
           // stored as given; null clears to the platform defaults.
           ...(mergedPolicy !== undefined ? { installationPolicy: mergedPolicy } : {}),
@@ -1277,6 +1308,8 @@ export const agentMutations = {
         await endHeldGrants(tx, 'agent', id, 'AGENT_DELETED');
         if (agent.systemMemoryId) {
           await tx.memory.updateMany({ where: { id: agent.systemMemoryId }, data: { deletedAt } });
+          // #5124: the system memory's files go with it, at the same instant.
+          await softDeleteMemoryAssets(tx, agent.systemMemoryId, deletedAt);
         }
       }, {
         // An exclusive authority bracket prevents two deleters from upgrading
@@ -1903,7 +1936,7 @@ export const agentMutations = {
       _: unknown,
       args: {
         ownerType: AiConfigOwnerType;
-        ownerId: string;
+        ownerRef: string;
         name: string;
         provider: string;
         model: string;
@@ -1916,7 +1949,7 @@ export const agentMutations = {
       ctx: Context,
     ) => {
       try {
-        const { ownerWhere } = await requireAiConfigOwnerAdmin(ctx, args.ownerType, args.ownerId);
+        const { ownerWhere } = await requireAiConfigOwnerAdmin(ctx, args.ownerType, args.ownerRef);
         await assertAiConfigAppOwnerInstalled(ctx.db, ownerWhere.appId);
         const name = validateAiConfigName(args.name);
         validateProviderAndParams(args.provider, args.params ?? null);

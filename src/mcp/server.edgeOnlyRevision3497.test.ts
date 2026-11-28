@@ -31,7 +31,7 @@ beforeEach(async()=>{
  userId=(await db.user.create({data:{handle:'edges3497-mcp-admin',roles:['ADMIN']}})).id;
  await db.orgMember.create({data:{organizationId:org.id,userId,role:'ADMIN'}});
  memoryId=(await db.memory.create({data:{name:'Edges',urn:'edges3497-mcp.example:edges',class:'knowledge',organizationId:org.id}})).id;
- [source,a,b]=await Promise.all(['source','a','b'].map(loc=>(resolvers.Mutation as any).createNode(null,{input:{memoryId,loc,name:loc,content:'original'}},ctx())));
+ [source,a,b]=await Promise.all(['source','a','b'].map(loc=>(resolvers.Mutation as any).createNode(null,{input:{memoryRef: memoryId,loc,name:loc,content:'original'}},ctx())));
 });
 describe('#3497 MCP inline edges',()=>{
  it('changed and identical edge-only writes preserve revision/history',async()=>{

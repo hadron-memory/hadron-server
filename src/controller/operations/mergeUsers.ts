@@ -15,6 +15,9 @@ export const DIRECT_USER_REFERENCES: ReadonlyArray<readonly [string, string] | r
   ['memories', 'user_id'],
   ['sessions', 'user_id'],
   ['usage_events', 'user_id'],
+  // #5020 (section 13 item 14, cor:dmo:170:08's merge edge): the units billed to the merged-away person are billed to the survivor.
+  // Re-pointing who a unit is billed to changes no cost (cor:dmo:170:06: a cost is never recomputed).
+  ['usage_events', 'billable_user_id'],
   ['org_member_invitations', 'recipient_user_id'],
   ['user_invitation_activations', 'user_id'],
   ['exchange_connections', 'user_id'],
@@ -24,6 +27,8 @@ export const DIRECT_USER_REFERENCES: ReadonlyArray<readonly [string, string] | r
   ['auth_codes', 'user_id', 'sign_in_id'],
   ['auth_handoff_codes', 'user_id', 'sign_in_id'],
   ['app_runs', 'user_id'],
+  // #5077: the runs of the Apps a person owns copy that owner; they move with their Apps (mergeOwnerNamespacedUrns).
+  ['app_runs', 'owner_user_id'],
   ['agent_schedules', 'user_id'],
   ['agent_webhooks', 'user_id'],
   ['assets', 'uploaded_by'],
@@ -60,6 +65,11 @@ export const DIRECT_USER_REFERENCES: ReadonlyArray<readonly [string, string] | r
   ['grants', 'issuer_user_id'],
   ['grants', 'requested_by_user_id'],
   ['grants', 'verified_by'],
+  // #5014 (billing A6; plan section 13 item 14, Proposed in cor:dmo:170:08): a person's credit ledger entries follow the survivor,
+  // keeping amount, kind, source, expiry and time. A ledger entry is never edited, so this is the one move the append-only trigger
+  // allows on owner_user_id, and only along the user_merges row this merge records before these rewrites
+  // (prisma/credit-ledger-invariants.sql). Not in AUDIT_USER_COLUMNS: it is the owner, not an audit actor.
+  ['credit_ledger_entries', 'owner_user_id'],
 ];
 
 /**
@@ -589,6 +599,11 @@ async function runMergeTxn(
     await tx.$executeRaw`DELETE FROM app_members s USING app_members t
       WHERE s.user_id = ${sourceUserId} AND t.user_id = ${targetUserId} AND s.app_id = t.app_id`;
     await tx.$executeRaw`UPDATE app_members SET user_id = ${targetUserId} WHERE user_id = ${sourceUserId}`;
+    // #5185: the links the merged-away person made. A link both accounts hold is the survivor's; the rest move to the survivor.
+    await tx.$executeRaw`DELETE FROM app_memory_links s USING app_memory_links t
+      WHERE s.attached_by = ${sourceUserId} AND t.attached_by = ${targetUserId}
+        AND s.app_id = t.app_id AND s.memory_id = t.memory_id`;
+    await tx.$executeRaw`UPDATE app_memory_links SET attached_by = ${targetUserId} WHERE attached_by = ${sourceUserId}`;
 
     // Preserve the union's strongest live subscription. When both are active,
     // keep the earlier activation and broader expiry (NULL = perpetual).
@@ -730,7 +745,10 @@ async function runMergeTxn(
     // second merge of the same account can't record a second target.
     // #1332: written BEFORE the reassignments below, because the content-validation report
     // trigger admits a reporter_user_id change only along a merge recorded here.
-    await tx.userMerge.create({ data: { sourceUserId, targetUserId, mergedBy: actor, ...consent } });
+    // #5212 (cor:api:010:02): the record is written by the owner-owned function hadron_record_user_merge, the one writer, which checks
+    // that this transaction consumed the consent for exactly this pair and retires the source (deleted_at, deleted_by) itself.
+    await tx.$queryRaw`SELECT public.hadron_record_user_merge(${sourceUserId}, ${targetUserId}, ${actor}, ${consent.consentHash},
+      ${JSON.stringify(consent.consentReceipt)}::jsonb)`;
 
     // #5009: the survivor's owner limits stay and the source's are deleted (never re-owned: one row per owner and key).
     limitChanges.push(...(await deleteOwnerLimits(tx, { userId: sourceUserId }, 'account-merge')));
@@ -754,10 +772,7 @@ async function runMergeTxn(
       await runWithIds(`UPDATE "${table}" SET ${assignments} WHERE ${predicate}`);
     }
 
-    await tx.user.update({
-      where: { id: sourceUserId },
-      data: { deletedAt: new Date(), deletedBy: actor, updatedBy: actor },
-    });
+    // The source was retired by hadron_record_user_merge above (#5212), before the transfers.
 
     return tx.user.findUniqueOrThrow({ where: { id: targetUserId } });
   }, {

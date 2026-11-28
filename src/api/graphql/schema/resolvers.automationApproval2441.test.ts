@@ -4,6 +4,7 @@
  * Red first: every case below fails on main, where only previewAutomation and
  * reAdoptAutomation exist.
  */
+import { activeMemoryReadGrant } from '../../../test/appGrants5404.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb } from '../../../test/helpers.js';
@@ -44,7 +45,7 @@ async function fixture() {
   const entryNodeUrn = 'hrn:node:adopt.test:flow:entry';
   const schedule = await appRunMutations.createAgentSchedule({}, { input: { appRef: app.id, name: 'Weekly', cron: '0 6 * * 1', entryNodeUrn, runAsSelf: true, agentRef: agent.id } }, ctx as never);
   const webhook = await appRunMutations.createAgentWebhook({}, { input: { appRef: app.id, name: 'inbound', entryNodeUrn, runAsSelf: true, agentRef: agent.id } }, ctx as never);
-  const manual = await mintAppRun(db, { appId: app.id, organizationId: org.id, agentId: agent.id, userId: user.id, triggerKind: 'MANUAL', entryNodeUrn });
+  const manual = await mintAppRun(db, { appId: app.id, owner: { organizationId: org.id }, agentId: agent.id, userId: user.id, triggerKind: 'MANUAL', entryNodeUrn });
   const llm = vi.fn(async () => ({ text: 'ok', tokensIn: 1, tokensOut: 1, provider: 'test', model: 'test' }));
   const deps: RunExecutionDeps = { ...makeProdRunDeps(db), resolveConfig: vi.fn(async () => ({ config: {} }) as never), llm, writeOutput: vi.fn(async () => null) };
   const ref = { SCHEDULE: schedule.id, WEBHOOK: webhook.webhook.id, MANUAL: manual.id } as Record<Kind, string>;
@@ -291,7 +292,7 @@ describe('approve and decline', () => {
   });
   it.each(['SCHEDULE', 'WEBHOOK'] as const)('declining an adopted %s revokes it: the next run fails AUTOMATION_UNADOPTED and an existing run snapshot is untouched', async kind => {
     const f = await fixture();
-    const mk = () => mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: kind, triggerId: f.ref[kind], entryNodeUrn: f.entryNodeUrn });
+    const mk = () => mintAppRun(db, { appId: f.app.id, owner: { organizationId: f.org.id }, agentId: f.agent.id, userId: f.user.id, triggerKind: kind, triggerId: f.ref[kind], entryNodeUrn: f.entryNodeUrn });
     const before = await mk();
     expect(await decline(f, kind)).toBe(true);
     expect((await db.appRun.findUniqueOrThrow({ where: { id: before.id } })).automationPin).toEqual(before.automationPin);
@@ -307,7 +308,7 @@ describe('approve and decline', () => {
     expect(await decline(f, 'MANUAL')).toBe(true);
     expect(await db.manualAutomationPin.count({ where: { runId: f.manual.id } })).toBe(0);
     expect((await db.appRun.findUniqueOrThrow({ where: { id: f.manual.id } })).automationPin).toEqual(before.automationPin);
-    const poll = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: 'INTEGRATION', parentRunId: f.manual.id, entryNodeUrn: f.entryNodeUrn });
+    const poll = await mintAppRun(db, { appId: f.app.id, owner: { organizationId: f.org.id }, agentId: f.agent.id, userId: f.user.id, triggerKind: 'INTEGRATION', parentRunId: f.manual.id, entryNodeUrn: f.entryNodeUrn });
     expect(await executeAppRun(db, poll.id, f.deps)).toBe('failed');
     expect((await db.appRun.findUniqueOrThrow({ where: { id: poll.id } })).failure).toMatchObject({ code: 'AUTOMATION_UNADOPTED' });
     // The declined origin is still reachable by its run id, as UNADOPTED, and can be approved again.
@@ -317,7 +318,7 @@ describe('approve and decline', () => {
   });
   it('mutations act on the exact origin run, never a substitute', async () => {
     const f = await fixture();
-    const newer = await mintAppRun(db, { appId: f.app.id, organizationId: f.org.id, agentId: f.agent.id, userId: f.user.id, triggerKind: 'MANUAL', entryNodeUrn: f.entryNodeUrn });
+    const newer = await mintAppRun(db, { appId: f.app.id, owner: { organizationId: f.org.id }, agentId: f.agent.id, userId: f.user.id, triggerKind: 'MANUAL', entryNodeUrn: f.entryNodeUrn });
     await decline(f, 'MANUAL');
     expect(await db.manualAutomationPin.count({ where: { runId: newer.id } })).toBe(1);
     await expect(M.declineAutomation({}, { triggerKind: 'MANUAL', triggerRef: generateId() }, f.ctx)).rejects.toMatchObject({ extensions: { code: 'NOT_FOUND' } });
@@ -442,7 +443,9 @@ describe('user-owned Apps (CHECKED contract: covered, nullable organization, str
     spy.mockRestore();
   });
 
-  it('#2883: a legacy row whose entry is gone still shows its live read grants (the stale-entry answer is not a null readGrants)', async () => {
+  // #5404 (cor:acl:140:02): the per-automation read grant is retired; `readGrants` stays in the SDL, deprecated, and is always
+  // empty. What an App's runs read outside their memories is its signed `memory.read` grants, which an approval does not list.
+  it('#5404 (was #2883): a legacy row whose entry is gone answers the stale-entry shape with an empty readGrants, never null', async () => {
     const f = await fixture();
     const legacy = await db.agentSchedule.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, userId: f.user.id, name: 'Legacy', cron: '* * * * *', entryNodeUrn: 'hrn:node:adopt.test:flow:gone' } });
     const target = await db.memory.create({ data: { name: 'KnowStale', urn: 'adopt.test:knowstale', class: 'knowledge', organizationId: f.org.id } });
@@ -450,10 +453,10 @@ describe('user-owned Apps (CHECKED contract: covered, nullable organization, str
     const d = await Q.automationApproval({}, { triggerKind: 'SCHEDULE', triggerRef: legacy.id }, f.ctx);
     expect(d.state).toBe('UNADOPTED');
     expect(d.hash).toBe('');
-    expect(d.readGrants.map((g: any) => [g.memoryUrn, g.prefix])).toEqual([['hrn:mem:adopt.test:knowstale', 'tasks']]);
+    expect(d.readGrants).toEqual([]);
   });
 
-  it('#2883 (0081 A): the approval shows the trigger\'s LIVE read grants (memory and prefix), never a revoked one; a manual run shows none', async () => {
+  it('#5404 (was #2883 0081 A): readGrants is empty for every trigger kind, whatever old rows or signed memory.read grants exist', async () => {
     const f = await fixture();
     const target = await db.memory.create({ data: { name: 'Know', urn: 'adopt.test:know', class: 'knowledge', organizationId: f.org.id } });
     const foreignOrg = await db.organization.create({ data: { name: 'Foreign', urn: 'foreign.test' } });
@@ -462,9 +465,7 @@ describe('user-owned Apps (CHECKED contract: covered, nullable organization, str
     await db.appAutomationReadGrant.create({ data: { ...base, memoryId: target.id, prefix: 'tasks' } });
     await db.appAutomationReadGrant.create({ data: { ...base, memoryId: target.id, prefix: 'old', revokedAt: new Date(), revokedBy: f.user.id } });
     await db.appAutomationReadGrant.create({ data: { ...base, memoryId: hidden.id, prefix: null } });
-    const d = await detail(f, 'SCHEDULE');
-    expect(d.readGrants.map((g: any) => [g.memoryUrn, g.prefix])).toEqual([['hrn:mem:adopt.test:know', 'tasks'], [null, null]]);
-    expect((await detail(f, 'WEBHOOK')).readGrants).toEqual([]);
-    expect((await detail(f, 'MANUAL')).readGrants).toEqual([]);
+    await activeMemoryReadGrant(f.app.id, target.id, { issuerUserId: f.user.id });
+    for (const kind of ['SCHEDULE', 'WEBHOOK', 'MANUAL'] as const) expect((await detail(f, kind)).readGrants).toEqual([]);
   });
 });

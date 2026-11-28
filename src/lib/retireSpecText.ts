@@ -20,6 +20,9 @@ export function escapeMarkdownText(text: string): string {
   return text.replace(/[&<>\\`*_\[\]~|]/g, (c) => (c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : `\\${c}`));
 }
 
+/** A line that opens a retirement banner: `retirementBanner` below writes it, and spec lint (#5109) reads it. One source. */
+export const RETIREMENT_BANNER_LINE = /^> \*\*\u26A0\uFE0F (?:Superseded|Withdrawn, never in force|Rescinded)\*\*/;
+
 const TAIL = '**Do not apply.** Retained as a tombstone; the citation is never renumbered.';
 
 /** The banner placed under the title, as one line of blockquote. */

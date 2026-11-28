@@ -4,7 +4,7 @@
  * Thin on purpose: every rule lives in `lib/scopes.ts` so the MCP tools and
  * these resolvers are two entry points over ONE computation. What is here is
  * the `cor:api:120` shape (find-one by ref, `{ items, total }` find-many with
- * the `cor:api:100:01` orgId scope), `cor:api:140` ref naming, and the
+ * the `cor:api:100:01` orgRef scope), `cor:api:140` ref naming, and the
  * create/update/delete trio.
  *
  * Authorization (plan §8):
@@ -96,7 +96,7 @@ function requireWriter(ctx: Context): string {
 async function writableScope(ctx: Context, ref: string): Promise<Scope> {
   const scope = await readableScope(ctx, ref);
   if (!scope) {
-    throw new GraphQLError(`No match for scopeRef "${ref}".`, { extensions: { code: 'NOT_FOUND' } });
+    throw new GraphQLError('No match for scopeRef.', { extensions: { code: 'NOT_FOUND' } });
   }
   await requireScopeWrite(ctx, scope);
   return scope;
@@ -108,10 +108,10 @@ export const scopeQueries = {
 
   scopes: async (
     _: unknown,
-    { filter, orgId, limit, offset }: { filter?: ScopeFilterInput | null; orgId?: string | null; limit?: number | null; offset?: number | null },
+    { filter, orgRef, limit, offset }: { filter?: ScopeFilterInput | null; orgRef?: string | null; limit?: number | null; offset?: number | null },
     ctx: Context,
   ) => {
-    const scope = await resolveOrgScope(ctx, orgId);
+    const scope = await resolveOrgScope(ctx, orgRef);
     if (!scope) return EMPTY_PAGE;
     const where: Prisma.ScopeWhereInput[] = [await readableScopesWhere(ctx, scope.memberOrgIds)];
     if (scope.scopedOrgId) {
@@ -207,7 +207,7 @@ export const scopeQueries = {
       const r = await resolveScopeByNameInApp(ctx, name, appId);
       if (r.ambiguousAmong.length) {
         throw new GraphQLError(
-          `"${name}" is owned by ${r.ambiguousAmong.length} Agents installed in this App; address one by id: ${r.ambiguousAmong.map((s) => s.id).join(', ')}.`,
+          `That scope name is owned by ${r.ambiguousAmong.length} Agents installed in this App; address one by id: ${r.ambiguousAmong.map((s) => s.id).join(', ')}.`,
           { extensions: { code: 'SCOPE_NAME_AMBIGUOUS', candidates: r.ambiguousAmong.map((s) => s.id) } },
         );
       }

@@ -7,7 +7,7 @@
  * on a bare client its locking reads are point-in-time.
  */
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
-import { rootTriggerOfRun } from '../automationReadGrant.js';
+import { rootTriggerOfRun } from '../automation/rootTrigger.js';
 import { RUN_CLIENT_PREFIX, isRunPrincipal } from './runPrincipal.js';
 
 /** The App columns the arm judges (a structural subset of `TaskApp` and the worker gate's `AppRow`). */

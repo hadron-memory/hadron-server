@@ -1,3 +1,6 @@
+import { isPureAppKeyShape } from '../lib/appMemoryLinks.js';
+import { mayBeOwnAppMemory, ownAppMemoryIds } from '../lib/appOwnMemory.js';
+import { grantReadReachFor } from '../lib/grants/readGrant.js';
 import { personalOrgAgentTextBatch } from '../lib/auth/personalOrgAgentInstall.js';
 import { listAppInstallations, loadAppInstallationPage } from '../lib/appInstallations.js';
 /**
@@ -40,9 +43,10 @@ import { sessionScopedMemoryIds } from '../lib/auth/sessionScopedMemoryIds.js';
 import { cappedLinkLevel, type LinkCapMemory } from '../lib/auth/agentMemoryLinkCap.js';
 import { LIVE_ORG_MEMBERSHIP } from '../lib/auth/liveOrgMembership.js';
 import { isRunPrincipal } from '../lib/auth/runPrincipal.js';
+import { isForeignUserHolding, isUserHolding } from '../lib/auth/userHolding.js';
 import { mcpRequestSessionContext } from './requestSession.js';
 import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../lib/auth/publicKnowledgeRead.js';
-import { userlessRunHoldsWriteGrant, type WriteDestination } from '../lib/appWriteGrant.js';
+import { userlessRunHoldsMemoryWriteGrant, type WriteDestination } from '../lib/grants/writeGrant.js';
 import { installMemoryAudience, isInstallMemoryRow, readableInstallMemoryIds } from '../lib/auth/installMemory.js';
 import { canManageAgentSystemMemory } from '../lib/auth/managedSystemMemory.js';
 
@@ -576,6 +580,14 @@ export async function getPrincipalAppMemoryAccess(
       }
     }
   }
+  // #5321 (cor:acl:140:02, cor:agt:010:01): what a pure App key holding grant:read, or a userless run, reads through its App's read
+  // grants (READ only, judged at use). One judge, shared with the GraphQL gate; never a user's, a session's or an impersonation's
+  // reach. An attachment adds nothing (cor:dmo:060:22).
+  for (const id of await grantReadReachFor(db, principal)) if (!access.has(id)) access.set(id, 'READ_ONLY');
+  // #5398 (cor:api:120:03): a pure App key reads its own App's shared app-class memories, READ only. The one predicate
+  // (`src/lib/appOwnMemory.ts`); for an org App it repeats the team-space fold, for a user-owned App it is the read that
+  // `admissibleFoldRows` rule 2 withholds from a credential-only principal.
+  for (const id of await ownAppMemoryIds(db, principal)) if (!access.has(id)) access.set(id, 'READ_ONLY');
   return access;
 }
 
@@ -992,7 +1004,7 @@ export interface MemoryGateOptions {
   /**
    * #2484: the node the caller is about to create or update, and where. Named ONLY by the node write door and the run
    * write pre-check; every other verb (delete, move, edges, settings, stored files) leaves it unset. It is what lets
-   * an App's prefix-scoped write grant ({@link userlessRunHoldsWriteGrant}) answer at all, so a forgotten option
+   * an App's `memory.write` grant ({@link userlessRunHoldsMemoryWriteGrant}) answer at all, so a forgotten option
    * fails closed.
    */
   destination?: WriteDestination;
@@ -1069,6 +1081,7 @@ export async function canWriteToMemory(
     select: {
       class: true, userId: true, userMemoryOfAgentId: true, appId: true,
       ownerUserId: true, organizationId: true, installOfAgentId: true, isInstallMemory: true,
+      createdBy: true,
       workerOf: { select: { id: true } },
     },
   });
@@ -1080,12 +1093,13 @@ export async function canWriteToMemory(
   // authority fence (Diego P2 on #2064); an inline MCP writer cannot, so it gets no write.
   if (isInstallMemoryRow(memory)) return false;
 
-  // #2484 (cor:agt:010:01): the one way a USERLESS run principal writes outside what it already could — an App's
-  // prefix-scoped, live-checked write grant on THIS destination. Additive and fail-closed: a miss falls through to
-  // every rule below unchanged. It sits before the personal/private branch because that branch answers a run
-  // principal with no user false, and a private memory is otherwise "categorically unavailable to every AppRun"
-  // (#1719 R5a): Holger's 2026-10-27 ruling lets the memory's OWNER lift that for one prefix, never an encrypted one.
-  if (opts.destination && await userlessRunHoldsWriteGrant(db, auth, memoryId, opts.destination)) return true;
+  // #5404 (cor:acl:140:02, cor:agt:010:01): the one way a USERLESS run principal writes outside what it already could, a signed
+  // `memory.write` grant held by its App that covers THIS destination, judged live (it replaces ruling 0083's unsigned write grant,
+  // #2484, whose rows are deleted at deploy). Additive and fail-closed: a miss falls through to every rule below unchanged. It sits
+  // before the personal/private branch because that branch answers a run principal with no user false, and a private memory is
+  // otherwise "categorically unavailable to every AppRun" (#1719 R5a): the memory's OWNER lifts that by signing the grant, never for
+  // an encrypted one.
+  if (opts.destination && await userlessRunHoldsMemoryWriteGrant(db, auth, memoryId, opts.destination)) return true;
 
   if (memory.class === 'personal' || memory.class === 'private') {
     if (auth.userId !== memory.userId || auth.impersonation) return false;
@@ -1209,7 +1223,8 @@ export async function canWriteToMemory(
   // getMemoryAccess unions across all the user's accessible Apps —
   // the access map answers the question "does the caller have RW on
   // this memory via *any* of their App memberships?"
-  if (auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER')) return true;
+  // hadron-internal#88: no role shortcut reaches another user's chat holding; it falls to the access map, which never holds it.
+  if (!isForeignUserHolding(memory, auth.userId) && (auth.roles?.includes('ADMIN') || auth.roles?.includes('OWNER'))) return true;
 
   const access = await getMemoryAccess(db, auth);
   return access.get(memoryId) === 'READ_WRITE';
@@ -1274,6 +1289,13 @@ async function canReadMemoryRow(
 ): Promise<boolean> {
   // #2044: an install memory's content is its live App's participants alone.
   if (isInstallMemoryRow(memory)) return (await installMemoryAudience(db, auth, memory)).read;
+  // #5321: a pure App key holding grant:read, or a userless run, reads a memory its App holds a live read grant for (judged at
+  // use, READ only, the one judge). Before the user-owned branches below, which would answer for it first; a miss falls
+  // through to today's logic unchanged.
+  if (isPureAppKeyShape(auth) && (await grantReadReachFor(db, auth, [memory.id])).has(memory.id)) return true;
+  // #5398: a pure App key reads its own App's shared app-class memory (the one predicate, READ only). Also above the
+  // user-owned branch below, which would refuse a user-owned App's own memory first.
+  if (mayBeOwnAppMemory(auth, memory) && (await ownAppMemoryIds(db, auth, [memory.id])).has(memory.id)) return true;
   if (memory.class === 'personal' || memory.class === 'private') {
     // #1719 R5a: private is categorically unavailable to every AppRun,
     // including detached/free-standing holdings. No input or grant overrides it.
@@ -1353,6 +1375,9 @@ async function canReadMemoryRow(
   }
 
   if (readsOwnNoAppHolding(auth, memory)) return true;
+  // hadron-internal#88 (cor:cht:010:02): a per-user chat holding is its creator's alone, so no role bypass, App fold or
+  // organisation access map below admits anybody else. Judged by the same predicate as the record gate.
+  if (isUserHolding(memory)) return false;
 
   // Non-personal memory: ADMIN/OWNER bypass + access map check.
   // Per D-2026-05-21-003, when auth.appId is unset (multi-App OAuth caller

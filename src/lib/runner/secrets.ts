@@ -27,6 +27,7 @@ import {
 } from '../secrets.js';
 import type { WebFetchAuth } from '../webfetchClient.js';
 import type { RunToolContext } from './tools/types.js';
+import { orgIdOf, requireOwnerRefOf } from '../owner.js';
 
 export interface ResolvedRunSecret {
   id: string;
@@ -58,9 +59,12 @@ export async function resolveRunSecret(
       case 'user':
         if (ctx.run.userId) candidates.push({ ownerType: 'user', ownerId: ctx.run.userId });
         break;
-      case 'org':
-        candidates.push({ ownerType: 'org', ownerId: ctx.run.organizationId });
+      case 'org': {
+        // #5077: a person's run has no organization scope; it resolves the on-behalf-of user's secrets only.
+        const runOrgId = orgIdOf(requireOwnerRefOf(ctx.run));
+        if (runOrgId !== null) candidates.push({ ownerType: 'org', ownerId: runOrgId });
         break;
+      }
     }
   }
   if (candidates.length === 0) return null;

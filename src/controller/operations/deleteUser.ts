@@ -8,6 +8,7 @@ import { deleteSecretsForOwner } from '../../lib/secrets.js';
 import { assertOwnerLimitSnapshotFresh, deleteOwnerLimits, logOwnerLimitChanges, type OwnerLimitChange } from '../../lib/ownerLimits/changes.js';
 import { releasePrincipal } from '../../lib/principal/mintPrincipal.js';
 import { softDeleteOrganizationCore } from './softDeleteOrganization.js';
+import { assertLedgerSnapshotFresh } from '../../lib/metering/ledgerOwner.js';
 import { dispatchChatToolTeardown, type ChatToolTeardown } from '../../lib/chatToolTeardown.js';
 import { assertIssuerInvitationSnapshotFresh, revokeOrgInvitationsByIssuer } from '../../lib/auth/revokeOrgInvitations.js';
 import { AuthoritySnapshotStale, lockAuthorityAnchors } from '../../lib/auth/authorityAnchors.js';
@@ -229,6 +230,9 @@ async function runDeletionTxn(
         WHERE id = ${targetUserId} AND deleted_at IS NULL FOR UPDATE
       `;
       if (locked.length === 0) throw new Error('User not found');
+      // #5352 (hrn:node:hadronmemory.com:specs:cor:dmo:170:08): this SERIALIZABLE snapshot predates the lock, so a ledger append that
+      // committed meanwhile would be missed by the clear below; with the row held no new entry can name the person. Stale: retried.
+      await assertLedgerSnapshotFresh(tx, db, { userId: targetUserId });
       await assertUserGrantSnapshotFresh(tx, db, targetUserId);
       await assertOwnerLimitSnapshotFresh(tx, db, [{ userId: targetUserId }, ...membershipScope.map((organizationId) => ({ organizationId }))]);
       for (const orgId of membershipScope) {
@@ -303,6 +307,10 @@ async function runDeletionTxn(
       const chatTeardowns: ChatToolTeardown[] = [];
       const limitChanges: OwnerLimitChange[] = [];
       for (const orgId of soleMemberOrgIds) {
+        // #5352: the organization row FOR UPDATE (the lock softDeleteOrganizationCore takes) BEFORE the snapshot check, for the
+        // reason given at the person's check above.
+        await tx.$queryRaw`SELECT id FROM organizations WHERE id = ${orgId} FOR UPDATE`;
+        await assertLedgerSnapshotFresh(tx, db, { organizationId: orgId });
         chatTeardowns.push(...(await softDeleteOrganizationCore(tx, orgId, actorUserId, undefined, limitChanges)));
       }
       // Soft-delete every remaining live membership row (the platform-wide
@@ -359,9 +367,14 @@ async function runDeletionTxn(
       await tx.agentImport.deleteMany({
         where: { importedAgent: { ownerUserId: targetUserId } },
       });
+      // #5077 (cor:aut:020:03): the runs of the person's Apps go with the person. `app_runs` has no foreign key to `apps`, so
+      // the App delete below does not remove them, and the user row is kept as a tombstone, so the cascade on
+      // `app_runs.owner_user_id` never fires here. Usage events and ledger entries are not linked to a run by a foreign key
+      // and stay. The run's served prompt, manual pin, poll bindings and event receipts go by their own cascades.
+      await tx.appRun.deleteMany({ where: { ownerUserId: targetUserId } });
       // User-owned Apps: after foreign strict-owner holdings detach, the
       // App cascade removes the remaining app-scoped memories, keys,
-      // members, installs, runs, schedules, webhooks, pending setups — and
+      // members, installs, schedules, webhooks, pending setups — and
       // their Worker castings (Worker.appId cascades).
       await tx.app.deleteMany({ where: { ownerUserId: targetUserId } });
       // #5074: the person's own daily counters (`user` scope; no foreign key, so no cascade). Idempotent under retry.
@@ -501,6 +514,12 @@ async function runDeletionTxn(
           updatedBy: actorUserId,
         },
       });
+
+      // #5302 (hrn:node:hadronmemory.com:specs:cor:dmo:170:08, Edge Cases: an erased person's entries are "kept without the person"),
+      // AFTER the soft delete above: the append-only trigger lets the owner link go only for a person with no live row. Only the owner
+      // column changes. A merge never comes here (mergeUsers re-points instead, #5014). Before the grant writes below, so the grant
+      // row lock stays the last lock this transaction takes.
+      await tx.$executeRaw`UPDATE credit_ledger_entries SET owner_user_id = NULL WHERE owner_user_id = ${targetUserId}`;
 
       // #3690 (S2a-h, cor:acl:140:03 and :08, ruling 0255 item 3), AFTER the soft delete above: the database lets an issuer link go only
       // for an erased person (a users row that is soft-deleted or gone), and that is true only from here.

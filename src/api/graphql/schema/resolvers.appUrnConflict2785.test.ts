@@ -23,6 +23,9 @@ let userId: string;
 
 const ctx = (): Context => ({ db, userId, roles: ['READER'] });
 const create = (name: string) => M.createApp({}, { orgRef: orgId, agentRef: agentId, name }, ctx());
+// #5203 S3 (cor:urn:010:01): a URN DERIVED from the name never refuses, it iterates; the CONFLICT and the reclaim
+// below answer a SUPPLIED `urn`, so those attempts pass it explicitly.
+const createAt = (name: string, urn: string) => M.createApp({}, { orgRef: orgId, agentRef: agentId, name, urn }, ctx());
 
 const refusal = async (p: Promise<unknown>) => {
   try {
@@ -48,11 +51,13 @@ describe('already-existing App URN is CONFLICT (#2785)', () => {
     const first = await create('Probe');
     const before = await db.app.count();
     const row = await db.app.findUniqueOrThrow({ where: { id: first.id } });
-    const r = await refusal(create('Probe'));
+    const r = await refusal(createAt('Probe', 'probe'));
     expect(r.extensions?.code).toBe('CONFLICT');
     expect(r.message).toBe(`An app with URN "${first.urn}" already exists`);
     expect(await db.app.count()).toBe(before);
     expect(await db.app.findUniqueOrThrow({ where: { id: first.id } })).toEqual(row);
+    // The same name with no urn supplied iterates instead (#5203 S3).
+    expect((await create('Probe')).urn).toBe(`${first.urn}-2`);
   });
 
   it('b. oracle: identical answer for a holder the caller can read and one they provably cannot, no holder fields', async () => {
@@ -67,8 +72,8 @@ describe('already-existing App URN is CONFLICT (#2785)', () => {
     expect((await Q.app({}, { ref: visible.id }, ctx()))?.id).toBe(visible.id);
     const read = await Q.app({}, { ref: hidden.id }, ctx()).then((r: any) => r, (e: any) => e);
     expect(read?.id).toBeUndefined();
-    const v = await refusal(create('Visible'));
-    const h = await refusal(create('Hidden'));
+    const v = await refusal(createAt('Visible', 'visible'));
+    const h = await refusal(createAt('Hidden', 'hidden'));
     expect(v.extensions?.code).toBe('CONFLICT');
     expect(h.extensions).toEqual(v.extensions);
     expect(Object.keys(h.extensions ?? {}).sort()).toEqual(['code']);
@@ -77,10 +82,13 @@ describe('already-existing App URN is CONFLICT (#2785)', () => {
     expect((await db.app.findUniqueOrThrow({ where: { id: hidden.id } })).organizationId).toBe(otherOrg.id);
   });
 
-  it('c. control: a soft-deleted App at the URN is still reclaimed', async () => {
+  it('c. control: a soft-deleted App at a SUPPLIED urn is still reclaimed; a derived urn skips it (#5203 S3)', async () => {
     const first = await create('Gone');
     await db.app.update({ where: { id: first.id }, data: { deletedAt: new Date() } });
-    const again = await create('Gone');
+    const derived = await create('Gone');
+    expect(derived.urn).toBe(`${first.urn}-2`);
+    expect(await db.app.findUnique({ where: { id: first.id } })).not.toBeNull();
+    const again = await createAt('Gone', 'gone');
     expect(again.urn).toBe(first.urn);
   });
 });

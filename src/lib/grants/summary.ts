@@ -51,7 +51,7 @@ export function summaryPlaceholders(template: string): string[] {
   return names;
 }
 
-const URN_KIND = { app: 'app', 'node-ref': 'node', 'worker-ref': 'worker' } as const;
+const URN_KIND = { app: 'app', 'node-ref': 'node', 'worker-ref': 'worker', 'memory-ref': 'mem', 'org-ref': 'org' } as const;
 /**
  * The whole string must be a canonical grammar-v2 URN of the right entity kind: the strict v2 parser accepts it whole (so no
  * space, control character, brace or trailing text can ride behind a valid prefix) and carries no `#` fragment. A caller that
@@ -89,9 +89,36 @@ export const SUMMARY_FORMATTERS = {
   'worker-ref': (urn: string, placeholder: string) => canonical('worker-ref', placeholder, urn),
   'secret-ref': (urn: string, placeholder: string) => canonicalSecret(placeholder, urn),
   'secret-mark': (mark: string, placeholder: string) => secretMark(placeholder, mark),
+  // #5321: a memory, and (memory.read's organization form) an organization, are written as their canonical grammar-v2 URNs.
+  'memory-ref': (urn: string, placeholder: string) => canonical('memory-ref', placeholder, urn),
+  'org-ref': (urn: string, placeholder: string) => canonical('org-ref', placeholder, urn),
 } as const;
 
-export type SummaryFormatters = { app: (urn: string) => string; 'node-ref': (urn: string, placeholder: string) => string; 'worker-ref': (urn: string, placeholder: string) => string; 'secret-ref': (urn: string, placeholder: string) => string; 'secret-mark': (mark: string, placeholder: string) => string };
+export type SummaryFormatters = { app: (urn: string) => string; 'node-ref': (urn: string, placeholder: string) => string; 'worker-ref': (urn: string, placeholder: string) => string; 'secret-ref': (urn: string, placeholder: string) => string; 'secret-mark': (mark: string, placeholder: string) => string; 'memory-ref'?: (urn: string, placeholder: string) => string; 'org-ref'?: (urn: string, placeholder: string) => string };
+
+/**
+ * #5321 (cor:acl:140:02, `memory.read`'s two forms): a memory-ref value is written with the words that say which form it is, so the
+ * signer reads what it opens. A single reference that resolves to an ORGANIZATION URN is form (a), "all ORGANIZATION knowledge of
+ * <org>"; one or more references that resolve to memory URNs are form (b), "the memory <urn>" or "the memories <urn>, <urn>" in the
+ * stored order. An organization inside a list, an entry the caller did not resolve, and anything else is refused, never guessed.
+ */
+function memoryRefWords(name: string, value: unknown, entries: unknown[], refs: SummaryInput['refs'], fmt: SummaryFormatters): string {
+  const urns: string[] = [];
+  for (const entry of entries) {
+    if (entry === undefined || entry === null || entry === '') throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no value`);
+    if (entry === '*' || typeof entry === 'object') throw new GrantSummaryError('WILDCARD', `summary placeholder {${name}} has a wildcard or structured value`);
+    if (typeof entry !== 'string') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a value of a type the summary cannot write`);
+    const ref = Object.prototype.hasOwnProperty.call(refs, entry) ? refs[entry] : undefined;
+    if (!ref) throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no resolved reference`);
+    urns.push(ref.urn);
+  }
+  let isOrg = false;
+  try { isOrg = !Array.isArray(value) && parseUrnV2(urns[0]).type === 'org'; } catch { isOrg = false; }
+  if (isOrg) return `all ORGANIZATION knowledge of ${(fmt['org-ref'] ?? SUMMARY_FORMATTERS['org-ref'])(urns[0], name)}`;
+  const format = fmt['memory-ref'] ?? SUMMARY_FORMATTERS['memory-ref'];
+  const written = urns.map((u) => format(u, name));
+  return `${written.length === 1 ? 'the memory' : 'the memories'} ${written.join(', ')}`;
+}
 
 export function renderGrantSummary(input: SummaryInput, fmt: SummaryFormatters = SUMMARY_FORMATTERS): string {
   const { action, app, values, refs } = input;
@@ -111,6 +138,13 @@ export function renderGrantSummary(input: SummaryInput, fmt: SummaryFormatters =
     // write refuses the whole sentence. An empty list has no value.
     const entries: unknown[] = Array.isArray(value) ? value : [value];
     if (entries.length === 0) throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no value`);
+    if (param.type === 'memory-ref') { resolved.set(name, memoryRefWords(name, value, entries, refs, fmt)); continue; }
+    // #5404 (`memory.write`'s prefix): the wildcard is the whole of every named memory, written as words; a loc is written as itself.
+    if (param.type === 'loc-prefix') {
+      if (Array.isArray(value) || typeof value !== 'string') throw new GrantSummaryError('UNSUPPORTED_TYPE', `summary placeholder {${name}} has a list value`);
+      resolved.set(name, value === '*' ? 'any loc' : `the loc ${value} and below it`);
+      continue;
+    }
     const written: string[] = [];
     for (const entry of entries) {
       if (entry === undefined || entry === null || entry === '') throw new GrantSummaryError('MISSING_VALUE', `summary placeholder {${name}} has no value`);

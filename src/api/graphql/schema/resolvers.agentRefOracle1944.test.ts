@@ -58,10 +58,13 @@ const SURFACES: Array<[string, string]> = [
 ];
 const MUTATIONS = SURFACES.filter(([s]) => s !== 'Query.agent');
 
-/** An absent Agent's answer on each surface: AGENT_NOT_FOUND echoing the ref, or null with no error. */
-const absentAnswer = (surface: string, ref: string): Answer => surface === 'Query.agent'
+/**
+ * An absent Agent's answer on each surface: AGENT_NOT_FOUND, or null with no error. #5168: the answer no longer quotes or
+ * relays the ref (it did, in the message and `extensions.ref`), so it is one fixed answer for every ref.
+ */
+const absentAnswer = (surface: string, _ref: string): Answer => surface === 'Query.agent'
   ? { data: null, error: null }
-  : { data: null, error: { message: `AGENT_NOT_FOUND: ${ref}`, extensions: { code: 'AGENT_NOT_FOUND', ref } } };
+  : { data: null, error: { message: 'AGENT_NOT_FOUND: nothing found for the given ref.', extensions: { code: 'AGENT_NOT_FOUND' } } };
 
 let orgA: { id: string; urn: string };
 let orgB: { id: string; urn: string };
@@ -291,7 +294,7 @@ describe('#1944 startSession\'s optional agentRef: an unreadable Agent answers l
     query: 'mutation($input: SessionInput!) { startSession(input: $input) { id } }',
     variables: { input: { id: generateId(), agentRef: ref } },
   });
-  const absent = (ref: string): Answer => ({ data: null, error: { message: `Agent not found: ${ref}`, extensions: { code: 'BAD_USER_INPUT' } } });
+  const absent = (_ref: string): Answer => ({ data: null, error: { message: 'Agent not found', extensions: { code: 'BAD_USER_INPUT' } } });
 
   it('another org\'s ADMIN gets exactly the absent answer for a real Agent and a guessed one, and no session is written', async () => {
     expect(await askWith(ctx(foreignAdmin), start(nobody()))).toEqual(absent(nobody()));
@@ -320,15 +323,15 @@ describe('#1944 startSession\'s optional agentRef: an unreadable Agent answers l
 const GROUP_A: Array<[string, (agentRef: string) => { query: string; variables: Record<string, unknown> }, (ref: string) => Answer]> = [
   ['revokeAgentSubscription',
     (ref) => ({ query: 'mutation($ref: ID!, $user: ID!) { revokeAgentSubscription(agentRef: $ref, userRef: $user) { agentId } }', variables: { ref, user: member } }),
-    (ref) => ({ data: null, error: { message: `No match for agentRef "${ref}".`, extensions: { code: 'NOT_FOUND' } } })],
+    (_ref) => ({ data: null, error: { message: 'No match for agentRef.', extensions: { code: 'NOT_FOUND' } } })],
   ['removeAgentImport',
     (ref) => ({ query: 'mutation($ref: ID!, $imp: ID!) { removeAgentImport(parentAgentRef: $ref, importedAgentRef: $imp) }', variables: { ref, imp: urnOf(pub) } }),
     (ref) => absentAnswer('removeAgentImport', ref)],
   ['createAiServiceConfig (AGENT owner)',
-    (ref) => ({ query: 'mutation($ref: ID!) { createAiServiceConfig(ownerType: AGENT, ownerId: $ref, name: "probe", provider: "anthropic", model: "m") { id } }', variables: { ref } }),
+    (ref) => ({ query: 'mutation($ref: ID!) { createAiServiceConfig(ownerType: AGENT, ownerRef: $ref, name: "probe", provider: "anthropic", model: "m") { id } }', variables: { ref } }),
     (ref) => absentAnswer('createAiServiceConfig', ref)],
   ['aiServiceConfigs (AGENT owner)',
-    (ref) => ({ query: 'query($ref: ID!) { aiServiceConfigs(filter: { ownerType: AGENT, ownerId: $ref }) { total } }', variables: { ref } }),
+    (ref) => ({ query: 'query($ref: ID!) { aiServiceConfigs(filter: { ownerType: AGENT, ownerRef: $ref }) { total } }', variables: { ref } }),
     (ref) => absentAnswer('aiServiceConfigs', ref)],
   ['updateAgentAIConfig',
     (ref) => ({ query: 'mutation($ref: ID!) { updateAgentAIConfig(agentRef: $ref, provider: "anthropic", apiKey: "sk-probe", model: "m") { id } }', variables: { ref } }),

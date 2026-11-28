@@ -48,6 +48,7 @@ vi.mock('../integrations/github/syncGraphFromGithub.js', () => ({
 import { mintAppRun, executeAppRun, type RunExecutionDeps } from './appRuns.js';
 import { makeProdRunDeps } from './appRunDeps.js';
 import { formatWriteToRunTime } from '../lib/runner/writeToPattern.js';
+import { activeMemoryWriteGrant } from '../test/appGrants5404.js';
 
 const ORG_URN = 'writeto-int-org';
 const MEM_URN = `${ORG_URN}:writemem`;
@@ -71,7 +72,7 @@ async function setOutput(writeTo: string, mode: 'replace' | 'append'): Promise<v
 /** One MANUAL run of the single-node flow; the LLM seam returns `body`. */
 async function runOnce(body = 'report body'): Promise<{ runId: string; outcome: string }> {
   const run = await mintAppRun(db, {
-    organizationId: orgId,
+    owner: { organizationId: orgId },
     appId,
     agentId,
     triggerKind: 'MANUAL',
@@ -133,10 +134,9 @@ beforeEach(async () => {
   });
   const grantor = await createDbRunConsentPrincipal(db, orgId, appId);
   await db.orgMember.update({ where: { organizationId_userId: { organizationId: orgId, userId: grantor.userId } }, data: { role: 'ADMIN' } });
-  await db.appMemoryWriteGrant.createMany({ data: ['reports', 'flow'].map(prefix => ({
-    appId, memoryId, prefix, grantedBy: grantor.userId,
-    registerNodeUrn: 'hrn:node:example.com:fixture:authority',
-  })) });
+  // #5404: the App's write authority is a signed `memory.write` grant per prefix (ruling 0083's unsigned rows are retired),
+  // signed by the org ADMIN, who manages the memory.
+  for (const prefix of ['reports', 'flow']) await activeMemoryWriteGrant(appId, memoryId, { issuerUserId: grantor.userId, prefix });
   await db.node.create({
     data: {
       id: generateId(), memoryId, loc: 'flow:report', name: 'report',

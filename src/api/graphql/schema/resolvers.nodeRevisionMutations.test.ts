@@ -154,10 +154,10 @@ describe('clearNodeHistory (#617)', () => {
     ).rejects.toThrow('Node not found');
   });
 
-  it('denies a non-member (no write access)', async () => {
+  it('denies a non-member, who cannot read the memory, as for a missing node (cor:api:140:03)', async () => {
     await expect(
       resolvers.Mutation.clearNodeHistory(null, { nodeRef: node.id }, outsiderCtx()),
-    ).rejects.toThrow('Forbidden');
+    ).rejects.toMatchObject({ message: 'Node not found', extensions: { code: 'NODE_NOT_FOUND' } });
     expect(await db.nodeRevision.count({ where: { nodeId: node.id } })).toBe(3);
   });
 

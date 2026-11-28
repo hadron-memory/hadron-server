@@ -7,8 +7,9 @@ import { softDeleteChatToolConnections, type ChatToolTeardown } from '../../lib/
 /**
  * The ONE org soft-delete cascade (extracted from the `deleteOrganization`
  * resolver for #662 so `deleteUser`'s sole-member-org branch reuses it rather
- * than inventing a parallel path): soft-delete the Organization row and
- * hard-delete its org-scoped secrets (#677).
+ * than inventing a parallel path): soft-delete the Organization row,
+ * hard-delete its org-scoped secrets (#677) and remove the link to it from its
+ * credit ledger entries, which are kept (#5302, cor:dmo:170:08).
  *
  * App-/memory-scoped secrets under the org are cleaned up when those entities
  * are themselves deleted — this removes only the org's own secrets, mirroring
@@ -23,7 +24,7 @@ import { softDeleteChatToolConnections, type ChatToolTeardown } from '../../lib/
  * deleteOrganization historically records none and passes nothing).
  */
 export async function softDeleteOrganizationCore(
-  db: Pick<PrismaClient, 'organization' | 'secret' | 'userInvitation' | 'orgMemberInvitation' | 'ownerLimit' | '$queryRaw'>,
+  db: Pick<PrismaClient, 'organization' | 'secret' | 'userInvitation' | 'orgMemberInvitation' | 'ownerLimit' | '$queryRaw' | '$executeRaw'>,
   orgId: string,
   deletedBy?: string | null,
   /** Who the removed chat tool connections are recorded as deleted by; defaults to `deletedBy` (deleteOrganization stamps none on the org row, but knows its actor). */
@@ -31,10 +32,22 @@ export async function softDeleteOrganizationCore(
   /** #5009: collects the limit rows removed here; the CALLER logs them after its commit. */
   limitChanges?: OwnerLimitChange[],
 ): Promise<ChatToolTeardown[]> {
+  // #5352 (hrn:node:hadronmemory.com:specs:cor:dmo:170:08): the lock a credit ledger append's FOR KEY SHARE waits for, so an
+  // append that reaches the organization while this deletion is open sees it deleted and writes nothing (lib/metering/ledgerOwner.ts).
+  // Neither the anchor's FOR SHARE (withAuthorizedTx) nor the soft delete below (a no-key update) conflicts with an append's FOR KEY
+  // SHARE, so without this lock an append would not wait. It holds only inside the caller's transaction: run outside one, it is
+  // released before the update and an append under REPEATABLE READ then reads the row live (probed on #5400). Under READ COMMITTED
+  // the clear below sees an append that committed while this waited; a SERIALIZABLE caller (deleteUser) takes this lock and
+  // checks its snapshot first (assertLedgerSnapshotFresh), and the lock here is then a re-lock.
+  await db.$queryRaw`SELECT id FROM organizations WHERE id = ${orgId} FOR UPDATE`;
   await db.organization.updateMany({
     where: { id: orgId, deletedAt: null },
     data: { deletedAt: new Date(), ...(deletedBy != null ? { deletedBy } : {}) },
   });
+  // #5302 (hrn:node:hadronmemory.com:specs:cor:dmo:170:08, S2): the organization's credit ledger entries are kept, with the link to
+  // it removed, in this transaction. Only the owner column changes; the append-only trigger admits exactly this, and only once
+  // the organization has no live row (the update above). Unconditional, like the secret sweep: a repeat clears nothing new.
+  await db.$executeRaw`UPDATE credit_ledger_entries SET organization_id = NULL WHERE organization_id = ${orgId}`;
   await revokeAllOrgInvitations(db, orgId, deletedBy ?? null);
   await deleteSecretsForOwner(db, 'org', orgId);
   // #5009: a limit is a setting and goes with its owner; the row is kept, so the FK cascade never fires.

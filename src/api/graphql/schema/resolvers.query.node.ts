@@ -7,7 +7,7 @@ import { COMPILED_BOOT_PROMPT_NODE_TYPE } from '../../../lib/bootPrompt.js';
 import { liveTxContext, liveReadSnapshotContext } from './authorizedTx.js';
 import { projectUsageRowsFor } from './resolvers.usageProjection.js';
 import { withReconciledNodeRead } from '../../../lib/includes/reconciledNodeRead.js';
-import { markBatchReadNodes } from './resolvers.nodeBatchEdges.js';
+import { markAdmittedMemories, markBatchReadNodes } from './resolvers.nodeBatchEdges.js';
 // nodeQueries — extracted from resolvers.ts Query (split step 3). No behavior change.
 import { contentScopeWhere, effectiveContentScope, type ContentScope } from '../../../lib/comments/scope.js';
 import { isConcealedCommentHistory } from './resolvers.comments.js';
@@ -67,7 +67,7 @@ import { assembleRunNodePrompt } from '../../../lib/runNodeRender.js';
 import { foreignIncludeReader } from '../../../lib/includes/foreignIncludeReader.js';
 import { resolveAgentRef } from '../../../lib/entityRef/agentRef.js';
 import { resolveAppRef } from '../../../lib/entityRef/appRef.js';
-import { appMemoryScopePage, resolveAppNodeScope } from './resolvers.appMemoryScope.js';
+import { appMemoryScopePage, resolveAppNodeScope, type AppMemorySourceKind } from './resolvers.appMemoryScope.js';
 // Spec 049 Phase 3 — the search ladder's GraphQL entry + disclosure envelope.
 import { resolveNamedScopeForQuery, scopeInfoOf, mergeDegraded as mergeDegradedCodes, SCOPE_NARROWED } from '../../../lib/scopes.js';
 import { resolveAppRunRef } from '../../../lib/entityRef/appRunRef.js';
@@ -126,6 +126,7 @@ import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { INDEXED_MEMORY_WHERE } from '../../../lib/embedding/indexing.js';
 import { edgeDisplayOrder, edgeRunOrder } from '../../../lib/edgeOrder.js';
 import { publicKnowledgeAmong, readsPublicKnowledgeWithoutUser } from '../../../lib/auth/publicKnowledgeRead.js';
+import { canReadAppRun } from './resolvers.appRun.js';
 
 /**
  * #3113 — the validated `filter.nodeTypes` list (or null), refused as
@@ -149,7 +150,7 @@ export interface FindNodesArgs {
   mode?: 'keyword' | 'vector' | 'hybrid' | 'regex' | null;
   minScore?: number | null;
   filter?: {
-    memoryIds?: string[] | null;
+    memoryRefs?: string[] | null;
     memoryClasses?: string[] | null;
     nodeType?: string | null;
     /** #3113 — an explicit list of node types (a union); see `checkNodeTypesFilter`. */
@@ -179,7 +180,7 @@ export interface FindNodesArgs {
   sortProperty?: NodePropertySort | null;
   expand?: number | null;
   granularity?: 'node' | 'chunk' | null;
-  orgId?: string | null;
+  orgRef?: string | null;
   limit?: number | null;
   offset?: number | null;
 }
@@ -193,16 +194,16 @@ export interface FindNodesArgs {
  */
 export async function resolveNodeReadScopeIds(
   ctx: Context,
-  f: { memoryIds?: string[] | null; memoryClasses?: string[] | null; isRunnable?: boolean | null },
+  f: { memoryRefs?: string[] | null; memoryClasses?: string[] | null; isRunnable?: boolean | null },
   orgScopeId: string | null,
 ): Promise<string[]> {
   // ── Resolve scope: accessible ∩ requested memories (ID/URN mix) ──
-  const explicitIds = !!(f.memoryIds && f.memoryIds.length > 0);
+  const explicitIds = !!(f.memoryRefs && f.memoryRefs.length > 0);
   // #3306: resolve the named memories first so the PUBLIC-knowledge arm (pure App key / userless run) looks up
   // only those, never every PUBLIC memory.
   const requestedIds = explicitIds
     ? (await Promise.all(
-        f.memoryIds!.map((ref) =>
+        f.memoryRefs!.map((ref) =>
           isId(ref)
             ? Promise.resolve(ref)
             : resolveMemoryRef(ctx.db, ref).then((r) => r.id).catch(() => null)),
@@ -256,7 +257,7 @@ type AppNodesFilter = {
     hasOpenThreads?: boolean | null;
     // Memory-scope fields — NOT supported by appNodes (the App's scope is
     // authoritative). Present only so we can reject them explicitly.
-    memoryIds?: string[] | null;
+    memoryRefs?: string[] | null;
     memoryClasses?: string[] | null;
     nodeType?: string | null;
     /** #3113 */
@@ -322,9 +323,9 @@ async function appNodesRead(ctx: Context, appRef: string, filter: AppNodesFilter
   // honor (its scope is the App's memories). Reject rather than silently
   // ignore them, so a caller who assumed they scoped fails fast instead of
   // getting a surprising superset. Use findNodes for cross-memory scoping.
-  if (f.memoryIds?.length || f.memoryClasses?.length) {
+  if (f.memoryRefs?.length || f.memoryClasses?.length) {
     throw badInput(
-      'appNodes: filter.memoryIds / filter.memoryClasses are not supported — ' +
+      'appNodes: filter.memoryRefs / filter.memoryClasses are not supported — ' +
         "the App's installed-agent memories are the authoritative scope. " +
         'Use findNodes for cross-memory scoping.',
     );
@@ -372,8 +373,12 @@ async function appNodesRead(ctx: Context, appRef: string, filter: AppNodesFilter
       ...(inheritance.excludeNodeIds.length > 0 ? [{ id: { notIn: inheritance.excludeNodeIds } }] : []),
     ],
   };
-  return { where, inheritance };
+  const admitted = new Set([...scope.sources].filter(([, s]) => s.some((x) => ADMITTING_SOURCES.has(x.kind))).map(([id]) => id));
+  return { where, inheritance, admitted };
 }
+
+/** The scope sources that admit a memory itself; an inherited base is in scope through its child only. */
+const ADMITTING_SOURCES: ReadonlySet<string> = new Set<AppMemorySourceKind>(['AGENT_SYSTEM', 'AGENT_LINK', 'TEAM_SPACE', 'APP_MEMORY']);
 
 /** Everything a returned `appNodes` / `appNodesPage` row carries. */
 const APP_NODES_INCLUDE = {
@@ -390,13 +395,14 @@ type AppNodeRow = Prisma.NodeGetPayload<{ include: typeof APP_NODES_INCLUDE }>;
  * the reads, for the rows RETURNED only. Splices the dropped rows out of `rows`.
  */
 async function finishAppNodes(
-  ctx: Context, rows: AppNodeRow[], inheritance: Parameters<typeof retainEffective>[2],
+  ctx: Context, rows: AppNodeRow[], inheritance: Parameters<typeof retainEffective>[2], admitted: ReadonlySet<string>,
 ): Promise<AppNodeRow[]> {
   // The exclusion list was a snapshot: re-check what was read (P2-1).
   const kept = new Set((await retainEffective(ctx.db, rows, inheritance)).map((r) => r.id));
   for (let i = rows.length - 1; i >= 0; i--) if (!kept.has(rows[i]!.id)) rows.splice(i, 1);
   await decryptNodesBatch(ctx.db, rows);
   markInherited(rows, inheritance.inheritedFrom);
+  markAdmittedMemories(rows, admitted);
   // #1061 — the App-scoped node list returns full node projections, so each one is a read. Scope is the
   // App's installed-agent memories, established by `appNodesRead`.
   recordNodeUsage(ctx.db, 'read', toUsageNodeRefs(rows), ctx);
@@ -441,6 +447,24 @@ export async function nodeRevisionsScope(ctx: Context, nodeRef: string) {
   // #1663 — a comment stub's history is for memory managers.
   if (await isConcealedCommentHistory(ctx, nodeId)) return null;
   return { nodeId, memoryId: node.memoryId, accessible, canRead };
+}
+
+/**
+ * The node-content read gate shared by node(ref:) and nodeExport (#4139,
+ * cor:dmo:150:03 "exports read like any reader"): the caller's accessible
+ * memory list, plus (#3306, cor:acl:010:01) PUBLIC knowledge for a pure App key
+ * or userless run, one named memory at a time. A filter without an `in` list
+ * fails closed.
+ */
+async function nodeReadMemoryAllowed(
+  ctx: Context,
+  access: Awaited<ReturnType<typeof memoryAccessFilter>>,
+  memoryId: string,
+): Promise<boolean> {
+  // memoryAccessFilter always returns an `in` list; any other shape fails CLOSED (#4763 blind P3-1).
+  if (!access.memoryId || typeof access.memoryId !== 'object' || !('in' in access.memoryId)) return false;
+  if ((access.memoryId.in as string[]).includes(memoryId)) return true;
+  return readsPublicKnowledgeWithoutUser(ctx) && (await publicKnowledgeAmong(ctx.db, [memoryId])).has(memoryId);
 }
 
 export const nodeQueries = {
@@ -633,7 +657,7 @@ export const nodeQueries = {
       } catch (e) {
         // Genuine miss → NOT_FOUND; a malformed ref propagates as itself.
         if (e instanceof NodeNotFoundError) {
-          throw new GraphQLError(`Node not found: "${nodeRef}"`, {
+          throw new GraphQLError('Node not found', {
             extensions: { code: 'NODE_NOT_FOUND' },
           });
         }
@@ -659,7 +683,7 @@ export const nodeQueries = {
       });
       // Denied and missing share one message — no existence oracle.
       const denied = () =>
-        new GraphQLError(`Node not found: "${nodeRef}"`, { extensions: { code: 'NODE_NOT_FOUND' } });
+        new GraphQLError('Node not found', { extensions: { code: 'NODE_NOT_FOUND' } });
       if (!node) throw denied();
       if (!(await isMemoryReadableCached(ctx, node.memoryId))) throw denied();
 
@@ -818,6 +842,8 @@ export const nodeQueries = {
               // Load-bearing: `canReadMemoryRecord`'s share path reads it, and
               // omitting it silently refuses every grantee.
               userMemoryOfAgentId: true,
+              // Load-bearing too: the holding gate judges the creator.
+              createdBy: true,
               deletedAt: true,
             },
           });
@@ -1039,9 +1065,15 @@ export const nodeQueries = {
           }
           const run = await ctx.db.appRun.findUnique({
             where: { id },
-            select: { organizationId: true },
+            select: { appId: true, organizationId: true, userId: true, createdBy: true, triggerKind: true },
           });
           if (!run) return null;
+          // #5077 (F3a-2; cor:dmo:050:12): a run of an App a person owns resolves behind the run read gate `appRun(ref:)`
+          // answers by (its manager, the App's own key, a user for their own run), with no organization to name.
+          if (run.organizationId === null) {
+            if (!(await canReadAppRun(ctx, run))) return null;
+            return { kind: 'apprun', id, organizationId: null, ...(fragment ? { fragment } : {}) };
+          }
           // Same READER-of-the-org gate the appRun(ref:) query enforces.
           if (!(await isOrgMember(run.organizationId))) return null;
           return {
@@ -1211,16 +1243,8 @@ export const nodeQueries = {
         incomingEdges: { include: { source: true }, orderBy: edgeDisplayOrder() },
       };
       // Denied ≡ not-found (null) — same non-disclosure the old queries had.
-      const allowedByList = (memoryId: string): boolean => {
-        if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
-          return (access.memoryId.in as string[]).includes(memoryId);
-        }
-        return true;
-      };
-      // #3306: a pure App key / userless run also reads PUBLIC knowledge, one named row at a time (no id list).
-      const allowed = async (memoryId: string): Promise<boolean> =>
-        allowedByList(memoryId)
-        || (readsPublicKnowledgeWithoutUser(ctx) && (await publicKnowledgeAmong(ctx.db, [memoryId])).has(memoryId));
+      // #4139: the gate is shared with nodeExport (nodeReadMemoryAllowed).
+      const allowed = (memoryId: string): Promise<boolean> => nodeReadMemoryAllowed(ctx, access, memoryId);
       // Decrypt + (unless raw) compile Mustache templates — shared tail of
       // every dispatch form. Generic so the full node row type flows through.
       const finish = async <T extends { id: string; loc: string; deletedAt: Date | null; content: string | null; data: unknown; memoryId: string }>(
@@ -1280,7 +1304,9 @@ export const nodeQueries = {
 
       const parsed = parseUrnInput(ref);
       const typeErr = validateUrnType(parsed, 'node');
-      if (typeErr) throw new Error(typeErr);
+      // #5266: a URN of another kind is a typed input refusal naming the expected kind. The plain Error this replaces reached the wire as
+      // INTERNAL_SERVER_ERROR, and `typeErr` echoes the caller's own prefix, which no message may quote (#5225).
+      if (typeErr) throw new GraphQLError('Expected node URN (hrn:node:...).', { extensions: { code: 'BAD_USER_INPUT' } });
       const value = parsed.value;
       // #1885 (cor:dmo:050:14) — a node URN in an Agent's system memory whose
       // loc has no node of its own (and none moved from it) reads through to
@@ -1407,27 +1433,48 @@ export const nodeQueries = {
       return finish(candidates[0]);
     },
 
-    // #386: render one node to its portable single-node file. Same node-read
-    // gate as nodeById; uses RAW content (the export must round-trip, so it
-    // never template-compiles) and the same unordered edge include the CLI's
-    // nodeBatch uses, so edge order agrees.
+    // #386: render one node to its portable single-node file. #4139: takes a
+    // `ref` (PK or URN, cor:api:140) and applies the SAME node-read gate as
+    // node(ref:) (nodeReadMemoryAllowed). Uses RAW content (the export must
+    // round-trip, so it never template-compiles) and the same ordered edge
+    // include the CLI's nodeBatch uses, so edge order agrees.
     nodeExport: async (
       _: unknown,
-      { id, format, full, sections }: { id: string; format?: NodeExportFormat | null; full?: boolean | null; sections?: NodeExportSection[] | null },
+      { ref, format, full, sections }: { ref: string; format?: NodeExportFormat | null; full?: boolean | null; sections?: NodeExportSection[] | null },
       ctx: Context,
     ) => {
       const access = await memoryAccessFilter(ctx);
+      // Unknown, soft-deleted (resolveNodeRef excludes tombstones, #391) and
+      // concealed-ambiguous refs all raise NODE_NOT_FOUND; a malformed ref
+      // propagates its own typed error (cor:api:140:01/:03).
+      const { id } = await resolveNodeRefForCaller(ctx, ref);
       const node = await ctx.db.node.findUnique({
         where: { id },
         include: { outgoingEdges: { include: { target: true }, orderBy: edgeDisplayOrder() } },
       });
-      // #391: don't export a soft-deleted node (denied ≡ not-found).
-      if (!node || node.deletedAt) throw new GraphQLError('Node not found', { extensions: { code: 'NOT_FOUND' } });
-      if (access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId) {
-        // Denied and not-found are indistinguishable on purpose (same as nodeById).
-        if (!(access.memoryId.in as string[]).includes(node.memoryId)) {
-          throw new GraphQLError('Node not found', { extensions: { code: 'NOT_FOUND' } });
+      // Denied ≡ not-found, the identical refusal for every shape of miss.
+      if (!node || node.deletedAt || !(await nodeReadMemoryAllowed(ctx, access, node.memoryId))) {
+        throw new NodeNotFoundError(ref);
+      }
+      // #4763 / #781: an edge whose TARGET sits in another memory is shown only when the
+      // caller can read that memory (the Edge.target rule, denied ≡ absent). The export rendered raw
+      // rows, so without this a userless caller reading PUBLIC knowledge would learn the targetId and
+      // targetLoc of an edge into a memory it cannot read.
+      // This makes a partial-access export LOSSY by design: the file omits such edges (and an
+      // edge with no target row — the required, cascading FK makes that shape impossible, so that
+      // guard is defensive). The omission is not destructive on restore: `hadron node import
+      // --with-edges` is additive (it wires the edges the file carries and never deletes an edge
+      // the file lacks — cli internal/cmd/node/import_edges.go wireEdges), so an omitted edge
+      // survives a restore into a memory that still has it.
+      const edgeTargetReadable = new Map<string, boolean>([[node.memoryId, true]]);
+      const exportEdges = [];
+      for (const edge of node.outgoingEdges) {
+        const targetMemoryId = edge.target?.memoryId;
+        if (!targetMemoryId) continue;
+        if (!edgeTargetReadable.has(targetMemoryId)) {
+          edgeTargetReadable.set(targetMemoryId, await nodeReadMemoryAllowed(ctx, access, targetMemoryId));
         }
+        if (edgeTargetReadable.get(targetMemoryId)) exportEdges.push(edge);
       }
       await decryptNodesBatch(ctx.db, [node]);
       // #1061 — an export hands the caller the node's full content, so it is a
@@ -1470,7 +1517,9 @@ export const nodeQueries = {
         isRunnable: node.isRunnable,
         data: node.data,
         properties: node.properties,
-        edges: node.outgoingEdges as unknown as EdgeForGit[],
+        // #4763: the MD/JSON renders carry the READABILITY-filtered edges (the loop
+        // above); the PDF branch below overrides with its own live-and-readable set.
+        edges: exportEdges as unknown as EdgeForGit[],
       };
 
       // PDF is a presentation render produced by the external hadrontool-pdf
@@ -1481,7 +1530,9 @@ export const nodeQueries = {
       if (fmt === 'PDF') {
         // §10 (#395): the Edges section prints a target's loc, so it keeps only targets that are live and in a
         // memory this caller can read (the same readable set the node gate used; #781 gates an edge endpoint on
-        // its own memory). The MD/JSON export prints every outgoing edge and is not changed here.
+        // its own memory). The MD/JSON export (#4763) applies the same #781 readability rule through the edge
+        // loop above, with one deliberate difference: it keeps a SOFT-DELETED target in a readable memory
+        // (the file is a restore artifact), while this presentation section drops it with the dead ones.
         const readableMemoryIds =
           access.memoryId && typeof access.memoryId === 'object' && 'in' in access.memoryId
             ? new Set(access.memoryId.in as string[])
@@ -1547,7 +1598,7 @@ export const nodeQueries = {
       // at the bottom can re-enter it without a self-reference (which would
       // leave TypeScript unable to infer the return type).
       const core = async ({
-        query, mode, filter, fields, sort, sortProperty, expand, granularity, orgId, limit, offset, minScore, includeTotal,
+        query, mode, filter, fields, sort, sortProperty, expand, granularity, orgRef, limit, offset, minScore, includeTotal,
       }: FindNodesArgs) => {
       const f = filter ?? {};
       const nodeTypes = nodeTypesOrRefuse(f, 'findNodes'); // #3113 — already refused above; the validated list
@@ -1609,10 +1660,10 @@ export const nodeQueries = {
       // "runnable task nodes in one org" query (there is no separate myTasks).
       const emptyResult = { hits: [], passages: [], total: 0, reason: null, degraded: null };
       let orgScopeId: string | null = null;
-      if (orgId != null) {
+      if (orgRef != null) {
         let resolvedOrgId: string;
         try {
-          ({ id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgId));
+          ({ id: resolvedOrgId } = await resolveOrgRef(ctx.db, orgRef));
         } catch {
           return emptyResult;
         }
@@ -2264,10 +2315,11 @@ export const nodeQueries = {
       /**
        * #4779 (P3-4) — the hybrid ranking for a page of `pageN` nodes, CERTIFIED (`certifiedHybridRanking`): both legs are
        * read to the keyword leg's depth, then, while the fused order up to the page could still change, the keyword hits
-       * the vector page did not reach get their exact vector rank (one budgeted lookup), and the keyword leg widens up to
-       * its ceiling (KEYWORD_FETCH_CAP, ruling 0150 lifted no cap on it). If the order still is not certain, the vector
-       * budget ran out or the keyword ceiling was reached first: the page is flagged `stopped_early` (cor:api:090:04
-       * Proposed), never presented as the true page.
+       * the vector page did not reach get their vector rank (one budgeted lookup; #4994: in a large scope it reads the
+       * vector ranking only to a bounded depth), and the keyword leg widens up to its ceiling (KEYWORD_FETCH_CAP, ruling
+       * 0150 lifted no cap on it). If the order still is not certain, the vector budget ran out, a hit lay past the
+       * lookup's depth, the lookup disagreed with the vector leg (#5162), or the keyword ceiling was reached first: the page
+       * is flagged `stopped_early` (cor:api:090:04 Proposed), never presented as the true page.
        */
       const hybridRanking = async (pageN: number) => {
         const depth0 = hasStructuredFilters ? Math.min(pageN * 5, KEYWORD_FETCH_CAP) : pageN;
@@ -2278,20 +2330,39 @@ export const nodeQueries = {
         let kwHits = await runKeywordRanked({ limit: dk });
         const ranks = new Map<string, number>();
         const looked = new Set<string>();
+        // #4994: this ranking's lookups share one computed vector ranking (same options). A re-ranking starts afresh.
+        const rankMemo = {};
+        let exactLookup = false; // #5162: set from the lookup's own answer; absent, its ranks must agree with the leg
         for (;;) {
           // BLIND P2-1 (Bianca): a short keyword leg IS an exhausted one. `lexicalSearch` is one `LIMIT dk OFFSET 0`
           // statement with no cap, timeout or post-filter of its own (postgres.ts), and `hybridKeywordCandidates` only
           // swaps the query (a literal fallback, itself one such statement; true hybrid never relaxes), so fewer than
           // `dk` rows means nothing deeper matches. A lexical failure throws; it never comes back short.
           const kwLeg = { ids: kwHits.map((h) => h.nodeId), exhausted: kwHits.length < dk };
-          const r = certifiedHybridRanking(kwLeg, vecLeg, pageN, ranks, looked);
+          const r = certifiedHybridRanking(kwLeg, vecLeg, pageN, ranks, looked, exactLookup);
           if (r.certified) return { fused: r.ranked, vecHits, exhausted: kwLeg.exhausted && vecLeg.exhausted };
           const lookup = vecLeg.exhausted ? [] : r.vecLookup.filter((id) => !looked.has(id));
           if (lookup.length) {
-            const res = await provider.vectorRanks({ ...vectorOpts, nodeIds: lookup });
+            const res = await provider.vectorRanks({ ...vectorOpts, nodeIds: lookup, memo: rankMemo });
             for (const id of lookup) looked.add(id);
             for (const [id, rank] of res.ranks) ranks.set(id, rank);
-            if (!res.stoppedEarly) continue;
+            exactLookup = res.exact === true;
+            if (!res.stoppedEarly) {
+              // #5162: a walked lookup is asked about the leg's own nodes too (the same computed ranking), so one that
+              // disagrees with the leg is seen and never certified. A call of its own: a leg node it cannot place is
+              // that disagreement, not a reason to stop reading.
+              const legIds = exactLookup ? [] : vecLeg.ids.filter((id) => !looked.has(id));
+              if (legIds.length) {
+                const ofLeg = await provider.vectorRanks({ ...vectorOpts, nodeIds: legIds, memo: rankMemo });
+                for (const id of legIds) looked.add(id);
+                for (const [id, rank] of ofLeg.ranks) ranks.set(id, rank);
+              }
+              continue;
+            }
+            // #4994: an incomplete lookup (a node past its depth, or the budget) is never certified. The ranks it did
+            // return still order the page, which is flagged.
+            rankingIncomplete = true;
+            return { fused: certifiedHybridRanking(kwLeg, vecLeg, pageN, ranks, looked).ranked, vecHits, exhausted: false };
           } else if (r.kwUncertain && dk < kwCeiling && Date.now() < vectorDeadlineAt) {
             // BLIND F3 (Elena): the widening spends the request's one budget too; past its deadline the page stops early.
             dk = Math.min(dk * 2, kwCeiling);
@@ -2307,7 +2378,8 @@ export const nodeQueries = {
             }
             continue;
           }
-          rankingIncomplete = true; // the order up to the page could not be certified inside the budget / ceiling
+          // The order could not be certified inside the budget / ceiling, or (#5162) it rests on a lookup that disagrees.
+          rankingIncomplete = true;
           return { fused: r.ranked, vecHits, exhausted: false };
         }
       };
@@ -2376,26 +2448,26 @@ export const nodeQueries = {
       // Resolve it, then run the core with the scope's memories as the explicit
       // memory set (S2: already ∩ the caller's access — a lens never grants,
       // D-004) and, for `global`, the organization narrowing; add the
-      // disclosure envelope on the way out. `filter.memoryIds` narrows WITHIN
+      // disclosure envelope on the way out. `filter.memoryRefs` narrows WITHIN
       // the scope. Omitted ⇒ the pre-049 semantics are untouched: the portal
-      // and the CLI pass orgId and filters explicitly and never this argument,
+      // and the CLI pass orgRef and filters explicitly and never this argument,
       // so their results do not change under them from a flag they never passed
       // (`cor:acl:020:03` rule 5's surprise). The ambient rungs (session,
       // active App, active org) live on the MCP surface, which has session state.
       if (scope == null || scope.trim() === '') return core(coreArgs);
 
       const f = coreArgs.filter ?? {};
-      const scopeRes = await resolveNamedScopeForQuery(ctx, scope, appRef ?? null, coreArgs.orgId ?? null);
+      const scopeRes = await resolveNamedScopeForQuery(ctx, scope, appRef ?? null, coreArgs.orgRef ?? null);
       const info = await scopeInfoOf(ctx, scopeRes);
       const narrowed = scopeRes.droppedCount > 0 ? SCOPE_NARROWED : null;
       let innerFilter = f;
-      let innerOrgId = coreArgs.orgId;
+      let innerOrgId = coreArgs.orgRef;
       if (scopeRes.memoryIds !== null) {
         let requested = scopeRes.memoryIds;
-        if (f.memoryIds && f.memoryIds.length > 0) {
+        if (f.memoryRefs && f.memoryRefs.length > 0) {
           const explicit = (
             await Promise.all(
-              f.memoryIds.map((ref) =>
+              f.memoryRefs.map((ref) =>
                 isId(ref) ? Promise.resolve(ref) : resolveMemoryRef(ctx.db, ref).then((r) => r.id).catch(() => null)),
             )
           ).filter((id): id is string => id !== null);
@@ -2404,14 +2476,14 @@ export const nodeQueries = {
         if (requested.length === 0) {
           return { hits: [], passages: [], total: 0, reason: null, degraded: narrowed, scope: info };
         }
-        innerFilter = { ...f, memoryIds: requested };
+        innerFilter = { ...f, memoryRefs: requested };
       }
       // #1987: the global view's materialised memory list must still pass
       // through the org narrowing in core (the App-memory exclusion of the
       // runnable catalogue); the list is already within that org, so for every
       // other query the extra organizationId clause changes nothing.
       if (scopeRes.kind === 'global') innerOrgId = scopeRes.orgScopeId;
-      const inner = await core({ ...coreArgs, filter: innerFilter, orgId: innerOrgId });
+      const inner = await core({ ...coreArgs, filter: innerFilter, orgRef: innerOrgId });
       return { ...inner, scope: info, degraded: mergeDegradedCodes(inner.degraded, narrowed) };
     },
 
@@ -2497,6 +2569,36 @@ export const nodeQueries = {
             { extensions: { code: 'BAD_USER_INPUT' } },
           );
         }
+        // #5268 — a wrong-type URN (`hrn:mem:…`, `hrn:app:…`) is a coercion
+        // bug, not a miss, and the refusal names the failing ref by its
+        // POSITION: the 0-based index in the caller's `refs` as sent, of the
+        // FIRST wrong-type ref in caller order (first occurrence). The screen
+        // runs as a synchronous PRE-PASS over the raw list, before any
+        // resolution (#5268 spec-FIT condition), so the index can never
+        // depend on which rejection `Promise.all` below surfaces first. An
+        // unqualified ref is NOT screened here (the spec-FIT left it out);
+        // since the screen covers the whole list first, a wrong-type ref is
+        // named even when an unqualified ref precedes it — the same
+        // precedence this resolver had before #5268, when the screen's
+        // rejection (thrown before any await) beat the per-ref
+        // UrnNotQualifiedError out of `Promise.all`. The position is not
+        // caller-typed, so the no-echo rule of #5168 / cor:api:140:01 holds;
+        // the shared parser reports only the URN KIND, never the value.
+        // Without this screen, resolveNodeRef reports a wrong-type prefix
+        // with the SAME NodeNotFoundError a genuinely absent node raises, so
+        // it would file a caller's type error under `unavailable`: the exact
+        // silence this surface just removed (matching the single-node
+        // node(ref:) read — PR #815 review, Codex P2).
+        for (let i = 0; i < refs!.length; i++) {
+          const ref = refs![i];
+          if (isId(ref)) continue;
+          const typeErr = validateUrnType(parseUrnInput(ref), 'node');
+          if (typeErr) {
+            throw new GraphQLError(`nodeBatch: ${typeErr} (the ref at index ${i})`, {
+              extensions: { code: 'BAD_USER_INPUT', index: i },
+            });
+          }
+        }
         // Dedup the raw input first (a repeated ref costs nothing to resolve
         // twice), then again on the RESOLVED id below — a PK and that node's
         // URN are different strings naming one node, and the single nodeById
@@ -2516,19 +2618,9 @@ export const nodeQueries = {
         const resolved = await Promise.all(
           uniqueRefs.map(async (ref) => {
             if (isId(ref)) return { ref, id: ref as string | null };
-            // A WRONG-TYPE URN (`hrn:mem:…`, `hrn:app:…`) is a coercion bug,
-            // not a miss — but resolveNodeRef reports it with the SAME
-            // NodeNotFoundError a genuinely absent node raises, so letting it
-            // reach the catch below would file a caller's type error under
-            // `unavailable`: the exact silence this surface just removed.
-            // Screen it here with the shared parser, matching what the
-            // single-node node(ref:) read does (PR #815 review, Codex P2).
-            const typeErr = validateUrnType(parseUrnInput(ref), 'node');
-            if (typeErr) {
-              throw new GraphQLError(`nodeBatch: ${typeErr} (ref "${ref}")`, {
-                extensions: { code: 'BAD_USER_INPUT' },
-              });
-            }
+            // A wrong-type URN never reaches here: the synchronous pre-pass
+            // above already refused it with the caller's index (#5268), so
+            // this map only resolves refs whose type screen passed.
             try {
               const { id } = await resolveNodeRefForCaller(ctx, ref);
               return { ref, id: id as string | null };
@@ -2900,7 +2992,7 @@ export const nodeQueries = {
         take: limit ?? 20,
         include: APP_NODES_INCLUDE,
       });
-      return finishAppNodes(ctx, results, read.inheritance);
+      return finishAppNodes(ctx, results, read.inheritance, read.admitted);
     },
 
     /**
@@ -2931,7 +3023,7 @@ export const nodeQueries = {
       const empty = { items: [], hasMore: false, endCursor: null };
       // Each memory is read once however many times (or by which alias) it was named: a repeat would repeat
       // its rows, break the continuation and multiply the walk (#3586 review).
-      const gated = [...new Set(await resolveNodeReadScopeIds(ctx, { memoryIds: args.memoryRefs }, null))];
+      const gated = [...new Set(await resolveNodeReadScopeIds(ctx, { memoryRefs: args.memoryRefs }, null))];
       if (gated.length === 0) return empty;
       const inheritance = await effectiveScope(ctx.db, gated);
       return readLocSegments(ctx.db, {
@@ -2974,7 +3066,7 @@ export const nodeQueries = {
         }),
       ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
       const rawRows = rows.length;
-      const items = await finishAppNodes(ctx, rows, read.inheritance);
+      const items = await finishAppNodes(ctx, rows, read.inheritance, read.admitted);
       return { items, total, hasMore: skip + rawRows < total };
     },
 

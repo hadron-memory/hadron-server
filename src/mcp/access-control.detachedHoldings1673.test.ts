@@ -184,8 +184,8 @@ describe('MemoryShare on a detached personal holding (kept by design)', () => {
     } });
     await db.memoryShare.create({ data: { memoryId: m.id, granteeId: grantee.id, grantorId: owner.id, role: 'reader' } });
     const asGrantee = { db, userId: grantee.id, roles: ['READER' as const] };
-    // Before: the grantee holds no subscription to juno, so the share is not honoured.
-    expect(await resolvers.Query.memory({}, { ref: m.id }, asGrantee)).toBeNull();
+    // #5389: the share alone admits (no AgentSubscription licence), so the grantee reads it before and after.
+    expect((await resolvers.Query.memory({}, { ref: m.id }, asGrantee))?.id).toBe(m.id);
 
     await resolvers.Mutation.createApp({}, { orgRef: org.id, agentRef: juno.id, name: 'Doomed', urn: 'doomed' }, { db, userId: actor.id, roles: ['ADMIN'] });
 

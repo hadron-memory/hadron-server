@@ -18,11 +18,9 @@ const ctx = (): Context => ({ db, userId, roles: ['READER'] });
 /** Seed an Agent system memory whose conversation `flow` has stages [step, <own>] and a prompt naming the Agent. */
 async function seedScript(sysId: string, label: string, own: string) {
   for (const row of [
-    { loc: 'conversations', data: {} },
     { loc: 'conversations:flow', data: { stageOrder: ['step', own], isSetup: false } },
     { loc: 'conversations:flow:step', data: { promptRef: 'prompts:step' } },
     { loc: `conversations:flow:${own}`, data: { promptRef: 'prompts:step' } },
-    { loc: 'prompts', data: {} },
     { loc: 'prompts:step', content: `STAGE OF ${label}`, data: {} },
   ]) await db.node.create({ data: { memoryId: sysId, name: row.loc, nodeType: 'system', ...row } });
 }
@@ -45,7 +43,7 @@ beforeEach(async () => {
 });
 
 async function start(scope: 'private' | 'shared' = 'private') {
-  return M.startChat({}, { agentRef: agentId, scope, conversationName: 'flow' }, ctx());
+  return M.startChat({}, { agentRef: agentId, scope, conversationName: 'flow', appRef: appId }, ctx());
 }
 
 /** Turn the started chat's memory into a legacy one: no home pointers, agents linked by read-write items. */

@@ -20,6 +20,7 @@ import { resolvers, type Context } from './resolvers.js';
 import { teamChatMutations } from './resolvers.teamChat.js';
 import { extractMentions } from '../../../lib/teamChatMentions.js';
 import { resolveTickerRef } from '../../../lib/tickers/tickerRef.js';
+import { joinHostForKey } from '../../../test/agentTeamHost.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({
   writeNodeToGit: vi.fn().mockResolvedValue(undefined),
@@ -153,6 +154,7 @@ describe('tickers — create, read, URN, slug', () => {
     // #2931: the line above has no appKeyId, so it is "no user", not a key. A real key, holding host:operate (which
     // now READS its host's tickers), still creates none.
     const key = await db.appKey.create({ data: { id: generateId(), appId: app.id, keyHash: `h-${generateId()}`, keyPreview: 'abcd' }, select: { id: true } });
+    await joinHostForKey(db, key.id, 'orca1');
     await M.grantAppKeyScope({}, { id: key.id, scope: 'host:operate', hostId: 'orca1' }, ctx(admin.id));
     await expectCode(createTicker({ db, appId: app.id, appKeyId: key.id, roles: [] }), 'APP_NOT_FOUND');
   });
@@ -235,7 +237,7 @@ describe('tickers — create, read, URN, slug', () => {
   });
 
   it('refuses a channel the caller cannot read', async () => {
-    await expectCode(createTicker(ctx(member.id), { channelIds: [generateId()] }), 'BAD_USER_INPUT');
+    await expectCode(createTicker(ctx(member.id), { channelRefs: [generateId()] }), 'BAD_USER_INPUT');
   });
 
   it('refuses impersonation (read-only)', async () => {

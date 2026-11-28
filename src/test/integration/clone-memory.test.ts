@@ -406,8 +406,9 @@ describe('cloneMemory', () => {
     const owner = await db.user.create({
       data: { githubId: 9003, githubUsername: 'owner-user' },
     });
+    // hadron-internal#78: a same-org clone needs a non-reader membership, like the cross-org arm.
     await db.orgMember.create({
-      data: { organizationId: org.id, userId: owner.id, role: 'READER' },
+      data: { organizationId: org.id, userId: owner.id, role: 'CONTRIBUTOR' },
     });
     const personal = await db.memory.create({
       data: {
@@ -429,7 +430,7 @@ describe('cloneMemory', () => {
     // Forbidden that would confirm the memory exists.
     await expect(
       resolvers.Mutation.cloneMemory({}, { ref: personal.id, targetUrn: 'org-a::notes-2' }, adminCtx()),
-    ).rejects.toThrow(`MEMORY_NOT_FOUND: ${personal.id}`);
+    ).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
 
     const clone = await resolvers.Mutation.cloneMemory(
       {},

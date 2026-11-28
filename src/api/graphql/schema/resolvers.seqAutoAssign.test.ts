@@ -61,7 +61,7 @@ describe('createNode — auto-assign seq into an ordered sibling list', () => {
     await seedSibling('parent:b', 2);
     const node = await resolvers.Mutation.createNode(
       null,
-      { input: { memoryId, loc: 'parent:c', name: 'c' } },
+      { input: { memoryRef: memoryId, loc: 'parent:c', name: 'c' } },
       gqlCtx(),
     );
     expect(node.seq).toBe(3);
@@ -71,7 +71,7 @@ describe('createNode — auto-assign seq into an ordered sibling list', () => {
     await seedSibling('parent:a', null);
     const node = await resolvers.Mutation.createNode(
       null,
-      { input: { memoryId, loc: 'parent:c', name: 'c' } },
+      { input: { memoryRef: memoryId, loc: 'parent:c', name: 'c' } },
       gqlCtx(),
     );
     expect(node.seq).toBeNull();
@@ -81,7 +81,7 @@ describe('createNode — auto-assign seq into an ordered sibling list', () => {
     await seedSibling('parent:a', 1);
     const node = await resolvers.Mutation.createNode(
       null,
-      { input: { memoryId, loc: 'parent:c', name: 'c', seq: 99 } },
+      { input: { memoryRef: memoryId, loc: 'parent:c', name: 'c', seq: 99 } },
       gqlCtx(),
     );
     expect(node.seq).toBe(99);
@@ -94,7 +94,7 @@ describe('createNode — auto-assign seq into an ordered sibling list', () => {
     // don't treat it as a fresh insert at the end.
     const node = await resolvers.Mutation.updateNode(
       null,
-      { input: { memoryId, loc: 'parent:a', name: 'renamed' } },
+      { input: { memoryRef: memoryId, loc: 'parent:a', name: 'renamed' } },
       gqlCtx(),
     );
     expect(node.seq).toBe(1);

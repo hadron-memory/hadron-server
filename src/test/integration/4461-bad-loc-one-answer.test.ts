@@ -113,21 +113,21 @@ describe('#4461 — createNode (resolvers.mutation.node.ts core write)', () => {
   it('invalid charset: BAD_USER_INPUT, field loc, reason, no echo', async () => {
     const err = await graphqlError(
       `mutation($i: CreateNodeInput!) { createNode(input: $i) { id } }`,
-      { i: { memoryId, loc: BAD, name: 'x' } },
+      { i: { memoryRef: memoryId, loc: BAD, name: 'x' } },
     );
     expectOneAnswer(err, 'loc', 'invalid-charset');
   });
   it('an atom over 64 characters: reason too-long', async () => {
     const err = await graphqlError(
       `mutation($i: CreateNodeInput!) { createNode(input: $i) { id } }`,
-      { i: { memoryId, loc: LONG_ATOM, name: 'x' } },
+      { i: { memoryRef: memoryId, loc: LONG_ATOM, name: 'x' } },
     );
     expectOneAnswer(err, 'loc', 'too-long');
   });
   it('a loc whose atoms are each valid but whose total is over the cap: too-long', async () => {
     const err = await graphqlError(
       `mutation($i: CreateNodeInput!) { createNode(input: $i) { id } }`,
-      { i: { memoryId, loc: LONG_TOTAL, name: 'x' } },
+      { i: { memoryRef: memoryId, loc: LONG_TOTAL, name: 'x' } },
     );
     expectOneAnswer(err, 'loc', 'too-long');
   });
@@ -247,18 +247,24 @@ describe('#4461 — every other site answers the same', () => {
     );
     expectOneAnswer(err, 'loc', 'invalid-charset');
   });
-  it('setAppMemoryWriteGrant (prefix): was BAD_USER_INPUT with the echo in the text', async () => {
+  // #5404: both grant doors are retired and refuse DOOR_RETIRED before reading any argument, so a bad prefix is never parsed and
+  // never echoed. (`memory.write`'s prefix is judged by createGrant as GRANT_VALUES_INVALID, with no echo of the value.)
+  function expectRetiredNoEcho(err: { message: string; extensions?: Record<string, unknown> }) {
+    expect(err.extensions?.code).toBe('DOOR_RETIRED');
+    expect(JSON.stringify(err)).not.toContain(MARK);
+  }
+  it('setAppMemoryWriteGrant (prefix): was BAD_USER_INPUT with the echo in the text; retired (#5404), no echo', async () => {
     const err = await graphqlError(
       `mutation($a: String!, $m: String!, $p: String!) { setAppMemoryWriteGrant(appRef: $a, memoryRef: $m, prefix: $p) { id } }`,
       { a: 'nope', m: memoryId, p: BAD },
     );
-    expectOneAnswer(err, 'prefix', 'invalid-charset');
+    expectRetiredNoEcho(err);
   });
-  it('setAutomationReadGrant (prefix): was BAD_USER_INPUT with the echo in the text', async () => {
+  it('setAutomationReadGrant (prefix): was BAD_USER_INPUT with the echo in the text; retired (#5404), no echo', async () => {
     const err = await graphqlError(
       `mutation($a: String!, $k: String!, $i: ID!, $m: String!, $p: String) { setAutomationReadGrant(appRef: $a, triggerKind: $k, triggerId: $i, memoryRef: $m, prefix: $p) { id } }`,
       { a: 'nope', k: 'SCHEDULE', i: generateId(), m: memoryId, p: BAD },
     );
-    expectOneAnswer(err, 'prefix', 'invalid-charset');
+    expectRetiredNoEcho(err);
   });
 });

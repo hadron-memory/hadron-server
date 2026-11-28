@@ -264,9 +264,9 @@ describe('findNodes — sort + pagination on a query (applied in SQL, not after 
     await mkNode(graph.id, { loc: 'srt.b', name: 'zeta beta' });
   });
   it('orders a keyword query by loc and pages correctly', async () => {
-    const p1 = await findNodes({ query: 'zeta', mode: 'keyword', sort: 'loc', filter: { memoryIds: [graph.id] }, limit: 2, offset: 0 });
+    const p1 = await findNodes({ query: 'zeta', mode: 'keyword', sort: 'loc', filter: { memoryRefs: [graph.id] }, limit: 2, offset: 0 });
     expect(p1.hits.map((h: any) => h.node.loc)).toEqual(['srt.a', 'srt.b']);
-    const p2 = await findNodes({ query: 'zeta', mode: 'keyword', sort: 'loc', filter: { memoryIds: [graph.id] }, limit: 2, offset: 2 });
+    const p2 = await findNodes({ query: 'zeta', mode: 'keyword', sort: 'loc', filter: { memoryRefs: [graph.id] }, limit: 2, offset: 2 });
     expect(p2.hits.map((h: any) => h.node.loc)).toEqual(['srt.c']);
   });
 });
@@ -276,7 +276,7 @@ describe('findNodes — filtered list (query omitted, subsumes `nodes`)', () => 
     await mkNode(graph.id, { loc: 'a.two', name: 'Two' });
     await mkNode(graph.id, { loc: 'a.one', name: 'One' });
     await mkNode(graph.id, { loc: 'a.sys', name: 'Sys', nodeType: 'system' });
-    const res = await findNodes({ filter: { memoryIds: [graph.id] } });
+    const res = await findNodes({ filter: { memoryRefs: [graph.id] } });
     const locs = res.hits.map((h: any) => h.node.loc);
     expect(locs).toEqual(['a.one', 'a.two']); // loc-ordered, system-type excluded
     expect(res.hits.every((h: any) => h.score === null)).toBe(true); // unscored list
@@ -286,7 +286,7 @@ describe('findNodes — filtered list (query omitted, subsumes `nodes`)', () => 
     await mkNode(graph.id, { loc: 'task.a', name: 'Task A', isRunnable: true });
     await mkNode(graph.id, { loc: 'task.b', name: 'Task B', isRunnable: false });
     await mkNode(graph.id, { loc: 'note.c', name: 'Note C', isRunnable: true });
-    const res = await findNodes({ filter: { memoryIds: [graph.id], isRunnable: true, locPrefix: 'task.' } });
+    const res = await findNodes({ filter: { memoryRefs: [graph.id], isRunnable: true, locPrefix: 'task.' } });
     expect(res.hits.map((h: any) => h.node.loc)).toEqual(['task.a']);
   });
 
@@ -298,10 +298,10 @@ describe('findNodes — filtered list (query omitted, subsumes `nodes`)', () => 
     await mkNode(graph.id, { loc: 'r.specification', name: 'specification', role: 'specification' });
     await mkNode(graph.id, { loc: 'r.none', name: 'none', role: null });
 
-    const spec = await findNodes({ filter: { memoryIds: [graph.id], role: 'spec' } });
+    const spec = await findNodes({ filter: { memoryRefs: [graph.id], role: 'spec' } });
     expect(spec.hits.map((h: any) => h.node.loc)).toEqual(['r.base', 'r.child', 'r.deep']);
 
-    const rule = await findNodes({ filter: { memoryIds: [graph.id], role: 'spec.rule' } });
+    const rule = await findNodes({ filter: { memoryRefs: [graph.id], role: 'spec.rule' } });
     expect(rule.hits.map((h: any) => h.node.loc)).toEqual(['r.child', 'r.deep']);
   });
 
@@ -310,7 +310,7 @@ describe('findNodes — filtered list (query omitted, subsumes `nodes`)', () => 
     await mkNode(graph.id, { loc: 'r.literal-child', name: 'child', role: 'spec_rule.child' });
     await mkNode(graph.id, { loc: 'r.wildcard-trap', name: 'trap', role: 'specXrule.child' });
 
-    const res = await findNodes({ filter: { memoryIds: [graph.id], role: 'spec_rule' } });
+    const res = await findNodes({ filter: { memoryRefs: [graph.id], role: 'spec_rule' } });
     expect(res.hits.map((h: any) => h.node.loc)).toEqual(['r.literal', 'r.literal-child']);
   });
 });
@@ -320,7 +320,7 @@ describe('findNodes — structured filters apply to query results, not just list
     await mkNode(graph.id, { loc: 'q.run1', name: 'runnable banana', isRunnable: true });
     await mkNode(graph.id, { loc: 'q.run2', name: 'another banana task', isRunnable: true });
     await mkNode(graph.id, { loc: 'q.note', name: 'banana note', isRunnable: false });
-    const res = await findNodes({ query: 'banana', mode: 'keyword', filter: { memoryIds: [graph.id], isRunnable: true } });
+    const res = await findNodes({ query: 'banana', mode: 'keyword', filter: { memoryRefs: [graph.id], isRunnable: true } });
     expect(res.hits.map((h: any) => h.node.loc).sort()).toEqual(['q.run1', 'q.run2']);
   });
 
@@ -333,7 +333,7 @@ describe('findNodes — structured filters apply to query results, not just list
     const res = await findNodes({
       query: 'banana',
       mode: 'keyword',
-      filter: { memoryIds: [graph.id], role: 'spec.rule' },
+      filter: { memoryRefs: [graph.id], role: 'spec.rule' },
     });
     expect(res.hits.map((h: any) => h.node.loc).sort()).toEqual(['q.deep', 'q.rule']);
   });
@@ -341,9 +341,9 @@ describe('findNodes — structured filters apply to query results, not just list
   it('excludes soft-deleted matches by default and includes them with includeDeleted', async () => {
     await mkNode(graph.id, { loc: 'd.live', name: 'live banana' });
     await mkNode(graph.id, { loc: 'd.dead', name: 'dead banana', deletedAt: new Date() });
-    const def = await findNodes({ query: 'banana', mode: 'keyword', filter: { memoryIds: [graph.id] } });
+    const def = await findNodes({ query: 'banana', mode: 'keyword', filter: { memoryRefs: [graph.id] } });
     expect(def.hits.map((h: any) => h.node.loc)).toEqual(['d.live']);
-    const inc = await findNodes({ query: 'banana', mode: 'keyword', filter: { memoryIds: [graph.id], includeDeleted: true } });
+    const inc = await findNodes({ query: 'banana', mode: 'keyword', filter: { memoryRefs: [graph.id], includeDeleted: true } });
     expect(inc.hits.map((h: any) => h.node.loc).sort()).toEqual(['d.dead', 'd.live']);
   });
 });
@@ -381,16 +381,16 @@ describe('findNodes — orgId scope (#463); with filter.isRunnable = the tasks-i
     const memberCtx = ctx({ userId: member.id, roles: [] });
 
     // Scoped to orgA (member) + isRunnable → only orgA's runnable node.
-    const inA = await findNodes({ orgId: orgA.id, filter: { isRunnable: true } }, memberCtx);
+    const inA = await findNodes({ orgRef: orgA.id, filter: { isRunnable: true } }, memberCtx);
     expect(inA.hits.map((h: any) => h.node.loc)).toEqual(['org.taskA']);
 
     // Scoped to orgB the caller is NOT a member of → empty (no existence disclosure).
-    const inB = await findNodes({ orgId: b.org.id, filter: { isRunnable: true } }, memberCtx);
+    const inB = await findNodes({ orgRef: b.org.id, filter: { isRunnable: true } }, memberCtx);
     expect(inB).toMatchObject({ hits: [], total: 0 });
 
     // Uniform member-only: `admin()` (admin-fn) is a member of no org, so even a
     // platform admin gets an empty page for orgB — no admin bypass.
-    const adminB = await findNodes({ orgId: b.org.id, filter: { isRunnable: true } }, admin());
+    const adminB = await findNodes({ orgRef: b.org.id, filter: { isRunnable: true } }, admin());
     expect(adminB).toMatchObject({ hits: [], total: 0 });
 
     // A real admin who IS a member of orgB can scope to it — membership, not the
@@ -398,7 +398,7 @@ describe('findNodes — orgId scope (#463); with filter.isRunnable = the tasks-i
     const adminUser = await db.user.create({ data: { githubId: 6101, githubUsername: 'fn-admin', roles: ['ADMIN'] } });
     await db.orgMember.create({ data: { organizationId: b.org.id, userId: adminUser.id, role: 'READER' } });
     const adminMemberB = await findNodes(
-      { orgId: b.org.id, filter: { isRunnable: true } },
+      { orgRef: b.org.id, filter: { isRunnable: true } },
       ctx({ userId: adminUser.id, roles: ['ADMIN'] }),
     );
     expect(adminMemberB.hits.map((h: any) => h.node.loc)).toEqual(['org.taskB']);
@@ -434,12 +434,12 @@ describe('findNodes — orgId scope (#463); with filter.isRunnable = the tasks-i
 
     // (#1987: the runnable listing excludes App-scoped memory, so this org gate is proven on the plain scope.)
     // Own org (orgA) → authorized; the session's memory is in orgA → its node shows.
-    const own = await findNodes({ orgId: orgA.id }, appCtx);
+    const own = await findNodes({ orgRef: orgA.id }, appCtx);
     expect(own.hits.map((h: any) => h.node.loc)).toEqual(['app.task']);
 
     // A different org → gate rejects (empty), no disclosure.
     const other = await createDbOrgAndGraph(db, { orgName: 'fn-other', graphName: 'other/graph' });
-    const cross = await findNodes({ orgId: other.org.id }, appCtx);
+    const cross = await findNodes({ orgRef: other.org.id }, appCtx);
     expect(cross).toMatchObject({ hits: [], total: 0 });
   });
 });
@@ -452,7 +452,7 @@ it('#2421 shared hybrid keyword extraction preserves independent degraded envelo
     ['(banana OR', 'no_vector_index,literal_fallback'],
     ['banana', 'no_vector_index'],
   ]) {
-    const result = await findNodes({query,mode:'hybrid',filter:{memoryIds:[graph.id]}});
+    const result = await findNodes({query,mode:'hybrid',filter:{memoryRefs:[graph.id]}});
     expect(result.degraded).toBe(degraded);
   }
 });

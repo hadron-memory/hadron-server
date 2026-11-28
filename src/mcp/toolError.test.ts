@@ -3,6 +3,8 @@ import { GraphQLError } from 'graphql';
 import { Prisma } from '../generated/prisma/index.js';
 import { toolErrorResult, withToolErrorBoundary } from './toolError.js';
 import { textResult } from './textResult.js';
+import { NodeContentTooLargeError } from '../lib/nodeContentLimit.js';
+import { OwnerLimitReachedError } from '../lib/ownerLimits/errors.js';
 
 afterEach(() => vi.restoreAllMocks());
 const detail = '/srv/private.ts private-id-1695 SELECT secrets';
@@ -13,6 +15,27 @@ const faults = [
   new Prisma.PrismaClientInitializationError(detail, 'test'),
   new Prisma.PrismaClientRustPanicError(detail, 'test'),
 ];
+
+describe('owner-limit refusal (#5015)', () => {
+  it('a tool that catches and maps answers the coded text, never its own fallback', () => {
+    const error = new OwnerLimitReachedError({ key: 'nodes', owner: { userId: 'u' }, limit: 2n, callerCanManageOwner: false });
+    const fallback = vi.fn(() => 'fallback');
+    expect(toolErrorResult(error, fallback)).toMatchObject({
+      isError: true, content: [{ type: 'text', text: '[owner_limit_reached] The owner of this memory has reached a limit of their account.' }],
+    });
+    expect(fallback).not.toHaveBeenCalled();
+  });
+});
+
+describe('node-size refusal (#5019)', () => {
+  it('a tool that catches and maps answers the coded text, never its own fallback', () => {
+    const fallback = vi.fn(() => 'fallback');
+    expect(toolErrorResult(new NodeContentTooLargeError(5), fallback)).toMatchObject({
+      isError: true, content: [{ type: 'text', text: '[node_content_too_large] A node can hold at most 5 bytes.' }],
+    });
+    expect(fallback).not.toHaveBeenCalled();
+  });
+});
 
 describe('MCP database-fault boundary', () => {
   it.each([

@@ -53,10 +53,13 @@ export const assetMutations = {
     // v2 (spec 006): memory-addressed begin.
     beginAssetUploadV2: async (
       _: unknown,
-      { input }: { input: BeginAssetUploadV2Input },
+      { input: wire }: { input: Omit<BeginAssetUploadV2Input, 'memoryId'> & { memoryRef: string } },
       ctx: Context,
     ) => {
       if (!ctx.userId) throw unauthenticatedError();
+      // #5080: the wire name is `memoryRef`; the controller keeps `memoryId`.
+      const { memoryRef, ...rest } = wire;
+      const input: BeginAssetUploadV2Input = { ...rest, memoryId: memoryRef };
       const ticket = await beginAssetUploadV2(
         ctx.db,
         {

@@ -17,6 +17,7 @@ import { getSubscribedWritableMemoryIds } from '../lib/auth/orgWritableMemory.js
 import { independentUserItemAccess } from '../lib/auth/independentUserItemAccess.js';
 import type { RunToolContext } from '../lib/runner/tools/types.js';
 import { testRunAgentId } from '../test/runAgent.js';
+import { activeMemoryReadGrant, activeMemoryWriteGrant } from '../test/appGrants5404.js';
 
 vi.mock('../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../integrations/objectstore/index.js', () => ({ putObject: vi.fn(), deleteObject: vi.fn() }));
@@ -86,7 +87,7 @@ describe('#3280 independent user ceiling on item-folded run reach', () => {
     if (door === 'mcp-list') expect((await getMemoryAccess(db, backed.principal)).has(id)).toBe(false);
     else if (door === 'graphql-ids') expect(await getAccessibleMemoryIds({ ...backed.principal })).not.toContain(id);
     else {
-      const args = { filter: { memoryIds: [id] }, limit: 10, ...(door === 'keyword' ? { query: 'needle3278', mode: 'keyword' } : {}) };
+      const args = { filter: { memoryRefs: [id] }, limit: 10, ...(door === 'keyword' ? { query: 'needle3278', mode: 'keyword' } : {}) };
       const withItem = await Q.findNodes({}, args, { ...backed.principal });
       await db.agentMemoryItem.delete({ where: { agentId_memoryId: { agentId: f.agent.id, memoryId: id } } });
       const without = await Q.findNodes({}, args, { ...backed.principal });
@@ -207,16 +208,23 @@ describe('#3280 independent user ceiling on item-folded run reach', () => {
     expect(await canWriteToMemory(db, backed.principal, f.publicMemory.id)).toBe(false);
     await expect(requireMemoryWriteAccess(ctx(f.user.id), f.publicMemory.id)).rejects.toMatchObject({ extensions: { code: 'FORBIDDEN' } });
   });
-  it('automation node-read grant is unchanged for an independently admitted user', async () => {
+  // #5404 restates this case: the per-automation read grant's user-backed arm (#2883) is retired, and its replacement, a signed
+  // `memory.read` grant held by the App, reaches only the App's USERLESS runs (cor:acl:140:02: a grant never widens what a person
+  // reads). A user-backed run therefore reads exactly as it would with no grant.
+  it('a memory.read grant gives a user-backed run nothing: its read is the same with and without the grant', async () => {
     await db.orgMember.create({ data: { userId: f.user.id, organizationId: f.org.id, role: 'READER' } });
-    await M.setAutomationReadGrant({}, { appRef: f.app.id, triggerKind: 'SCHEDULE', triggerId: f.schedule.id, memoryRef: f.granted.id, prefix: 'docs' }, ctx(f.admin.id));
     const run = await db.appRun.create({ data: { id: generateId(), organizationId: f.org.id, appId: f.app.id, agentId: await testRunAgentId(db, f.org.id, f.app.id), userId: f.user.id, triggerKind: 'SCHEDULE', triggerId: f.schedule.id, entryNodeUrn: f.run.entryNodeUrn } });
     const tool = { ...backed, run, principal: { db, ...runAuthContext(run) } as Context };
-    expect(await hadronReadNode.execute(tool, { urn: urn(f.granted) })).toMatchObject({ content: 'secret granted' });
+    const answer = () => hadronReadNode.execute(tool, { urn: urn(f.granted) }).then((r) => JSON.stringify(r), (e) => `ERR ${(e as Error).message}`);
+    const without = await answer();
+    await activeMemoryReadGrant(f.app.id, f.granted.id, { issuerUserId: f.admin.id });
+    expect(await answer()).toBe(without);
+    // The org READER reads org knowledge in their own right, so the run reads it before and after; the grant changed nothing.
+    expect(without).toContain('secret granted');
   });
-  it('explicit App write grant is unchanged at an unlinked node destination', async () => {
+  it('a signed memory.write grant is unchanged at an unlinked node destination (#5404, replaces the App write grant)', async () => {
     // Userless grant authority is a separate path and must not be removed by the user ceiling.
-    await M.setAppMemoryWriteGrant({}, { appRef: f.app.id, memoryRef: f.granted.id, prefix: 'docs', registerNodeUrn: 'hrn:node:example.com:register:authority' }, ctx(f.admin.id));
+    await activeMemoryWriteGrant(f.app.id, f.granted.id, { issuerUserId: f.admin.id, prefix: 'docs' });
     expect(await hadronCreateNode.execute(f.tool, { urn: urn(f.granted, 'docs:granted'), name: 'granted' })).toMatchObject({ created: true });
   });
 
@@ -229,7 +237,7 @@ describe('#3280 independent user ceiling on item-folded run reach', () => {
   });
 
   it('item-only user-backed flow loading is refused', async () => {
-    expect(await rejection(loadFlowNode(db, urn(f.read), f.org.id, backed.principal as Context))).toMatchObject({ message: expect.stringContaining('not readable') });
+    expect(await rejection(loadFlowNode(db, urn(f.read), { organizationId: f.org.id }, backed.principal as Context))).toMatchObject({ message: expect.stringContaining('not readable') });
   });
   it('item-only user-backed file write is refused before object storage', async () => {
     vi.mocked(putObject).mockClear();

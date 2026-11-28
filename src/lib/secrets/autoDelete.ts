@@ -1,12 +1,7 @@
 /** #4001 / cor:sec:060:03: a signed deletion deadline survives every client end. No values are read by the sweep. */
 import { Prisma, type PrismaClient } from '../../generated/prisma/index.js';
+import { safeErrorCode } from '../safeErrorCode.js';
 import { recordSecretEvent, type SecretActor } from './appSecrets.js';
-
-/** A database error code safe to log: a Prisma `P####` or a five-character SQLSTATE, else UNKNOWN. Never a message, id or value. */
-export function safeErrorCode(err: unknown): string {
-  const raw = err && typeof err === 'object' ? (err as { code?: unknown }).code : undefined;
-  return typeof raw === 'string' && /^(P\d{4}|[0-9A-Z]{5})$/.test(raw) ? raw : 'UNKNOWN';
-}
 
 /**
  * The signed, activated delete mark that is due, as ONE fragment for the candidate statement and the after-lock recheck
@@ -16,6 +11,21 @@ export function safeErrorCode(err: unknown): string {
 const SIGNED_DELETE_MARK_DUE = Prisma.sql`g.action IN ('secret.reveal', 'secret.use')
   AND g.action_values->>'auto-delete' = 'delete' AND g.activated_at IS NOT NULL AND g.signature_id IS NOT NULL
   AND g.expires_at <= (clock_timestamp() AT TIME ZONE 'UTC')`;
+
+/**
+ * #5335 (cor:sec:060:03 arming rule, Decided #5217 Q6 "B"; the cor:sec:070:01 auto-delete exception refused): a mark deletes a
+ * protected secret only when the secret carries `deleteAfterUse`, the owner's consent. Judged when the deletion fires, never
+ * only at issuance, so a mark signed before this gate existed deletes nothing, and clearing the option disarms every live mark
+ * (Proposed). An unprotected secret is armed by its mark alone, as before. ONE fragment over the secret row aliased `s`, used
+ * by the sweep's candidate statement and its after-lock recheck.
+ */
+const SECRET_ARMED = Prisma.sql`(NOT s.protected OR s.delete_after_use)`;
+
+/** The same rule for the last-read paths, read under the secret row lock the caller already holds. */
+export async function secretArmedForAutoDelete(tx: Prisma.TransactionClient, secretId: string): Promise<boolean> {
+  const [row] = await tx.$queryRaw<Array<{ armed: boolean }>>`SELECT ${SECRET_ARMED} AS armed FROM secrets s WHERE s.id = ${secretId}`;
+  return row?.armed === true;
+}
 
 export function autoDeleteLimitRefusal(autoDelete: boolean, expiresAt: Date | null, maxUses: number | null): {
   code: 'SECRET_AUTO_DELETE_NEEDS_LIMIT'; message: string;
@@ -38,7 +48,7 @@ export async function deleteLockedAppSecret(
 /**
  * Bounded pass (up to 20 batches of 500), secret then grant order. Lock secrets with SKIP LOCKED; judge signed terms in a SECOND statement after
  * the lock, on the database clock. Revocation, departure and client ended_at deliberately do not cancel a signed deadline
- * (Holger ruling 1A). An unsigned/pending grant never deletes. A row id, never its reusable name, is the deletion identity.
+ * (Holger ruling 1A). An unsigned/pending grant never deletes, nor does a protected secret without `deleteAfterUse` (#5335). A row id, never its reusable name, is the deletion identity.
  */
 export async function sweepSecretAutoDelete(db: PrismaClient, batchSize = 500): Promise<number> {
   let total = 0;
@@ -49,7 +59,7 @@ export async function sweepSecretAutoDelete(db: PrismaClient, batchSize = 500): 
     const { selected, deleted, last } = await db.$transaction(async tx => {
     const secrets = await tx.$queryRaw<Array<{ id: string; owner_id: string; name: string }>>`
       SELECT s.id, s.owner_id, s.name FROM secrets s
-      WHERE s.owner_type = 'app' AND s.id > ${cursor} AND EXISTS (
+      WHERE s.owner_type = 'app' AND s.id > ${cursor} AND ${SECRET_ARMED} AND EXISTS (
         SELECT 1 FROM secret_read_clients c JOIN grants g ON g.id = c.grant_id
         WHERE c.secret_id = s.id AND c.app_id = s.owner_id AND g.app_id = c.app_id
           AND g.action_values->>'secret' = s.id AND ${SIGNED_DELETE_MARK_DUE})
@@ -57,8 +67,8 @@ export async function sweepSecretAutoDelete(db: PrismaClient, batchSize = 500): 
     let deleted = 0;
     for (const s of secrets) {
       const [due] = await tx.$queryRaw<Array<{ id: string }>>`
-        SELECT g.id FROM secret_read_clients c JOIN grants g ON g.id = c.grant_id
-        WHERE c.secret_id = ${s.id} AND c.app_id = ${s.owner_id} AND g.app_id = c.app_id
+        SELECT g.id FROM secrets s JOIN secret_read_clients c ON c.secret_id = s.id JOIN grants g ON g.id = c.grant_id
+        WHERE s.id = ${s.id} AND ${SECRET_ARMED} AND c.app_id = ${s.owner_id} AND g.app_id = c.app_id
           AND g.action_values->>'secret' = ${s.id} AND ${SIGNED_DELETE_MARK_DUE} LIMIT 1`;
       if (!due) continue;
       // #4635: one secret whose deletion fails must not roll back, or block, the others in its batch. Its own writes

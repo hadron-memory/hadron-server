@@ -46,16 +46,14 @@ beforeEach(async () => {
   await db.appAgent.create({ data: { appId, agentId } });
   await db.appMember.create({ data: { appId, userId, role: 'member' } });
   for (const row of [
-    { loc: 'conversations', data: {} },
     { loc: 'conversations:flow', data: { stageOrder: ['step'], isSetup: false } },
     { loc: 'conversations:flow:step', data: { promptRef: 'prompts:step' } },
-    { loc: 'prompts', data: {} },
     { loc: 'prompts:step', content: 'LICENSED STAGE', data: {} },
   ]) await db.node.create({ data: { memoryId: systemId, name: row.loc, nodeType: 'system', ...row } });
   await serveEveryAgent(db);
 });
 
-const startChat = (scope: 'private' | 'shared' = 'private') => M.startChat({}, { agentRef: agentId, conversationName: 'flow', scope }, ctx());
+const startChat = (scope: 'private' | 'shared' = 'private') => M.startChat({}, { agentRef: agentId, conversationName: 'flow', scope, appRef: appId }, ctx());
 
 /** Whole rows a start may write: nodes (chat, parents), subscriptions and served records. Memory rows are compared separately. */
 async function startWrites() {
@@ -150,6 +148,8 @@ describe('#4108 item 1: the selected App owner changes after anchor discovery', 
     const home = (await chatNodeByLocOrThrow(db, first.chatId)).memoryId;
     expect((await db.memory.findUniqueOrThrow({ where: { id: home } })).appId).toBe(appId);
     // Not a participant: the home App is not a carrier, so only the selected-App completeness check sees its owner.
+    // #5394: a named appRef resolves only among the Apps the caller takes part in, so the racing start identifies the
+    // App through its credential (ctx.appId), which needs no participation, and reuses the existing home.
     await db.appMember.delete({ where: { appId_userId: { appId, userId } } });
 
     let holder: Awaited<ReturnType<typeof holdAnchors>> | null = null;
@@ -162,7 +162,8 @@ describe('#4108 item 1: the selected App owner changes after anchor discovery', 
       holder = await holdAnchors([{ kind: 'user', id: ownerB }]);
     });
     let completed = false;
-    const run = settle(startChat()).then((r) => { completed = true; return r; });
+    const credentialStart = () => M.startChat({}, { agentRef: agentId, conversationName: 'flow' }, { ...ctx(), appId });
+    const run = settle(credentialStart()).then((r) => { completed = true; return r; });
     try {
       const writesBefore = await startWrites();
       await waitForLockWaitersOfType(db, 'advisory', 1);

@@ -6,8 +6,7 @@ import { registerRolePickQueries } from './resolvers.registerRolePick.js';
 import { registerRoleCandidateQueries } from './resolvers.registerRoleCandidates.js';
 import { actionRegisterIndexQueries } from './resolvers.actionRegisterIndex.js';
 import { automationPinQueries, automationPinMutations } from './resolvers.automationPin.js';
-import { appWriteGrantQueries, appWriteGrantMutations } from './resolvers.appWriteGrant.js';
-import { automationReadGrantQueries, automationReadGrantMutations } from './resolvers.automationReadGrant.js';
+import { retiredGrantDoorQueries, retiredGrantDoorMutations } from './resolvers.retiredGrantDoors.js';
 // GraphQL resolver map — thin assembler.
 //
 // The implementation was split out of this file (originally ~11k lines) into
@@ -60,7 +59,7 @@ import { dashboardQueries, dashboardMutations } from './resolvers.dashboard.js';
 import { nodeMutations } from './resolvers.mutation.node.js';
 import { objectQueries, objectMutations } from './resolvers.object.js';
 import { appRunMutations, appRunQueries } from './resolvers.appRun.js';
-import { meteringMutations, meteringQueries } from './resolvers.metering.js';
+import { meteringMutations, meteringQueries, meteringTypeResolvers } from './resolvers.metering.js';
 import { ownerLimitMutations, ownerLimitQueries } from './resolvers.ownerLimits.js';
 import { connectionGrantMutations, connectionGrantQueries } from './resolvers.connectionGrant.js';
 import { principalGrantMutations, principalGrantQueries } from './resolvers.principalGrant.js';
@@ -103,6 +102,7 @@ import { sessionRestartMutations } from './resolvers.sessionRestart4855.js';
 import { hostSweepRunMutations, hostSweepRunQueries } from './resolvers.hostSweepRuns.js';
 import { desiredStateMutations, desiredStateQueries, desiredStateWorkerFields } from './resolvers.desiredState.js';
 import { hostAssignmentMutations, hostAssignmentQueries, hostAssignmentFieldResolvers } from './resolvers.hostAssignment.js';
+import { agentTeamHostMutations, agentTeamHostQueries } from './resolvers.agentTeamHost.js';
 import {
   agentTaskAlarmMutations,
   agentTaskAlarmQueries,
@@ -187,9 +187,11 @@ export const resolvers = {
   // #2064: a non-participant's install-memory write response reads empty (installMemory.ts).
   Node: withInstallConcealment(withInheritedNodeProjection({ ...typeResolvers.Node, ...nodeApprovalFieldResolvers.Node, ...nodeAttributionFieldResolvers.Node, ...commentFieldResolvers.Node, ...signingFieldResolvers.Node })),
   // #1632: signing requests and signatures.
+  CreditBalance: meteringTypeResolvers.CreditBalance,
   SigningRequest: signingFieldResolvers.SigningRequest,
   NodeSignature: signingFieldResolvers.NodeSignature,
   GrantSigningRequest: grantSigningFieldResolvers.GrantSigningRequest,
+  GrantSigningSelection: grantSigningFieldResolvers.GrantSigningSelection,
   Grant: grantFieldResolvers.Grant,
   GrantSignature: grantFieldResolvers.GrantSignature,
   Comment: commentFieldResolvers.Comment,
@@ -246,6 +248,7 @@ export const resolvers = {
     ...desiredStateQueries,
     ...hostSweepRunQueries,
     ...hostAssignmentQueries,
+    ...agentTeamHostQueries,
     ...agentTaskAlarmQueries,
     ...agentTaskMatchingQueries,
     ...accountUsageQueries,
@@ -276,8 +279,7 @@ export const resolvers = {
     ...dashboardQueries,
     ...appRunQueries,
     ...automationPinQueries,
-    ...appWriteGrantQueries,
-    ...automationReadGrantQueries,
+    ...retiredGrantDoorQueries,
     ...runTeamSnapshotQueries,
     ...connectionGrantQueries,
     ...principalGrantQueries,
@@ -297,8 +299,7 @@ export const resolvers = {
     ...dashboardMutations,
     ...appRunMutations,
     ...automationPinMutations,
-    ...appWriteGrantMutations,
-    ...automationReadGrantMutations,
+    ...retiredGrantDoorMutations,
     ...meteringMutations,
     ...ownerLimitMutations,
     ...rateLimitMutations,
@@ -338,6 +339,7 @@ export const resolvers = {
     ...desiredStateMutations,
     ...hostSweepRunMutations,
     ...hostAssignmentMutations,
+    ...agentTeamHostMutations,
     ...agentTaskAlarmMutations,
     ...memoryConfigMutations,
     ...memoryConfigTemplateMutations,

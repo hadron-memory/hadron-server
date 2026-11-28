@@ -52,7 +52,7 @@ describe('createNode — reserved extraction-spec names', () => {
           input: {
             loc: 'config',
             name: 'config',
-            memoryId: memory.id,
+            memoryRef: memory.id,
             data: {
               agentExtractionSpec: [
                 { field: 'business_type' },
@@ -80,7 +80,7 @@ describe('createNode — reserved extraction-spec names', () => {
           input: {
             loc: 'conversations:main:check',
             name: 'check',
-            memoryId: memory.id,
+            memoryRef: memory.id,
             data: {
               extractionSpec: [{ field: 'exceptions' }],
             },
@@ -103,7 +103,7 @@ describe('createNode — reserved extraction-spec names', () => {
         input: {
           loc: 'conversations:main:check',
           name: 'check',
-          memoryId: memory.id,
+          memoryRef: memory.id,
           data: {
             extractionSpec: [{ field: 'business_type' }, { field: 'urgency' }],
           },
@@ -124,7 +124,7 @@ describe('createNode — reserved extraction-spec names', () => {
         input: {
           loc: 'config',
           name: 'config',
-          memoryId: memory.id,
+          memoryRef: memory.id,
           data: {
             agentExtractionSpec: [{ field: 'exception_count' }],
           },

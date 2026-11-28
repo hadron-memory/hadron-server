@@ -55,6 +55,9 @@ jobs:
         env:
           # The full source + test graph exceeds Node's default 2 GiB heap. 4 GiB stopped being enough
           # on 2026-11-03: main itself measured 4.56 GB peak (`tsc --extendedDiagnostics`, Memory used),
-          # so any PR adding a model tipped it over (#3298). 6 GiB fits the 16 GB public-repo runner.
-          NODE_OPTIONS: --max-old-space-size=6144
+          # so any PR adding a model tipped it over (#3298). 6 GiB then ran out at random on 2026-11-27
+          # (#5445, merge queue included). Measured on this runner that day (ubuntu-latest, 16 GB, 4 CPUs,
+          # 14.3 GB available): Memory used 6.96 and 7.14 GB over two runs, peak RSS 7.9 GB. 12 GiB leaves
+          # about 5 GB of heap headroom and stays under the runner's free memory.
+          NODE_OPTIONS: --max-old-space-size=12288
         run: pnpm tsc --noEmit -p .

@@ -201,7 +201,7 @@ describe('#2089 list admission — Query.apps', () => {
   it('does not let filter.agentId answer the install question the withheld fields refuse', async () => {
     // The owner-role arm of the LIST is membership-only and #3765 does not widen it (the ruling admits the App's roster FIELDS, not
     // a filter on them); the filter stays an owner-only answer.
-    const filter = { agentId };
+    const filter = { agentRef: agentId };
     for (const ctx of [as(boss.id), as(adminBoss.id, { roles: ['ADMIN'] })]) {
       const page = await Q.apps({}, { filter }, ctx);
       expect(page.total).toBe(0);

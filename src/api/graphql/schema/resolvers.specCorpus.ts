@@ -14,6 +14,7 @@ import { mirrorNodeMoveToGit, type MovedNodeRef } from '../../../integrations/gi
 import type { Context } from './resolvers.js';
 import { nodeMoveOps, writeNodeCore } from './resolvers.mutation.node.js';
 import {
+  requireCallerIdentity,
   concealUnreadableDenial,
   isMemoryReadableCached,
   pageArgs,
@@ -93,6 +94,7 @@ export const specCorpusMutations = {
     { memoryRef, loc, name }: { memoryRef: string; loc: string; name?: string | null },
     ctx: Context,
   ) => {
+    requireCallerIdentity(ctx);
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
     // (@codex P2, PR #1452) Authorize BEFORE taking any lock or touching the
     // tombstone, with the same concealment writeNodeCore applies later: an
@@ -167,6 +169,8 @@ export const specCorpusMutations = {
             txCtx,
             'create',
             {
+              ownerLimit: 'refuse',
+              sizeCeiling: 'skip',
               authoring: { kind: 'platform', record: 'spec-reservation' },
               ownsKind: 'spec',
               governedContext: 'node-write',
@@ -236,6 +240,7 @@ export const specCorpusMutations = {
     { memoryRef, parentLoc, after, name }: { memoryRef: string; parentLoc: string; after?: number | null; name?: string | null },
     ctx: Context,
   ) => {
+    requireCallerIdentity(ctx);
     const { id: memoryId } = await resolveMemoryRef(ctx.db, memoryRef);
     await concealUnreadableDenial(ctx, memoryId, memoryRef, () => requireMemoryWriteAccess(ctx, memoryId));
     const kind = childKindOf(parentLoc);
@@ -335,6 +340,8 @@ export const specCorpusMutations = {
         txCtx,
         'create',
         {
+          ownerLimit: 'refuse',
+          sizeCeiling: 'skip',
           authoring: { kind: 'platform', record: 'spec-reservation' },
           ownsKind: 'spec',
           governedContext: 'node-write',
@@ -1137,6 +1144,7 @@ export const specCorpusRenumberMutations = {
     { memoryRef, fromLoc, toLoc, dryRun }: { memoryRef: string; fromLoc: string; toLoc: string; dryRun?: boolean | null },
     ctx: Context,
   ): Promise<SpecRenumberResultOut> => {
+    requireCallerIdentity(ctx);
     const corpus = await loadScannableCorpus(ctx, memoryRef);
     // #4461: `fromLoc` names an EXISTING node (looked up below, a miss is NODE_NOT_FOUND), so it is not capped: an
     // existing over-cap spec must still be renumberable. Only `toLoc`, what the caller writes, is held to the
@@ -1338,7 +1346,7 @@ async function rewriteWithRetry(
         { memoryId: corpus.id, loc: node.loc, ...plan.patch, reason: `renumber ${fromLoc} → ${toLoc}` },
         ctx,
         'update',
-        { authoring: { kind: 'platform', record: 'spec-renumber' }, targetNodeId: node.id, guardRevSeq: node.revSeq, ownsKind: 'spec', governedContext: 'node-write' },
+        { ownerLimit: 'count-only', sizeCeiling: 'skip', authoring: { kind: 'platform', record: 'spec-renumber' }, targetNodeId: node.id, guardRevSeq: node.revSeq, ownsKind: 'spec', governedContext: 'node-write' },
       );
       return { fields: Object.keys(plan.patch), count: plan.count, loc: node.loc };
     } catch (e) {
@@ -1463,6 +1471,7 @@ async function mintMemoryNodes(
   memoryRef: string,
   dryRun: boolean,
 ): Promise<MintReport> {
+  requireCallerIdentity(ctx);
   const { id } = await resolveMemoryRef(ctx.db, memoryRef);
   await concealUnreadableDenial(ctx, id, memoryRef, () => mayMintNodes(ctx, id));
 

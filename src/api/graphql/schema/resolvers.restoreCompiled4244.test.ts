@@ -65,10 +65,8 @@ beforeEach(async () => {
 
   // Seed a conversation + stage + prompt
   for (const n of [
-    { loc: 'conversations', name: 'conversations', nodeType: 'system' },
     { loc: 'conversations:hello', name: 'hello', nodeType: 'system', data: { stageOrder: ['greet'], isSetup: false } },
     { loc: 'conversations:hello:greet', name: 'greet', nodeType: 'system', data: { promptRef: 'prompts:hello:greet' } },
-    { loc: 'prompts', name: 'prompts', nodeType: 'system' },
     { loc: 'prompts:hello', name: 'hello', nodeType: 'system' },
     { loc: 'prompts:hello:greet', name: 'greet', nodeType: 'system', content: 'Hello world!' },
   ] as any[]) {

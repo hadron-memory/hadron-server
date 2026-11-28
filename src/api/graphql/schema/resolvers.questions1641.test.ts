@@ -256,10 +256,11 @@ describe('the App owner arm under concurrent revocation (#1690 review: Rook P3-1
       userId: holger.id, organizationId: orgId, appId: app.id, userMemoryOfAgentId: agent.id,
     } });
     await db.memoryShare.create({ data: { memoryId: personal.id, granteeId: reader.id, grantorId: holger.id, role: 'writer' } });
-    // Refused by the class guard and concealed; without the guard this create would succeed.
+    // Refused by the class guard; without the guard this create would succeed. #5389: the share now grants read, so the
+    // refusal is the plain QUESTION_FORBIDDEN rather than the concealed missing-memory answer.
     expect(await codeOf(M.createQuestionLog(null,
       { memoryRef: personal.id, loc: 'questions', defaultDeciders: [holger.id] }, as(reader.id))))
-      .toMatch(/^MEMORY_NOT_FOUND/);
+      .toMatch(/^QUESTION_FORBIDDEN/);
     expect(await db.node.count({ where: { memoryId: personal.id, role: 'question.log' } })).toBe(0);
   });
 });
@@ -584,12 +585,12 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
   it('createNode / updateNode refuse the question family (ROLE_GOVERNED); updateNodeData too', async () => {
     const log = await createLog();
     const d = await ask(log.row.id);
-    expect(await codeOf(M.createNode(null, { input: { memoryId: memory.id, loc: 'x', name: 'x', role: 'question' } }, as()))).toBe('ROLE_GOVERNED');
-    expect(await codeOf(M.createNode(null, { input: { memoryId: memory.id, loc: 'y', name: 'y', role: 'question.log' } }, as()))).toBe('ROLE_GOVERNED');
-    expect(await codeOf(M.updateNode(null, { input: { id: d.row.id, content: 'x' } }, as()))).toBe('ROLE_GOVERNED');
-    expect(await codeOf(M.updateNode(null, { input: { id: d.row.id, role: null } }, as()))).toBe('ROLE_GOVERNED');
+    expect(await codeOf(M.createNode(null, { input: { memoryRef: memory.id, loc: 'x', name: 'x', role: 'question' } }, as()))).toBe('ROLE_GOVERNED');
+    expect(await codeOf(M.createNode(null, { input: { memoryRef: memory.id, loc: 'y', name: 'y', role: 'question.log' } }, as()))).toBe('ROLE_GOVERNED');
+    expect(await codeOf(M.updateNode(null, { input: { ref: d.row.id, content: 'x' } }, as()))).toBe('ROLE_GOVERNED');
+    expect(await codeOf(M.updateNode(null, { input: { ref: d.row.id, role: null } }, as()))).toBe('ROLE_GOVERNED');
     expect(await codeOf(M.updateNodeData(null, { nodeRef: d.row.id, data: { title: 'x' } }, as()))).toBe('ROLE_GOVERNED');
-    const refusal = await errorOf(M.updateNode(null, { input: { id: d.row.id, content: 'x' } }, as()));
+    const refusal = await errorOf(M.updateNode(null, { input: { ref: d.row.id, content: 'x' } }, as()));
     expect(refusal.extensions).toMatchObject({ kind: 'question', strength: 'authority', door: 'amendQuestion', mcpDoor: null });
     expect(refusal.message).toContain('There is no route to suggest');
     // No generic-shaped door mutation exists for the kind.
@@ -599,12 +600,12 @@ describe('§3.2 — no generic path writes, deletes, moves or merges a question'
 
   it('nothing is created in a log\'s code space except by askQuestion', async () => {
     const log = await createLog();
-    expect(await codeOf(M.createNode(null, { input: { memoryId: memory.id, loc: 'questions:QA', name: 'squat' } }, as()))).toBe('QUESTION_CONTAINED');
+    expect(await codeOf(M.createNode(null, { input: { memoryRef: memory.id, loc: 'questions:QA', name: 'squat' } }, as()))).toBe('QUESTION_CONTAINED');
     const other = await db.node.create({ data: { id: generateId(), memoryId: memory.id, loc: 'loose', name: 'Loose' } });
     expect(await codeOf(M.moveNode(null, { sourceRef: other.id, targetUrn: `${memory.urn}:questions:QA` }, as()))).toBe('QUESTION_CONTAINED');
     // Deeper descendants are ordinary.
     const d = await ask(log.row.id);
-    expect(await codeOf(M.createNode(null, { input: { memoryId: memory.id, loc: `${d.row.loc}:note`, name: 'note' } }, as()))).toBe('NO_ERROR');
+    expect(await codeOf(M.createNode(null, { input: { memoryRef: memory.id, loc: `${d.row.loc}:note`, name: 'note' } }, as()))).toBe('NO_ERROR');
   });
 
   it('deleteNode (soft, hard, an ancestor recursively), moveNode, mergeNodes refuse QUESTION_CONTAINED', async () => {
@@ -949,7 +950,7 @@ it('old decision-role rows are not questions and a memory writer can edit them',
   expect(Q.question).toBeTypeOf('function');
   expect(await Q.question(null, { ref: node.id }, as(writer.id))).toBeNull();
   expect(await Q.questions(null, { logRef: log.id }, as(writer.id))).toEqual({ items: [], total: 0 });
-  await M.updateNode(null, { input: { id: node.id, name: 'Ordinary editable node' } }, as(writer.id));
+  await M.updateNode(null, { input: { ref: node.id, name: 'Ordinary editable node' } }, as(writer.id));
   expect((await db.node.findUniqueOrThrow({ where: { id: node.id } })).name).toBe('Ordinary editable node');
 });
 

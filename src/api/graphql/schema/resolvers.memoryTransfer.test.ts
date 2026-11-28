@@ -299,8 +299,8 @@ describe('transferMemoryOwnership', () => {
       },
     });
     const input = mode === 'create'
-      ? { memoryId: memory.id, loc: 'late-node', name: 'Late', content: 'late write' }
-      : { memoryId: memory.id, loc: node.loc, content: 'late write' };
+      ? { memoryRef: memory.id, loc: 'late-node', name: 'Late', content: 'late write' }
+      : { memoryRef: memory.id, loc: node.loc, content: 'late write' };
     const mutation = mode === 'create' ? resolvers.Mutation.createNode : resolvers.Mutation.updateNode;
     await expect(mutation(null, { input }, { db: raceDb, userId: owner.id, roles: ['READER'] }))
       .rejects.toMatchObject({ name: 'MemoryNotFoundError' });

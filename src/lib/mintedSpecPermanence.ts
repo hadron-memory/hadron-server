@@ -20,6 +20,33 @@
  * start — a divergence from the old never-moved stamp, live today only in
  * the harmless newlyMarked conflict branch (permanence off, #1591).
  *
+ * The mint time is derived, not stored, so it is not monotonic (F1, #5088):
+ * hard-deleting minted node rows moves MAX(minted_at) backward, or makes it
+ * vanish when none is left, which returns the memory to draft. That is the
+ * derived state working as specified (hrn:node:hadronmemory.com:specs:cor:dmo:120:00:
+ * the minted state "is not one-way: deleting every minted node makes it draft
+ * again"), not a defect. Soft deletes never clear it, since tombstones keep
+ * their `minted_at`. MAX is the mint time; MIN would be wrong.
+ *
+ * Isolation (F2): the guards assume READ COMMITTED. They take `FOR SHARE` on
+ * the memory row and then run a plain aggregate over `nodes`; under READ
+ * COMMITTED that aggregate takes a fresh snapshot after the lock is granted,
+ * so it sees a mint that committed while the lock waited. A stricter level
+ * would pin the snapshot at the first statement and could miss it.
+ *
+ * Fencing invariant (F3): the unlocked EXISTS probe in
+ * `lockMintedSpecUnmarks` is stable for the rows being written only because
+ * the mint fences EVERY node row of the memory, tombstones included
+ * (`fenceCorpusForMint`, `FOR UPDATE` on each, which covers every spec row in scope), which waits on or times out behind this writer's own row locks.
+ * A mint path that fenced fewer rows would break that argument.
+ *
+ * Index (F5): the `EXISTS`/`MAX` reads over `(memory_id, minted_at)` have no
+ * dedicated index. The EXISTS probe runs today, with the switch off, on every
+ * write that newly marks a spec (pinned by C2/C2b); only the MAX reads are
+ * dormant. Whether a partial or composite index is warranted is to be decided
+ * with any future protection rule (cor:dmo:120:09), weighing that per-write
+ * probe cost; it is not a step before a switch flip.
+ *
  * The legacy implementation selects anything carrying the spec marker (`hasSpecMarker` — a `spec`
  * tag or a `spec`/`spec.*` role; both are plaintext at rest even in encrypted
  * memories). Because the removal guards pick specs out BY that marker,
@@ -394,6 +421,18 @@ export async function assertNoMintedCorpusRemoval(
 }
 
 /**
+ * Whether `callerUserId` may reuse this soft-deleted memory's URN (hadron-internal#70; cor:dmo:010:04, cor:acl:010:02). A personal or
+ * private memory (the rows that carry a `userId`) is reused by that user only; org-shared memories (no `userId`) keep the door's own gate.
+ * Any other caller gets the answer a live holder of the URN gets.
+ */
+export function tombstoneReclaimableBy(
+  tombstone: { userId: string | null },
+  callerUserId: string | null | undefined,
+): boolean {
+  return tombstone.userId === null || tombstone.userId === callerUserId;
+}
+
+/**
  * Hard-delete a SOFT-DELETED memory to reclaim its URN for a new one (#1468):
  * the tombstone-reclaim step of createMemory, cloneMemory, extract, App-memory
  * provisioning and owner-namespace merges. The FK cascade erases its nodes, so
@@ -402,14 +441,22 @@ export async function assertNoMintedCorpusRemoval(
  * Locks the memory row `FOR UPDATE` (the delete's own strength, so the guard's
  * `FOR SHARE` re-enters) and re-checks it is still a tombstone: a row revived
  * since the caller's unlocked read is left alone. Returns whether it deleted.
+ *
+ * `reclaimers` are the users this door acts for (hadron-internal#75; the rule of
+ * tombstoneReclaimableBy, judged on the locked row): a personal or private
+ * tombstone (one with a `userId`) is removed only when its user is among them,
+ * otherwise it is left alone and the call answers false, as for a live holder.
+ * A tombstone with no `userId` is the door's own gate's to judge.
  */
 export async function reclaimTombstonedMemory(
   tx: Prisma.TransactionClient,
   memoryId: string,
+  reclaimers: ReadonlyArray<string | null | undefined>,
 ): Promise<boolean> {
-  const [row] = await tx.$queryRaw<Array<{ deleted_at: Date | null }>>`
-    SELECT deleted_at FROM memories WHERE id = ${memoryId} FOR UPDATE`;
+  const [row] = await tx.$queryRaw<Array<{ deleted_at: Date | null; user_id: string | null }>>`
+    SELECT deleted_at, user_id FROM memories WHERE id = ${memoryId} FOR UPDATE`;
   if (!row || row.deleted_at === null) return false;
+  if (row.user_id !== null && !reclaimers.includes(row.user_id)) return false;
   await assertNoMintedCorpusRemoval(tx, memoryId, 'reclaim the address of the deleted corpus holding', {
     includeTombstones: true,
   });

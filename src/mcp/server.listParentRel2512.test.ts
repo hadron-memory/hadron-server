@@ -70,7 +70,7 @@ it.each(['qualified', 'scoped'] as const)('uses the same explicit not-found enve
   const args = parentArgs({ urn: 'parent2512.example:absent' }, mode);
   const result = await srv.callTool('hadron_list_nodes', args) as { isError?: boolean; content: Array<{ text: string }> };
   expect(result.isError).toBe(true);
-  expect(result.content[0].text).toBe(`Node "${args.parentRel}" not found.`);
+  expect(result.content[0].text).toBe('Node not found.');
 });
 it.each(['hrn:node:foo', 'urn:node:foo:bar', 'hrn:node:parent2512.example:tree'])('returns a typed refusal for malformed node parent %s', async parentRel => {
   const { srv } = await fixture();
@@ -114,6 +114,6 @@ it('does not reveal an unreadable dual-reference memory through conflict diagnos
   for (const memoryUrn of [`hrn:mem:${foreign.urn}`, 'hrn:mem:parent2512.example:missing']) {
     const result = await srv.callTool('hadron_list_nodes', { parentRel, memoryUrn }) as { isError?: boolean; content: Array<{ text: string }> };
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toBe(`Node "${parentRel}" not found.`);
+    expect(result.content[0].text).toBe('Node not found.');
   }
 });

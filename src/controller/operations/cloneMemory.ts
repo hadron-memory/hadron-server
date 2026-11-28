@@ -11,6 +11,8 @@ import { ensureCurrentNodeRevisionInTransaction, jsonOrDbNull } from '../../lib/
 import { carryGovernedSignals } from '../../lib/governedSignals.js';
 import { carryNodeAuthorship, clearNodeAuthorship } from '../../lib/nodeAuthorship.js';
 import { computeContentHash } from '../../lib/contentHash.js';
+import { requireOwnerHeadroomMany } from '../../lib/ownerLimits/gate.js';
+import { memoryCountsAgainstOwner, type OwnerLimitKey } from '../../lib/ownerLimits/keys.js';
 import { resetEmbeddingObligations } from '../../services/embedding/obligation.js';
 import { memoryIsVectorIndexed } from '../../lib/embedding/indexing.js';
 import {
@@ -132,6 +134,14 @@ export interface CloneMemoryArgs {
   actorId: string | null;
   /** #2167 — memories the copier may read (`getAccessibleMemoryIds`); `null` = unrestricted. */
   copierReadableMemoryIds: ReadableMemoryIds;
+  /**
+   * #5015 (cor:acl:150:04) — the person whose act this clone is, for the owner-limit refusal's form (null for an
+   * unattended or impersonated caller). REQUIRED so a new caller states it. The copies are new live nodes of the new
+   * memory's owner: the whole batch is judged once, before the insert.
+   */
+  ownerLimitCaller: { userId: string } | null;
+  /** #5016: keys the caller's own writes add for the same owner (`cloneAgent`: one Agent), asked in the clone's one multi-key call. */
+  extraOwnerChecks?: ReadonlyArray<{ key: OwnerLimitKey; amount: bigint }>;
 }
 
 export interface CloneMemoryResult {
@@ -237,6 +247,32 @@ export async function cloneMemoryGraphInTx(
     where: { id: args.sourceMemoryId },
   });
 
+  // ── Nodes ──────────────────────────────────────────────────────────
+  // #1606 — comments are discussion about the source's nodes, not content:
+  // a clone starts without them (and a generic copy could not produce one,
+  // cor:dmo:110:04). Their governed edges drop with them below, since an
+  // edge is copied only from a cloned source.
+  const selectedNodes = await tx.node.findMany({ where: copyableNodeWhere(source.id) });
+  // #2043 (cor:agt:040:11) — a worker session's copy never writes a boot prompt.
+  await assertNoBootPromptRowsForWorkerSession(tx, source.id, 'clone');
+  // A raw writer may have changed a stamped source without advancing its
+  // revision. Reconcile and refetch stamped rows before the destination
+  // insert can certify a stale claim against freshly copied content.
+  const refreshed = await reconcileStampedNodes(tx, source.id, selectedNodes);
+  const nodes = selectedNodes.map((n) => refreshed.get(n.id) ?? n);
+
+  // #5015/#5016: ONE multi-key call, so the owner-limit locks are taken together in resolved order: the new memory when its class counts
+  // (a clone's `system` memory is free), every copied node, and the caller's own keys. It is the clone's last lock (gate ruling 5) and comes
+  // before the first insert, so a refusal writes nothing. The new memory is created below under this owner and cannot change it before commit.
+  await requireOwnerHeadroomMany(tx, {
+    owner: { organizationId: args.targetOrganizationId },
+    checks: [
+      ...(memoryCountsAgainstOwner({ class: source.class, appId: null, isInstallMemory: false }) ? [{ key: 'memories' as const, amount: 1n }] : []),
+      ...(args.extraOwnerChecks ?? []),
+      { key: 'nodes', amount: BigInt(nodes.length) },
+    ],
+    caller: args.ownerLimitCaller,
+  });
   const memoryId = generateId();
   await tx.memory.create({
     data: {
@@ -279,20 +315,6 @@ export async function cloneMemoryGraphInTx(
       createdBy: args.actorId,
     },
   });
-
-  // ── Nodes ──────────────────────────────────────────────────────────
-  // #1606 — comments are discussion about the source's nodes, not content:
-  // a clone starts without them (and a generic copy could not produce one,
-  // cor:dmo:110:04). Their governed edges drop with them below, since an
-  // edge is copied only from a cloned source.
-  const selectedNodes = await tx.node.findMany({ where: copyableNodeWhere(source.id) });
-  // #2043 (cor:agt:040:11) — a worker session's copy never writes a boot prompt.
-  await assertNoBootPromptRowsForWorkerSession(tx, source.id, 'clone');
-  // A raw writer may have changed a stamped source without advancing its
-  // revision. Reconcile and refetch stamped rows before the destination
-  // insert can certify a stale claim against freshly copied content.
-  const refreshed = await reconcileStampedNodes(tx, source.id, selectedNodes);
-  const nodes = selectedNodes.map((n) => refreshed.get(n.id) ?? n);
 
   const idMap = new Map<string, string>();
   for (const n of nodes) idMap.set(n.id, generateId());
@@ -377,8 +399,8 @@ export async function cloneMemoryGraphInTx(
   const counterIdMap = Object.fromEntries(counterRoots.filter(c=>idMap.has(c.chatRootNodeId))
     .map(c=>[c.chatRootNodeId,idMap.get(c.chatRootNodeId)!]));
   // Copy the timestamp in SQL: finite PostgreSQL years need not fit in JS Date/Prisma DateTime.
-  if(counterRoots.length) await tx.$executeRaw`INSERT INTO chat_root_counters(chat_root_node_id,message_count,last_message_at,updated_at)
-    SELECT mapped.value,c.message_count,c.last_message_at,CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
+  if(counterRoots.length) await tx.$executeRaw`INSERT INTO chat_root_counters(chat_root_node_id,message_count,last_message_at,updated_at,agent_id)
+    SELECT mapped.value,c.message_count,c.last_message_at,CURRENT_TIMESTAMP AT TIME ZONE 'UTC',c.agent_id
     FROM chat_root_counters c JOIN jsonb_each_text(${JSON.stringify(counterIdMap)}::jsonb) mapped ON mapped.key=c.chat_root_node_id`;
 
   // #3501: encrypted sources already refuse above. Plaintext operational state follows the cloned root id.

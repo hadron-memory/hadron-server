@@ -25,6 +25,12 @@ services:
       DEV_LOGIN_ENABLED: 'true'
       E2E_SEED: 'true'
       RATE_LIMIT_KEYRING: ${E2E_RATE_LIMIT_KEYRING:-}
+      # #5134: the deployment's default owner limits (JSON, see CLAUDE.md); empty counts as unset, so a stack is unlimited unless
+      # `stack.sh up` ran with E2E_OWNER_DEFAULT_LIMITS='{"user":{"nodes":2000}}'. Read once at boot.
+      OWNER_DEFAULT_LIMITS: ${E2E_OWNER_DEFAULT_LIMITS:-}
+      # #5022: the default monthly grant (JSON of base-10 micro-cent strings, see CLAUDE.md); empty counts as unset, so a stack
+      # grants nothing unless `stack.sh up` ran with E2E_OWNER_DEFAULT_MONTHLY_GRANT='{"user":"1000"}'. Read once at boot.
+      OWNER_DEFAULT_MONTHLY_GRANT: ${E2E_OWNER_DEFAULT_MONTHLY_GRANT:-}
       # #2973 PR1 QA passthrough (private stacks only; all empty by default — no
       # default change): a signing-enabled stack is built by exporting these on
       # `stack.sh up`, e.g. E2E_PASSKEY_SIGNING_ENABLED=true

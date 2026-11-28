@@ -9,6 +9,7 @@
  * nodes), so the pin exercises Postgres cancelling it, not a mock that pretends to.
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
+import { PrismaClient } from '../../../generated/prisma/index.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbOrgAndGraph } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
@@ -30,8 +31,8 @@ let savedUrl: string | undefined;
 const ids: string[] = []; // in vector order (nearest first)
 const N = 12; // matching nodes; 12 x 0.3 s of pg_sleep = 3.6 s per slowed statement
 
-/** The real client, except that the lexical ranking statement sleeps 0.3 s per matching row. */
-const slowDb = new Proxy(db, {
+/** The given client, except that the lexical ranking statement sleeps 0.3 s per matching row. */
+const slow = <T extends Pick<PrismaClient, '$queryRawUnsafe'>>(client: T): T => new Proxy(client, {
   get(t, p) {
     const v = Reflect.get(t, p);
     if (p === '$queryRawUnsafe') {
@@ -40,10 +41,11 @@ const slowDb = new Proxy(db, {
     }
     return typeof v === 'function' ? v.bind(t) : v;
   },
-}) as typeof db;
+}) as T;
+const slowDb = slow(db);
 
 const findNodes = (args: Record<string, unknown>) =>
-  (resolvers.Query as any).findNodes(null, { ...args, filter: { memoryIds: [mem] } }, { db, roles: ['ADMIN'], userId: 'admin-4938' } as Context);
+  (resolvers.Query as any).findNodes(null, { ...args, filter: { memoryRefs: [mem] } }, { db, roles: ['ADMIN'], userId: 'admin-4938' } as Context);
 
 beforeAll(async () => {
   await cleanDb(db);
@@ -100,15 +102,28 @@ describe('#4938 N3 — the keyword widening runs under the remaining vector budg
   it('lexicalSearch with a budget: a fast statement completes, a slow one is cancelled (57014), and the budget never leaks', async () => {
     // Provider-level, not the resolver: with a generous budget the real (unslowed) statement returns normally (the budget
     // only cuts), and a slowed one is cancelled by Postgres.
-    const sessionTimeout = async () => (await db.$queryRawUnsafe<{ statement_timeout: string }[]>('SHOW statement_timeout'))[0].statement_timeout;
-    const before = await sessionTimeout();
-    const rows = await realLexical({ db, memoryIds: [mem], query: 'body', sort: 'relevance', offset: 0, limit: 50, statementTimeoutMs: 5000 });
-    expect(rows).toHaveLength(N);
-    await expect(realLexical({ db: slowDb, memoryIds: [mem], query: 'body', sort: 'relevance', offset: 0, limit: 50, statementTimeoutMs: 200 }))
-      .rejects.toMatchObject({ meta: expect.objectContaining({ code: '57014' }) });
-    // SET LOCAL dies with its transaction: the pooled session's own setting is unchanged after both (BLIND P3-9 at 548c0cb9).
-    expect(await sessionTimeout()).toBe(before);
-    expect(before).not.toBe('200ms');
+    // #5002: on a ONE-connection client, so the SHOW reads the very session that ran the SET LOCAL. Through the pooled
+    // `db` (several connections) it could land on another connection and pass with the budget leaked.
+    const url = new URL(process.env.DATABASE_URL!);
+    url.searchParams.set('connection_limit', '1');
+    const one = new PrismaClient({ datasourceUrl: url.toString() });
+    try {
+      const sessionTimeout = async () => (await one.$queryRawUnsafe<{ statement_timeout: string }[]>('SHOW statement_timeout'))[0].statement_timeout;
+      const before = await sessionTimeout();
+      const rows = await realLexical({ db: one as typeof db, memoryIds: [mem], query: 'body', sort: 'relevance', offset: 0, limit: 50, statementTimeoutMs: 5000 });
+      expect(rows).toHaveLength(N);
+      // SET LOCAL dies with its transaction: the session's own setting is unchanged after the committed one (BLIND P3-9 at
+      // 548c0cb9) ...
+      expect(await sessionTimeout()).toBe(before);
+      await expect(realLexical({ db: slow(one) as typeof db, memoryIds: [mem], query: 'body', sort: 'relevance', offset: 0, limit: 50, statementTimeoutMs: 200 }))
+        .rejects.toMatchObject({ meta: expect.objectContaining({ code: '57014' }) });
+      // ... and after the cancelled one.
+      expect(await sessionTimeout()).toBe(before);
+      expect(before).not.toBe('5s');
+      expect(before).not.toBe('200ms');
+    } finally {
+      await one.$disconnect();
+    }
   }, 60_000);
 
   it('a budget Postgres cannot take is refused loudly before any statement (BLIND P3-2 at 548c0cb9)', async () => {

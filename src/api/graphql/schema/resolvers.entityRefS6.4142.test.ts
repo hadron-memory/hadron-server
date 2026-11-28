@@ -263,7 +263,7 @@ describe('#4142 S6 chunk B — memory writes', () => {
       { o: '' },
     ));
     expect(empty).toEqual({
-      message: 'URN "" is not fully qualified. Expected a org URN with at least 1 hierarchy segment (e.g., "acme.com").',
+      message: 'The ref is not a fully qualified org URN. Expected a org URN with at least 1 hierarchy segment (e.g., "acme.com").',
       code: 'URN_NOT_QUALIFIED',
     });
     const spaces = await refusal(ask(
@@ -493,6 +493,7 @@ describe('#4142 S6 chunk C — org mutations', () => {
 
 describe('#4142 S6 chunk D — agent mutations', () => {
   let agent: { id: string; urn: string };
+  let chatAppId: string;
 
   beforeEach(async () => {
     const systemMemory = await db.memory.create({
@@ -530,19 +531,20 @@ describe('#4142 S6 chunk D — agent mutations', () => {
     }
     // The App that hosts the caller's per-person memory (the JWT-user start
     // path resolves it via the agent link).
-    await db.app.create({
+    // #5394: the start names it (appRef).
+    chatAppId = (await db.app.create({
       data: {
         id: generateId(), organizationId: org.id, urn: `${org.urn}:s6-chat-app`, name: 's6-chat-app',
         appAgents: { create: { agentId: agent.id } },
       },
-    });
+    })).id;
   });
 
   it('startChat accepts agentRef as PK and as URN', async () => {
     // The chat's nodes are provisioned in the agent's system memory, so the
     // caller needs more than a read: the org ADMIN qualifies.
     for (const ref of [agent.id, agent.urn]) {
-      const a = await ask(adminCtx(), `mutation($ref: ID!) { startChat(agentRef: $ref) { chatId } }`, { ref });
+      const a = await ask(adminCtx(), `mutation($ref: ID!, $app: ID) { startChat(agentRef: $ref, appRef: $app) { chatId } }`, { ref, app: chatAppId });
       expect(a.error).toBeNull();
       expect((a.data as { chatId: string }).chatId).toBeTruthy();
     }
@@ -589,7 +591,7 @@ describe('#4142 S6 chunk D — agent mutations', () => {
     for (const ref of [agent.id, agent.urn]) {
       await expect(
         resolvers.Mutation.restoreRevision({}, { agentRef: ref, revisionLoc: 'revisions:none' }, adminCtx()),
-      ).rejects.toThrow(/Revision not found: revisions:none/);
+      ).rejects.toThrow(/^Revision not found$/); // #5168: the loc is not quoted back
     }
     await expect(
       resolvers.Mutation.restoreRevision({}, { agentRef: generateId(), revisionLoc: 'revisions:none' }, adminCtx()),
@@ -762,7 +764,7 @@ describe('#4142 S6 chunk F — required survivor refs', () => {
       { m: `  ${hidden.id}  ` },
     ));
     expect(paddedHidden).toEqual({
-      message: `No match for memoryRef "${hidden.id}".`,
+      message: 'No match for memoryRef.',
       code: 'NOT_FOUND',
     });
     const paddedMissing = await refusal(ask(
@@ -771,7 +773,7 @@ describe('#4142 S6 chunk F — required survivor refs', () => {
       { m: `  ${missing}  ` },
     ));
     expect(paddedMissing).toEqual({
-      message: `No match for memoryRef "${missing}".`,
+      message: 'No match for memoryRef.',
       code: 'NOT_FOUND',
     });
     // deleteMemorySubscription's caller-input conversion carries the same

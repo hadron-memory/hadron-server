@@ -61,7 +61,7 @@ const MAX_SELECTION_DEPTH = 64;
  * (legal GraphQL) executed on a supposedly read-only session. Both PR #875
  * reviewers flagged it independently.
  */
-function topLevelFieldNames(
+export function topLevelFieldNames(
   selectionSet: SelectionSetNode,
   fragments: Map<string, FragmentDefinitionNode>,
   // Fragment names on the CURRENT path, for cycle detection. Copied on
@@ -98,7 +98,7 @@ function topLevelFieldNames(
   return names;
 }
 
-function fragmentMap(document: DocumentNode): Map<string, FragmentDefinitionNode> {
+export function fragmentMap(document: DocumentNode): Map<string, FragmentDefinitionNode> {
   const map = new Map<string, FragmentDefinitionNode>();
   for (const def of document.definitions) {
     if (def.kind === 'FragmentDefinition') map.set(def.name.value, def);

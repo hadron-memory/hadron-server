@@ -88,8 +88,8 @@ describe('createMemoryInApp', () => {
     // #697 Stage 3: flat single-atom v2 urn `<org>:<slug>` (scope lives in the
     // columns, not the URN path); root is the owning org.
     expect(mem.urn).toBe(`${org.urn}:shared-runbook`);
-    // Root node exists.
-    expect(await db.node.count({ where: { memoryId: mem.id } })).toBe(1);
+    // #3952: no root node on create.
+    expect(await db.node.count({ where: { memoryId: mem.id } })).toBe(0);
   });
 
   it('creates a personal memory for a plain App member (not org admin)', async () => {
@@ -103,11 +103,10 @@ describe('createMemoryInApp', () => {
     expect(mem.userId).toBe(memberUser.id);
     expect(mem.userMemoryOfAgentId).toBe(agent.id);
     expect(mem.visibility).toBeNull();
-    // Per-owner opaque URN (not name-derived) so two members can name their own
-    // memories the same without colliding / leaking names. #697 Stage 3: the v2
-    // form is a FLAT single-atom `<org>:<opaqueId>` (was `<org>:coach:app-user:…`).
-    expect(mem.urn.split(':')).toHaveLength(2);
-    expect(mem.urn.startsWith(`${org.urn}:`)).toBe(true);
+    // #5183: derived name, the member's own tenancy: `<handle>:<app>-<handle>-personal`.
+    const owner = await db.user.findUniqueOrThrow({ where: { id: memberUser.id } });
+    expect(mem.urn).toBe(`${owner.handle}:${app.urn.split(':').pop()}-${owner.handle}-personal`);
+    expect(mem.organizationId).toBeNull();
   });
 
   it('creates a private memory for an App member', async () => {
@@ -284,7 +283,7 @@ describe('#1405 — createMemoryInApp inherits a user-owned App tenant', () => {
         userId: null,
       });
       expect(stored.urn).toBe(`${owner.handle}:${memoryClass}-notes`);
-      expect(await db.node.count({ where: { memoryId: mem.id } })).toBe(1);
+      expect(await db.node.count({ where: { memoryId: mem.id } })).toBe(0);
 
       expect(await resolvers.Query.memory(null, { ref: mem.id }, asUser(owner.id))).toMatchObject({ id: mem.id });
       expect(await resolvers.Query.memory(null, { ref: mem.id }, asUser(outsiderUser.id))).toBeNull();
@@ -301,7 +300,9 @@ describe('#1405 — createMemoryInApp inherits a user-owned App tenant', () => {
       expect((await getAppMemoryAccess(db, ownedApp.id, { callerUserId: owner.id })).get(mem.id)).toBe('READ_ONLY');
       expect(await canReadMemory(db, { userId: owner.id, roles: [] }, mem.id)).toBe(true);
       expect(await canReadMemory(db, { userId: outsiderUser.id, roles: ['ADMIN'] }, mem.id)).toBe(false);
-      expect(await canReadMemory(db, { appId: ownedApp.id, roles: [] }, mem.id)).toBe(false);
+      // #5398: a pure key of the App reads the App's own shared app-class memory (the user-owned App's exception to
+      // admissibleFoldRows rule 2), and nothing wider: a knowledge memory created in the same App stays unreadable to it.
+      expect(await canReadMemory(db, { appId: ownedApp.id, roles: [] }, mem.id)).toBe(memoryClass === 'app');
     },
   );
 
@@ -410,35 +411,38 @@ describe('attachMemoryToApp', () => {
     });
   }
 
-  it('attaches a free-standing personal memory owned by an App member', async () => {
+  /** #5185: attach LINKS; the memory row must come out byte-identical. */
+  const rowOf = (id: string) => db.memory.findUniqueOrThrow({ where: { id } });
+  const linksOf = (memoryId: string) => db.appMemoryLink.findMany({ where: { memoryId } });
+
+  it('links a free-standing personal memory owned by an App member and changes nothing on the memory', async () => {
     const mem = await freeStandingPersonal(memberUser.id);
+    const before = await rowOf(mem.id);
     const out = await attachMemoryToApp(
       null,
       { memoryRef: mem.id, appRef: app.id, agentRef: agent.id },
       asUser(memberUser.id),
     );
-    expect(out.appId).toBe(app.id);
-    expect(out.userMemoryOfAgentId).toBe(agent.id);
-    expect(out.userId).toBe(memberUser.id);
-    expect(out.class).toBe('personal');
-    expect(out.urn).toBe(mem.urn); // URN unchanged — no node re-addressing.
+    expect(out.id).toBe(mem.id);
+    expect(out.appId).toBeNull();
+    expect(out.userMemoryOfAgentId).toBeNull();
+    expect(out.urn).toBe(mem.urn);
+    expect(await rowOf(mem.id)).toEqual(before);
+    expect(await linksOf(mem.id)).toMatchObject([{ appId: app.id, memoryId: mem.id, attachedBy: memberUser.id }]);
   });
 
-  it('refuses an attachment when ownership transfers before the Memory write', async () => {
+  it('refuses a memory the attacher stops reading before the link is written (MEMORY_NOT_FOUND), writing no link', async () => {
     const mem = await freeStandingPersonal(adminUser.id);
-    const nextOrg = await db.organization.create({ data: { id: generateId(), name: 'next-org', urn: 'next-org' } });
-    await db.orgMember.create({ data: { organizationId: nextOrg.id, userId: adminUser.id, role: 'ADMIN' } });
     const transaction = db.$transaction.bind(db);
-    let transferred = false;
+    let lost = false;
     const raceDb = new Proxy(db, {
       get(target, key) {
         if (key === '$transaction') {
           return async (work: Parameters<typeof transaction>[0]) => {
-            if (!transferred) {
-              transferred = true;
-              await resolvers.Mutation.transferMemoryOwnership(null, {
-                memoryRef: mem.id, orgRef: nextOrg.id, targetClass: 'knowledge',
-              }, asUser(adminUser.id));
+            if (!lost) {
+              lost = true;
+              // The memory changes hands between the preflight and the anchored write.
+              await db.memory.update({ where: { id: mem.id }, data: { userId: memberUser.id } });
             }
             return transaction(work as never);
           };
@@ -448,30 +452,22 @@ describe('attachMemoryToApp', () => {
     });
     await expect(attachMemoryToApp(null, {
       memoryRef: mem.id, appRef: app.id, agentRef: agent.id,
-    }, { db: raceDb, userId: adminUser.id, roles: [] })).rejects.toMatchObject({
-      extensions: { code: 'FORBIDDEN' },
-    });
-    expect(transferred).toBe(true);
-    expect(await db.memory.findUniqueOrThrow({ where: { id: mem.id } })).toMatchObject({
-      organizationId: nextOrg.id, appId: null, userMemoryOfAgentId: null,
-    });
+    }, { db: raceDb, userId: adminUser.id, roles: [] })).rejects.toMatchObject({ code: 'MEMORY_NOT_FOUND' });
+    expect(lost).toBe(true);
+    expect(await linksOf(mem.id)).toEqual([]);
+    expect(await rowOf(mem.id)).toMatchObject({ userId: memberUser.id, appId: null, userMemoryOfAgentId: null });
   });
 
-  it('rejects a memory already scoped to an App', async () => {
+  it('links a memory that is already scoped to an App, and writes nothing to it', async () => {
     const mem = await createMemoryInApp(
       null,
       { appRef: app.id, agentRef: agent.id, memoryClass: 'personal', name: 'Already' },
       asUser(memberUser.id),
     );
-    await expect(
-      attachMemoryToApp(
-        null,
-        { memoryRef: mem.id, appRef: app.id, agentRef: agent.id },
-        asUser(memberUser.id),
-      ).catch((e) => {
-        throw new Error(code(e));
-      }),
-    ).rejects.toThrow('MEMORY_ALREADY_APP_SCOPED');
+    const before = await rowOf(mem.id);
+    await attachMemoryToApp(null, { memoryRef: mem.id, appRef: app.id, agentRef: agent.id }, asUser(memberUser.id));
+    expect(await rowOf(mem.id)).toEqual(before);
+    expect(await linksOf(mem.id)).toHaveLength(1);
   });
 
   it('does not leak another user\'s app-scoped state to a non-owner (FORBIDDEN, not MEMORY_ALREADY_APP_SCOPED)', async () => {
@@ -513,10 +509,7 @@ describe('attachMemoryToApp', () => {
     ).rejects.toThrow('MEMORY_NOT_FOUND');
   });
 
-  it('returns a uniform FORBIDDEN for a non-owned memory regardless of class (no class/appId enumeration leak)', async () => {
-    // A knowledge memory has no owner, so ownership-first rejects it as FORBIDDEN
-    // BEFORE revealing its class/app-scoped state — the same error a non-owner
-    // gets for anyone else's private memory.
+  it('links an org knowledge memory the attacher reads (any class but system), writing nothing to it', async () => {
     const knowledge = await db.memory.create({
       data: {
         id: generateId(),
@@ -527,28 +520,18 @@ describe('attachMemoryToApp', () => {
         visibility: 'ORGANIZATION',
       },
     });
-    await expect(
-      attachMemoryToApp(
-        null,
-        { memoryRef: knowledge.id, appRef: app.id, agentRef: agent.id },
-        asUser(adminUser.id),
-      ).catch((e) => {
-        throw new Error(code(e));
-      }),
-    ).rejects.toThrow('FORBIDDEN');
+    const before = await rowOf(knowledge.id);
+    await attachMemoryToApp(null, { memoryRef: knowledge.id, appRef: app.id, agentRef: agent.id }, asUser(adminUser.id));
+    expect(await rowOf(knowledge.id)).toEqual(before);
+    expect(await linksOf(knowledge.id)).toMatchObject([{ attachedBy: adminUser.id }]);
   });
 
-  it('rejects a memory from a different organization', async () => {
+  it('links an own memory of another organization (no ORGANIZATION_MISMATCH any more)', async () => {
     const org2 = await db.organization.create({ data: { id: generateId(), name: 'org-b', urn: 'org-b' } });
     const mem = await freeStandingPersonal(memberUser.id, org2.id, 'cross-org');
-    await expect(
-      attachMemoryToApp(
-        null,
-        { memoryRef: mem.id, appRef: app.id, agentRef: agent.id },
-        asUser(memberUser.id),
-      ).catch((e) => {
-        throw new Error(code(e));
-      }),
-    ).rejects.toThrow('ORGANIZATION_MISMATCH');
+    const before = await rowOf(mem.id);
+    await attachMemoryToApp(null, { memoryRef: mem.id, appRef: app.id, agentRef: agent.id }, asUser(memberUser.id));
+    expect(await rowOf(mem.id)).toEqual(before);
+    expect(await linksOf(mem.id)).toHaveLength(1);
   });
 });

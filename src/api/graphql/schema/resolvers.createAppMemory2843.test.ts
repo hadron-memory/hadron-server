@@ -8,7 +8,6 @@ import { canReadMemoryRecord, requireMemoryWriteAccess } from './resolvers.helpe
 import { createTestableMcpServer } from '../../../mcp/server.js';
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { waitForLockWaiters } from '../../../test/lockWait.js';
-import * as rootLocks from '../../../lib/nodeSubtreeLock.js';
 
 const M = resolvers.Mutation as any;
 let owner: any, stranger: any, participant: any, app: any, agent: any;
@@ -38,7 +37,7 @@ describe('#2843 owner creation and boundaries', () => {
       urn: 'u2843:owner-notes', name: 'Owner Notes', shortDescription: 'Short', description: 'Full', tags: ['owner'], createdBy: owner.id,
       isInstallMemory: false, installOfAgentId: null, userId: null, userMemoryOfAgentId: null, sharedMemoryOfAgentId: null, visibility: null });
     expect(await db.memory.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({ ownerUserId: owner.id, organizationId: null, appId: app.id });
-    expect(await db.node.findMany({ where: { memoryId: row.id } })).toMatchObject([{ loc: 'Owner Notes', name: 'Owner Notes', description: 'Root node for this memory.' }]);
+    expect(await db.node.findMany({ where: { memoryId: row.id } })).toEqual([]); // #3952: no root node on create
     expect(await db.agentMemoryItem.count({ where: { memoryId: row.id } })).toBe(0);
     for (const user of [owner, participant]) {
       expect(await canReadMemoryRecord(ctx(user.id), row)).toBe(true);
@@ -77,17 +76,8 @@ describe('#2843 owner creation and boundaries', () => {
     if (state === 'uninstalled-app') await db.app.update({ where: { id: app.id }, data: { uninstalledAt: new Date() } });
     await denied(ctx(), {}, state.endsWith('agent') ? 'AGENT_NOT_INSTALLED' : 'FORBIDDEN');
   });
-  it('rolls back Memory and root on injected root database failure', async () => {
-    const rootLock = vi.spyOn(rootLocks, 'lockLocForWrite').mockImplementationOnce(async (tx, memoryId, loc) => {
-      expect(loc).toBe('Owner Notes');
-      expect(await tx.memory.findUnique({ where: { id: memoryId } })).toMatchObject({ name: 'Owner Notes' });
-      throw new Error('2843 root failure');
-    });
-    await expect(create()).rejects.toThrow('2843 root failure');
-    expect(rootLock).toHaveBeenCalledTimes(1);
-    expect(await db.memory.count()).toBe(0); expect(await db.node.count()).toBe(0);
-  });
-  it('retains root validation after owner authorization', async () => { await denied(ctx(), {name:'../invalid'}, 'BAD_USER_INPUT'); });
+  // #5203 S3: '..' now creates under the fallback slug; a blank name is the name refusal that remains.
+  it('retains name validation after owner authorization', async () => { await denied(ctx(), {name:'   '}, 'BAD_USER_INPUT'); });
 });
 
 describe('#2843 committed competing writes under real authority anchor waits', () => {
@@ -114,7 +104,7 @@ describe('#2843 committed competing writes under real authority anchor waits', (
       expect(settled, 'creator must really wait behind the competing App writer').toBe(false);
     } finally { release(); await revoker; await pending; }
     const result = await pending;
-    if (race === 'unchanged') { expect(result).toHaveProperty('row'); expect(await db.memory.count()).toBe(1); expect(await db.node.count()).toBe(1); }
+    if (race === 'unchanged') { expect(result).toHaveProperty('row'); expect(await db.memory.count()).toBe(1); expect(await db.node.count()).toBe(0); }
     else {
       expect(result).toMatchObject({ error: { extensions: { code: race === 'uninstall-agent' ? 'AGENT_NOT_INSTALLED' : 'FORBIDDEN' } } });
       expect(await db.memory.count()).toBe(0); expect(await db.node.count()).toBe(0);
@@ -124,11 +114,11 @@ describe('#2843 committed competing writes under real authority anchor waits', (
 
 describe('#2843 real MCP tool delegation', () => {
   const tool = (auth: any, name = 'MCP Owner') => createTestableMcpServer(auth).callToolText('hadron_create_app_memory', { app: app.id, name });
-  it('owner success persists the same tenant row and root', async () => {
+  it('owner success persists the same tenant row and no root (#3952)', async () => {
     expect(await tool(ctx())).toContain('Memory created:');
     const row = await db.memory.findFirstOrThrow({ where: {appId:app.id} });
     expect(row).toMatchObject({ ownerUserId:owner.id,organizationId:null,class:'app',createdBy:owner.id });
-    expect(await db.node.count({where:{memoryId:row.id}})).toBe(1);
+    expect(await db.node.count({where:{memoryId:row.id}})).toBe(0);
   });
   it('no Agent has the same refusal', async () => {
     await db.appAgent.deleteMany({where:{appId:app.id}});

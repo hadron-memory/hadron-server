@@ -181,8 +181,8 @@ describe('#2944 items 2 and 4: whoever manages the App sees K in the memories th
   it('naming a memory narrows; an unreadable one answers MEMORY_NOT_FOUND exactly as a missing one', async () => {
     expect(ids(await list({ appKey: keyK, memoryRef: memA.id }, asUser(mgr)))).toEqual([kInA]);
     const missing = generateId();
-    await expect(list({ appKey: keyK, memoryRef: memB.id }, asUser(mgr))).rejects.toThrow(`MEMORY_NOT_FOUND: ${memB.id}`);
-    await expect(list({ appKey: keyK, memoryRef: missing }, asUser(mgr))).rejects.toThrow(`MEMORY_NOT_FOUND: ${missing}`);
+    await expect(list({ appKey: keyK, memoryRef: memB.id }, asUser(mgr))).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
+    await expect(list({ appKey: keyK, memoryRef: missing }, asUser(mgr))).rejects.toThrow('MEMORY_NOT_FOUND: nothing found for the given ref.');
   });
 
   it('the window composes with the key filter', async () => {
@@ -203,7 +203,8 @@ describe('#2944 items 2 and 4: whoever manages the App sees K in the memories th
     expect(data.b.total).toBe(2);
     const denied = await server.executeOperation({ query: q, variables: { k: keyK } }, { contextValue: asUser(plainMember) });
     if (denied.body.kind !== 'single') throw new Error('incremental response');
-    expect(denied.body.singleResult.errors?.[0]).toMatchObject({ message: 'App key not found.', extensions: { code: 'APP_KEY_NOT_FOUND', id: keyK } });
+    expect(denied.body.singleResult.errors?.[0]).toMatchObject({ message: 'App key not found.', extensions: { code: 'APP_KEY_NOT_FOUND' } });
+    expect(denied.body.singleResult.errors?.[0]?.extensions).not.toHaveProperty('id'); // #5225
   });
 
   it('without the key filter the manager still reads own activity only (no broad feed restored)', async () => {
@@ -266,7 +267,7 @@ describe('#2944 blind P3 (#3714): nodeId and loc follow the same key rules as me
     for (const [, run] of surfaces) {
       const unreadable = await outcomeAs(run, { appKey: keyK, memoryRef: memB.id }, asKey(keyK), memB.id);
       expect(unreadable).toEqual(await outcomeAs(run, { appKey: keyK, memoryRef: missing }, asKey(keyK), missing));
-      expect(unreadable).toEqual({ error: 'MEMORY_NOT_FOUND: <ref>', code: 'MEMORY_NOT_FOUND' });
+      expect(unreadable).toEqual({ error: 'MEMORY_NOT_FOUND: nothing found for the given ref.', code: 'MEMORY_NOT_FOUND' });
       expect(unreadable).not.toHaveProperty('rows');
     }
   });
@@ -300,7 +301,7 @@ describe('#2944 blind P3 (#3714): nodeId and loc follow the same key rules as me
   });
 
   it('a refused key answers APP_KEY_NOT_FOUND before any node or loc is resolved, on both surfaces', async () => {
-    const expected = { message: 'App key not found.', extensions: { code: 'APP_KEY_NOT_FOUND', id: keyK } };
+    const expected = { message: 'App key not found.', extensions: { code: 'APP_KEY_NOT_FOUND' } };
     for (const run of [list, page]) {
       expect(await unknownKeyAnswer(run({ appKey: keyK, nodeRef: nodeA.id }, asUser(plainMember)))).toEqual(expected);
       expect(await unknownKeyAnswer(run({ appKey: keyK, nodeRef: nodeB.id }, asUser(plainMember)))).toEqual(expected);
@@ -354,16 +355,16 @@ describe('#2944 item 5: K filtering by itself sees its own events', () => {
 });
 
 describe('#2944 item 3: a key the caller may not filter by answers exactly as a nonexistent key', () => {
-  it('a nonexistent key answers APP_KEY_NOT_FOUND naming the caller\'s reference', async () => {
+  it('a nonexistent key answers APP_KEY_NOT_FOUND with the code only (#5225: the caller\'s reference is not relayed)', async () => {
     const missing = generateId();
     await expect(list({ appKey: missing }, asUser(mgr))).rejects.toMatchObject({
-      message: 'App key not found.', extensions: { code: 'APP_KEY_NOT_FOUND', id: missing },
+      message: 'App key not found.', extensions: { code: 'APP_KEY_NOT_FOUND' },
     });
   });
 
   it('a non-owner App member, another key of the same App, another tenant\'s manager and another tenant\'s key all get that answer', async () => {
     const missing = generateId();
-    const expected = (ref: string) => ({ message: 'App key not found.', extensions: { code: 'APP_KEY_NOT_FOUND', id: ref } });
+    const expected = (_ref: string) => ({ message: 'App key not found.', extensions: { code: 'APP_KEY_NOT_FOUND' } });
     expect(await unknownKeyAnswer(list({ appKey: missing }, asUser(plainMember)))).toEqual(expected(missing));
     expect(await unknownKeyAnswer(list({ appKey: keyK }, asUser(plainMember)))).toEqual(expected(keyK));
     expect(await unknownKeyAnswer(list({ appKey: keyK }, asKey(keyK2)))).toEqual(expected(keyK));
@@ -373,11 +374,11 @@ describe('#2944 item 3: a key the caller may not filter by answers exactly as a 
 
   it('a bound worker session whose holder manages the App gets the unknown-key answer (person-only gate)', async () => {
     const asWorker = requestActorStorage.run({ workerId: generateId(), agentId: null }, () => list({ appKey: keyK }, asUser(mgr)));
-    expect(await unknownKeyAnswer(asWorker)).toEqual({ message: 'App key not found.', extensions: { code: 'APP_KEY_NOT_FOUND', id: keyK } });
+    expect(await unknownKeyAnswer(asWorker)).toEqual({ message: 'App key not found.', extensions: { code: 'APP_KEY_NOT_FOUND' } });
   });
 
   it('the key is judged before any memory is resolved, so a refused key never reveals a memory', async () => {
-    const expected = { message: 'App key not found.', extensions: { code: 'APP_KEY_NOT_FOUND', id: keyK } };
+    const expected = { message: 'App key not found.', extensions: { code: 'APP_KEY_NOT_FOUND' } };
     expect(await unknownKeyAnswer(list({ appKey: keyK, memoryRef: memA.id }, asUser(plainMember)))).toEqual(expected);
     expect(await unknownKeyAnswer(list({ appKey: keyK, memoryRef: generateId() }, asUser(plainMember)))).toEqual(expected);
   });

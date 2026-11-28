@@ -34,7 +34,7 @@ const RP = 'example.test';
 let orgId: string, appId: string, userId: string, agentId: string, signerId: string, memoryId: string;
 
 const mint = (extra: Record<string, unknown> = {}) =>
-  mintAppRun(db, { organizationId: orgId, appId, triggerKind: 'MANUAL', entryNodeUrn: 'run-org::runmem::tasks:briefing', publish: false, ...extra } as never);
+  mintAppRun(db, { owner: { organizationId: orgId }, appId, triggerKind: 'MANUAL', entryNodeUrn: 'run-org::runmem::tasks:briefing', publish: false, ...extra } as never);
 const code = async (p: Promise<unknown>) => { try { await p; return 'RESOLVED'; } catch (e: any) { return e?.extensions?.code ?? e?.message; } };
 
 const provenance = (): CompiledProvenance => ({
@@ -124,7 +124,7 @@ describe('#2973 run surface', () => {
       },
     }) as typeof db;
     const runs = await db.appRun.count();
-    expect(await code(mintAppRun(racing, { organizationId: orgId, appId, agentId, userId, triggerKind: 'MANUAL', entryNodeUrn: 'run-org::runmem::tasks:briefing', publish: false } as never))).toBe('BOOT_PROMPT_NOT_SIGNED');
+    expect(await code(mintAppRun(racing, { owner: { organizationId: orgId }, appId, agentId, userId, triggerKind: 'MANUAL', entryNodeUrn: 'run-org::runmem::tasks:briefing', publish: false } as never))).toBe('BOOT_PROMPT_NOT_SIGNED');
     expect(await db.appRun.count()).toBe(runs);
     expect(await db.servedPrompt.count()).toBe(0);
   });

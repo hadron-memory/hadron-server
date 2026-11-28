@@ -4,10 +4,11 @@
 // from the NAME at creation and is PERMANENT: unique within the App forever,
 // deleted tickers included, so a re-created `engineering` gets `engineering-2`.
 // Like `nextFreeWorkerSlug` (src/lib/workerSlug.ts) minting NEVER REFUSES: it
-// advances to `-2`, `-3`, ... until an atom is free. `tickers_app_slug_uniq`
+// advances to `-2`, `-3`, ... until an atom is free and not a reserved word (#5203 S3). `tickers_app_slug_uniq`
 // arbitrates; a concurrent create re-runs this on P2002.
 
 import { workerSlugCandidate } from '../workerSlug.js';
+import { isReservedSlug } from '../derivedSlug.js';
 import { deriveSlugFromName } from '../urn.js';
 
 export const TICKER_SLUG_FALLBACK = 'ticker';
@@ -41,6 +42,7 @@ export async function nextFreeTickerSlug(db: TickerSlugDb, appId: string, name: 
   const taken = new Set(rows.map((r) => r.slug));
   for (let n = 1; ; n++) {
     const candidate = workerSlugCandidate(base, n);
-    if (!taken.has(candidate)) return candidate;
+    // #5203 S3: a reserved word is skipped like a taken slug (cor:urn:010:01), case-insensitively.
+    if (!taken.has(candidate) && !isReservedSlug(candidate)) return candidate;
   }
 }

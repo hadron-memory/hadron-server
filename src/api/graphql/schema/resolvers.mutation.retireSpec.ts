@@ -33,6 +33,7 @@ import { writeNodeCore } from './resolvers.mutation.node.js';
 import { resolveNodeRefForCaller } from './resolvers.nodeRefAccess.js';
 import { lockInstallAuthorityFirst } from './installMemory.js';
 import {
+  requireCallerIdentity,
   concealUnreadableNodeDenial,
   isMemoryReadableCached,
   nodeNotFoundError,
@@ -107,6 +108,7 @@ export async function retireSpecDoor(input: RetireSpecInput, ctx: Context) {
       extensions: { code: 'IMPERSONATION_READ_ONLY', http: { status: 403 } },
     });
   }
+  requireCallerIdentity(ctx);
   assertInputShape(input);
   const ref = input.ref;
 
@@ -214,6 +216,8 @@ export async function retireSpecDoor(input: RetireSpecInput, ctx: Context) {
       txCtx,
       'update',
       {
+        ownerLimit: 'count-only',
+        sizeCeiling: 'skip',
         authoring: authoringFromRequest(ctx, input.authoredWith),
         targetNodeId: specId,
         guardRevSeq: input.expectedRevision,

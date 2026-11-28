@@ -7,6 +7,10 @@ import { faultRequestId, internalFaultEnvelope, internalFaultText, logInternalFa
 import { textResult } from './textResult.js';
 import { attestationRefusalResult } from '../lib/authoringAttestation.js';
 import { isContentResolutionLimitError, type ContentResolutionLimitError } from '../lib/includes/resolutionBudget.js';
+import { OwnerLimitReachedError } from '../lib/ownerLimits/errors.js';
+import { NodeContentTooLargeError } from '../lib/nodeContentLimit.js';
+import { concealRefEcho } from '../lib/refEcho.js';
+import { FieldNotDeclaredError } from '../lib/objectStore.js';
 
 // Backstop for wrappers that copied the diagnostic and discarded its class.
 // Use distinctive ORM signatures, not broad words like "query" or "database",
@@ -83,6 +87,28 @@ export function resolutionLimitResult(error: ContentResolutionLimitError) {
   } } };
 }
 
+/**
+ * #5015 (cor:acl:150:04): an owner-limit refusal reaches every MCP client as `[owner_limit_reached] <message>`, whichever
+ * tool's door raised it. The message is already in the form for this caller (#5009: no number for a writer who may not
+ * manage the owner), so nothing here adds or removes detail.
+ */
+export function ownerLimitResult(error: OwnerLimitReachedError) {
+  return refusalResult(`[owner_limit_reached] ${error.message}`);
+}
+
+/** #5019 (cor:dmo:060:19): the node-size refusal, in the same shape, whichever tool's door raised it. */
+export function nodeContentLimitResult(error: NodeContentTooLargeError) {
+  return refusalResult(`[node_content_too_large] ${error.message}`);
+}
+
+/**
+ * #725 (cor:api:170:03): a query named a field a strict collection does not declare. The message already names only the caller's own
+ * field and the collection the caller named, so nothing here adds or removes detail.
+ */
+export function fieldNotDeclaredResult(error: FieldNotDeclaredError) {
+  return refusalResult(`[field_not_declared] ${error.message}`);
+}
+
 function supersededResult(error: import('graphql').GraphQLError) {
   return { ...refusalResult('Session superseded.'), structuredContent: { error: sessionSupersededEnvelope(error) } };
 }
@@ -98,9 +124,14 @@ export function toolErrorResult(
   site = 'mcp_tool',
 ): ReturnType<typeof refusalResult> | ReturnType<typeof toolFaultResult> | ReturnType<typeof rateLimitedResult>
   | ReturnType<typeof resolutionLimitResult> | NonNullable<ReturnType<typeof attestationRefusalResult>> {
+  // #5168: a URN library refusal quotes the caller's value; conceal it before `domainText` reads the message.
+  concealRefEcho(error);
   if (isSessionSupersededError(error)) return supersededResult(error);
   if (error instanceof RateLimited) return rateLimitedResult(error);
   if (isContentResolutionLimitError(error)) return resolutionLimitResult(error);
+  if (error instanceof OwnerLimitReachedError) return ownerLimitResult(error);
+  if (error instanceof NodeContentTooLargeError) return nodeContentLimitResult(error);
+  if (error instanceof FieldNotDeclaredError) return fieldNotDeclaredResult(error);
   const attestation = attestationRefusalResult(error);
   if (attestation) return attestation;
   if (containsDatabaseDiagnostic(error) || !isTrustedRefusal(error)) return toolFaultResult(error, site);
@@ -116,9 +147,13 @@ export function withToolErrorBoundary(
     try {
       return await callback(args, extra);
     } catch (error) {
+      concealRefEcho(error); // #5168, as in toolErrorResult: the rethrown refusal is serialized by its message.
       if (isSessionSupersededError(error)) return supersededResult(error);
       if (error instanceof RateLimited) return rateLimitedResult(error);
       if (isContentResolutionLimitError(error)) return resolutionLimitResult(error);
+      if (error instanceof OwnerLimitReachedError) return ownerLimitResult(error);
+      if (error instanceof NodeContentTooLargeError) return nodeContentLimitResult(error);
+      if (error instanceof FieldNotDeclaredError) return fieldNotDeclaredResult(error);
       const attestation = attestationRefusalResult(error);
       if (attestation) return attestation;
       // A typed refusal retains the SDK's existing error handling; any other throw is a fault.

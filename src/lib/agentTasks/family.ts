@@ -63,21 +63,45 @@ export function familySpellings(family: string): string[] {
  * The mapping is a list of DELIBERATE model-id shapes, not a search for a tier word: the checked gate says an unknown
  * model returns null, so a string that merely CONTAINS `opus`/`sonnet`/`haiku` (`octopus-v1`, `my-sonnet-finetune`,
  * `gpt-opus-5`) or only names the tier (`opus`, `claude-opus`) is null, and `deriveFamily` (which is permissive on
- * purpose, to classify a worker) is never a witness here. Only Anthropic's own id shapes are listed — current
+ * purpose, to classify a worker) is never a witness here. Anthropic's id shapes are current
  * `claude-<tier>-<version>` and legacy `claude-<version>-<tier>`, with an optional Bedrock/Vertex `[region.]anthropic.`
- * prefix — and R189 authorizes owning the mapping, not guessing another family's equivalents. The server team adds a
- * shape here when a model appears. Advisory like the family: self-declared, never authorization.
+ * prefix; other vendors' shapes are listed in {@link VENDOR_TIER_SHAPES} (#5175, placements Proposed). The server team
+ * adds a shape here when a model appears. Advisory like the family: self-declared, never authorization.
  */
 export type ModelTier = 'high' | 'mid' | 'low';
-const TIER_BY_NAME: Readonly<Record<string, ModelTier>> = { opus: 'high', sonnet: 'mid', haiku: 'low' };
+const TIER_BY_NAME: Readonly<Record<string, ModelTier>> = { opus: 'high', sonnet: 'mid', haiku: 'low', fable: 'high' };
 const CLAUDE_ID_PREFIX = '(?:(?:[a-z]{2}\\.)?anthropic\\.)?claude-';
-const CURRENT_ID = new RegExp(`^${CLAUDE_ID_PREFIX}(opus|sonnet|haiku)-\\d`);
+const CURRENT_ID = new RegExp(`^${CLAUDE_ID_PREFIX}(opus|sonnet|haiku|fable)-\\d`);
 const LEGACY_ID = new RegExp(`^${CLAUDE_ID_PREFIX}\\d+(?:-\\d+)?-(opus|sonnet|haiku)(?:-|$)`);
+/**
+ * #5175 — other vendors' deliberate id shapes, placed by each vendor's own line-up as the CHECKED records it
+ * (hadron-server#5175 comment 7170251620; Holger 2026-11-25, "Vendor positioning"): Anthropic's fable line `high`; the
+ * glm and gpt STANDARD lines `mid` (glm-5.3 is GLM's standard line, so `mid`; the gpt luna/codex lines likewise); a
+ * vendor's small or fast variants (`air`, `flash`, `mini`, `nano`) `low`; deepseek's `pro` line `high` per its vendor's
+ * positioning. EVERY placement is PROPOSED and Holger may overrule one; this PR is the proposal and its pins change if
+ * one is overruled. Anchored whole-id shapes like the Claude ones, so a string that merely contains `glm` or `gpt` is
+ * null. Versions are ENUMERATED, not open: a model appears here only once someone has placed it, so `glm-6` or `gpt-7`
+ * stays null and `TIER_UNKNOWN` under a floor (R190, cor:agt:060:04) until the server team adds it.
+ */
+const GLM_VERSIONS = '(?:4\\.5|4\\.6|4\\.7|5|5\\.3)';
+const GPT_VERSIONS = '(?:5|5\\.1|6)';
+const DEEPSEEK_VERSIONS = '(?:4)';
+// The roster reports `deepseek/deepseek-v4-pro-0813`: an optional `deepseek/` router prefix and `-MMDD` release stamp.
+const deepseek = (line: string) => new RegExp(`^(?:deepseek/)?deepseek-v${DEEPSEEK_VERSIONS}-${line}(?:-\\d{4})?$`);
+const VENDOR_TIER_SHAPES: ReadonlyArray<readonly [RegExp, ModelTier]> = [
+  [new RegExp(`^glm-${GLM_VERSIONS}$`), 'mid'],
+  [new RegExp(`^glm-${GLM_VERSIONS}-(?:air|flash)$`), 'low'],
+  [new RegExp(`^gpt-${GPT_VERSIONS}(?:-(?:luna|codex))?$`), 'mid'],
+  [new RegExp(`^gpt-${GPT_VERSIONS}-(?:mini|nano)$`), 'low'],
+  [deepseek('pro'), 'high'],
+  [deepseek('flash'), 'low'],
+];
 export function tierOf(llmModel: string | null | undefined): ModelTier | null {
   const model = llmModel?.trim().toLowerCase();
   if (!model) return null;
   const name = (CURRENT_ID.exec(model) ?? LEGACY_ID.exec(model))?.[1];
-  return name ? TIER_BY_NAME[name] ?? null : null;
+  if (name) return TIER_BY_NAME[name] ?? null;
+  return VENDOR_TIER_SHAPES.find(([shape]) => shape.test(model))?.[1] ?? null;
 }
 
 /**

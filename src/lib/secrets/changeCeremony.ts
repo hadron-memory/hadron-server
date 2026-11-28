@@ -14,7 +14,7 @@ import { appAnchors, appManager, requireAppMember, loadLiveApp } from './access.
 import { addAppSecretVersion, assertAppSecretRoom, lockSecretRow, recordSecretEvent } from './appSecrets.js';
 import { decryptBytesAad } from '../tokenCrypto.js';
 import { unwrapAppKey, stagedValueAad } from './appKeys.js';
-import { changeSnapshot, type ChangeRequest } from './changeRequests.js';
+import { changeSnapshotFor, type ChangeRequest } from './changeRequests.js';
 import { signingSurfacePolicy } from '../signing/surface.js';
 import { emitEntityUrnV2 } from '../urnEmit.js';
 import { requirePersonOnlyAct } from '../auth/personAsThemselves.js';
@@ -34,6 +34,24 @@ export const secretChangeChallenge = (r: ChangeRequest) => hash(JSON.stringify([
  */
 export const secretDeclineChallenge = (r: ChangeRequest) => hash(JSON.stringify(['hadron-secret-change-decline:v1', r.id, r.requester_id,
  r.app_id, r.secret_name, r.operation, r.snapshot, r.expires_at.toISOString()]));
+
+/** Is this staged STORE a protection-flag-only change (#4626 item 17): an existing secret, no staged value, a protection change, metadata equal to the live row's. */
+async function isProtectionFlagOnly(tx: Prisma.TransactionClient, r: ChangeRequest): Promise<boolean> {
+ if (r.operation !== 'STORE' || r.secret_id === null || r.write_version || r.protected_result === null) return false;
+ const live = await tx.secret.findUnique({ where: { id: r.secret_id }, select: { metadata: true } });
+ return live !== null && isDeepStrictEqual(r.metadata, live.metadata);
+}
+
+/** The one line the proof page shows for a staged change. One case per branch; the bytes are the ceremony's contract (#4626 item 17, #5299 item 2). */
+function changeText(r: Pick<ChangeRequest, 'operation' | 'secret_id' | 'write_version' | 'protected_result'>, flagOnly: boolean): string {
+ if (r.operation !== 'STORE') return ({ DELETE: 'Delete this secret', SET_PROTECTED: 'Turn protection on', CLEAR_PROTECTED: 'Turn protection off',
+  SET_DELETE_AFTER_USE: 'Allow deletion after use', CLEAR_DELETE_AFTER_USE: 'Stop deletion after use' } as const)[r.operation];
+ const protection = r.protected_result === null ? '' : r.protected_result ? ' and turn protection on' : ' and turn protection off';
+ if (r.secret_id === null) return 'Create a protected secret' + protection;
+ if (r.write_version) return 'Store a new version' + protection;
+ if (flagOnly) return r.protected_result ? 'Turn protection on' : 'Turn protection off';
+ return 'Update secret metadata' + protection;
+}
 
 async function request(db: Prisma.TransactionClient, id: string): Promise<ChangeRequest | null> {
  const [r] = await db.$queryRaw<ChangeRequest[]>`SELECT * FROM secret_change_requests WHERE id=${id}`;
@@ -96,15 +114,18 @@ export async function proveSecretChange(db: PrismaClient, a: SecretAssertion) {
   const declineCeremony=await createCeremony(tx,{purpose:'SECRET_CHANGE',browserNonceHash:hash(nonce).toString('hex'),ttlSeconds:600,challengeHash:hash(declineChallenge).toString('hex')});
   const app=await tx.app.findUniqueOrThrow({where:{id:r.app_id}});
   const appUrn = emitEntityUrnV2('app', app.urn);
-  // The pinned urn-lib version has only the former org/user secret arity; the App owner marker is cor:urn:010:01.
+  // The pinned urn-lib version has only the former org/user secret arity; the App owner marker is
+  // hrn:node:hadronmemory.com:specs:cor:urn:010:01.
   const secretUrn = appUrn.replace(/^hrn:app:([^:]+):(.+)$/, 'hrn:secret:$1:app:$2') + ':' + current.secret_name;
-  // The proof exposes metadata only; neither ciphertext nor plaintext leaves the server.
-  const change = current.operation === 'STORE'
-   ? (current.secret_id ? (current.write_version ? 'Store a new version' : 'Update secret metadata') : 'Create a protected secret') +
-     (current.protected_result === null ? '' : current.protected_result ? ' and turn protection on' : ' and turn protection off')
-   : ({DELETE:'Delete this secret',SET_PROTECTED:'Turn protection on',CLEAR_PROTECTED:'Turn protection off'} as const)[current.operation];
+  // #4626 item 17: a STORE that stages neither a value nor a metadata change is a protection-flag-only change. Its text
+  // names the flag alone and its summary carries no metadata, so the page never claims a metadata change. The live row is
+  // read under the secret lock `authorized` already took, so the comparison cannot race a concurrent edit. #5299 item 2: it is
+  // read only where the answer can matter (an existing secret, no staged value, a protection change); the text itself is
+  // `changeText`, one case per line, pinned byte for byte by proofText5299.test.ts.
+  const flagOnly = await isProtectionFlagOnly(tx, current);
+  const change = changeText(current, flagOnly);
   return { outcome:'change' as const,nonce,ceremonyId:ceremony.id,challenge:challenge.toString('base64url'),rpId:passkeyRpId(),decline:{ceremonyId:declineCeremony.id,challenge:declineChallenge.toString('base64url')},
-   summary:{app:appUrn,secret:secretUrn,operation:current.operation,change,...(current.operation==='STORE'?{metadata:current.metadata}:{}),sizeBytes:current.size_bytes,requester:current.requester_id,expiresAt:current.expires_at.toISOString()} };
+   summary:{app:appUrn,secret:secretUrn,operation:current.operation,change,...(current.operation==='STORE'&&!flagOnly?{metadata:current.metadata}:{}),sizeBytes:current.size_bytes,requester:current.requester_id,expiresAt:current.expires_at.toISOString()} };
  });
 }
 /** Completion rejudges standing, deadlines, snapshot and credential under locks. Only its committed result leaves the server. */
@@ -126,7 +147,7 @@ export async function completeSecretChange(db: PrismaClient,a:SecretAssertion):P
   if(r.expires_at<=now)return end('expired','SECRET_CHANGE_REQUEST_EXPIRED');
   let secret=r.secret_id?await tx.secret.findUnique({where:{id:r.secret_id}}):null;
   const newest=secret?await tx.secretVersion.findFirst({where:{secretId:secret.id},orderBy:{versionNo:'desc'},select:{versionNo:true}}):null;
-  if(r.secret_id ? !secret || changeSnapshot(secret,newest?.versionNo??0)!==r.snapshot :
+  if(r.secret_id ? !secret || changeSnapshotFor(r.operation,secret,newest?.versionNo??0)!==r.snapshot :
    await tx.secret.findUnique({where:{ownerType_ownerId_name:{ownerType:'app',ownerId:r.app_id,name:r.secret_name}}})) return end('stale','SECRET_CHANGE_REQUEST_STALE');
   if(!cred || (cred.window_outcome===null && cred.window_ends_at!==null && cred.window_ends_at>now))throw new GraphQLError('This passkey is still in its cooling-off period.',{extensions:{code:'PASSKEY_COOLING_OFF'}});
   const decided=await decideCeremonyAssertion(tx,{ceremonyId:a.ceremonyId,browserNonceHash:a.browserNonceHash,purpose:'SECRET_CHANGE',verified:verified.snapshot});
@@ -139,7 +160,15 @@ export async function completeSecretChange(db: PrismaClient,a:SecretAssertion):P
    await tx.$executeRaw`UPDATE secret_change_requests SET state='completed',ended_at=(${now.toISOString()}::timestamptz AT TIME ZONE 'UTC') WHERE id=${r.id}`;
    await deleteLockedAppSecret(tx,secret,actor);return null;
   }
-  if(r.operation==='STORE'){
+  if(r.operation==='SET_DELETE_AFTER_USE'||r.operation==='CLEAR_DELETE_AFTER_USE'){
+   // #5335 (cor:sec:060:03): setting the option consents to the secret's deletion, so it needs the deletion authority (its creator,
+   // still a member, or whoever manages the App), judged again here as DELETE is. Clearing it only withdraws that consent: any member.
+   if(!secret)throw refuse();
+   const on=r.operation==='SET_DELETE_AFTER_USE';
+   if(on && secret.createdBy!==ctx.userId && !(await appManager(ctx,r.app_id)))throw refuse();
+   await tx.secret.update({where:{id:secret.id},data:{deleteAfterUse:on,updatedBy:r.requester_id}});
+   await recordSecretEvent(tx,{ownerId:r.app_id,secretId:secret.id,secretName:r.secret_name,kind:on?'DELETE_AFTER_USE_ON':'DELETE_AFTER_USE_OFF',actor});
+  }else if(r.operation==='STORE'){
    // #4717 items 1-2 (cor:sec:010:05): a create starts unprotected in the trail and ends protected, so it records PROTECT;
    // a protection change that leaves the metadata as it was records only the protection event, never a METADATA event.
    const before = secret ? { protected: secret.protected, metadata: secret.metadata } : null;
@@ -159,7 +188,11 @@ export async function completeSecretChange(db: PrismaClient,a:SecretAssertion):P
     const protectionOnly = !r.write_version && protectionChanged && before !== null && isDeepStrictEqual(r.metadata, before.metadata);
     if (!protectionOnly) await recordSecretEvent(tx,{ownerId:r.app_id,secretId:secret.id,secretName:r.secret_name,kind:!r.write_version?'METADATA':newest?'VERSION':'STORE',versionNo,actor});
     if (protectionChanged) await recordSecretEvent(tx,{ownerId:r.app_id,secretId:secret.id,secretName:r.secret_name,kind:protectedAfter?'PROTECT':'UNPROTECT',actor});
-   }finally{plaintext?.fill(0);}
+   }finally{
+    // The wipe clears the decrypted Buffer only. The UTF-8 string `toString('utf8')` makes inside addAppSecretVersion is
+    // an immutable JS string and cannot be zeroed; the staged ciphertext (cleared by the request's own trigger) and
+    // this Buffer are the copies we can reach. #4626 item 4 records the limit rather than pretending to more.
+    plaintext?.fill(0);}
   }else{
    if(!secret)throw refuse();
    await tx.secret.update({where:{id:secret.id},data:{protected:r.operation==='SET_PROTECTED',updatedBy:r.requester_id}});
@@ -167,6 +200,13 @@ export async function completeSecretChange(db: PrismaClient,a:SecretAssertion):P
   }
   if(secret && (r.operation==='SET_PROTECTED' || (r.operation==='STORE' && r.protected_result===true))) {
    await endProtectionClients(tx,secret.id,protectionGrants,r.requester_id);
+   // #5335 (cor:sec:060:03): an option set while the secret was unprotected was any member's plain write. Turning protection on
+   // clears it, so a protected secret is armed only through SET_DELETE_AFTER_USE and its deletion authority. `secret` is the row
+   // read before this completion's writes; an already-protected secret (a STORE that keeps protection) keeps its option.
+   if(!secret.protected && secret.deleteAfterUse){
+    await tx.secret.update({where:{id:secret.id},data:{deleteAfterUse:false,updatedBy:r.requester_id}});
+    await recordSecretEvent(tx,{ownerId:r.app_id,secretId:secret.id,secretName:r.secret_name,kind:'DELETE_AFTER_USE_OFF',actor});
+   }
   }
   await tx.$executeRaw`UPDATE secret_change_requests SET state='completed',ended_at=(${now.toISOString()}::timestamptz AT TIME ZONE 'UTC') WHERE id=${r.id}`;
   return null;

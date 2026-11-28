@@ -25,8 +25,8 @@ const Q = resolvers.Query as any;
 let org: { id: string; urn: string };
 let agent: { id: string; urn: string };
 let owner: { id: string };
-let ownerPersonal: { id: string };
-let shared: { id: string };
+let ownerPersonal: { id: string; urn: string };
+let shared: { id: string; urn: string };
 /** The rich chat in the App's shared memory: explicit title, counter row, engine-state row. */
 let chatA: { id: string };
 /** The personal chat with no title: its title is the trimmed first message. */
@@ -165,6 +165,9 @@ describe('#3229 every selected column is load-bearing in the Chat row', () => {
       createdAt: new Date('2026-03-04T05:06:07.890Z'),
       lastMessageAt: '2026-02-02T00:00:00.000Z',
       scope: 'shared',
+      // #5027: the home memory's class and URN (memoryId is load-bearing for them too).
+      homeMemoryClass: 'app',
+      homeMemoryUrn: `hrn:mem:${shared.urn}`,
       createdBy: owner.id,
       aiConfigChoice: 'glm-flash',
     });
@@ -179,6 +182,8 @@ describe('#3229 every selected column is load-bearing in the Chat row', () => {
       createdAt: new Date('2026-03-05T05:06:07.890Z'),
       lastMessageAt: null,
       scope: 'private',
+      homeMemoryClass: 'knowledge',
+      homeMemoryUrn: `hrn:mem:${ownerPersonal.urn}`,
       createdBy: owner.id,
       aiConfigChoice: null,
     });

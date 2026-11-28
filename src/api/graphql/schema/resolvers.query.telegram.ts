@@ -18,15 +18,15 @@ export const telegramQueries = {
   },
 
   /**
-   * Uniform paginated list (cor:api:120). Default scope: the caller's member orgs; orgId narrows per cor:api:100:01
+   * Uniform paginated list (cor:api:120). Default scope: the caller's member orgs; orgRef narrows per cor:api:100:01
    * (a non-member gets an empty page, no disclosure, no admin bypass).
    */
   telegramConnections: async (
     _: unknown,
-    { orgId, limit, offset }: { orgId?: string | null; limit?: number | null; offset?: number | null },
+    { orgRef, limit, offset }: { orgRef?: string | null; limit?: number | null; offset?: number | null },
     ctx: Context,
   ) => {
-    const scope = await resolveOrgScope(ctx, orgId);
+    const scope = await resolveOrgScope(ctx, orgRef);
     if (!scope) return { items: [], total: 0 };
     const where = { organizationId: { in: scope.memberOrgIds }, deletedAt: null };
     const take = clampListTake(limit);

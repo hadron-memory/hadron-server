@@ -54,13 +54,38 @@ export const TEAM_READ_TX_TIMEOUT_MS = 5_000;
  *     margin still pays it;
  *   - time idled BETWEEN statements is bounded by Prisma's own interactive timer at the same
  *     budget (P2028, #4455) before the backstop's margin expires.
- * The margin buys no safety (the statement cap alone already bounds every statement); it buys
- * kept connections for the reads whose runaway statement starts early enough that the
- * non-fatal cancel can win the race.
+ * The margin adds no bound of its own — it only places the backstop. Every statement is
+ * separately capped by statement_timeout at the budget, but a per-statement cap cannot bound
+ * the READ: a statement that starts late can run nearly a full budget past it under its own
+ * cap, and ending THAT is the backstop's job (at budget+margin, whatever the margin's width).
+ * What the margin buys is WHICH cancel wins for a runaway statement that starts within the
+ * margin of the read's start: its own cap fires first (57014, non-fatal — the pooled
+ * connection survives), while a statement starting later is FATAL-ended by the backstop
+ * (25P04) and churns its connection. Shrink the margin to 0 and the two cancels fire together
+ * — the kept-connection arm is lost to the race; widen it and more reads keep their connection
+ * at a later whole-read bound.
  */
 export const TEAM_READ_TX_BACKSTOP_MARGIN_MS = 1_000;
 /** The explicit pool wait before the transaction even starts (ms). Prisma's own default, pinned so it cannot drift. */
 export const TEAM_READ_TX_MAX_WAIT_MS = 2_000;
+
+/**
+ * #4476 / #5351: bound the rest of a team read's transaction in Postgres itself. Sets transaction-local
+ * `statement_timeout` at {@link TEAM_READ_TX_TIMEOUT_MS} (each statement is cancelled non-fatally, 57014, and the pooled
+ * connection kept) and, where the engine has the GUC (PG17+), `transaction_timeout` at the budget plus
+ * {@link TEAM_READ_TX_BACKSTOP_MARGIN_MS} (the whole-read backstop, FATAL 25P04). Both are set with `is_local`, so they
+ * die with the transaction and never reach the pooled session. On PG16, where `transaction_timeout` does not exist,
+ * only the statement cap is set (the CASE's feature-detect). Postgres arms `transaction_timeout` from the moment it is
+ * set (probed on PG 17.12, #5351), so a caller may apply this after its gate and the backstop still counts from here.
+ *
+ * Callers: the roster, composition and utilization read (`withRosterAppRead`, #4476) and the run team-snapshot read
+ * (`hadron_team_snapshot`, #5351). A cancel surfaces in the shapes {@link isPrismaBusyExhaustion} classifies.
+ */
+export async function applyTeamReadStatementBudget(tx: Pick<Prisma.TransactionClient, '$queryRaw'>): Promise<void> {
+  await tx.$queryRaw`SELECT set_config('statement_timeout', ${String(TEAM_READ_TX_TIMEOUT_MS)}, true) AS statement_timeout,
+                     CASE WHEN current_setting('transaction_timeout', true) IS NOT NULL
+                          THEN set_config('transaction_timeout', ${String(TEAM_READ_TX_TIMEOUT_MS + TEAM_READ_TX_BACKSTOP_MARGIN_MS)}, true) END AS transaction_timeout`;
+}
 
 /** Why the read refused: its own transaction budget ran out, or it never got a connection. */
 export type TeamReadBusyReason = 'TRANSACTION_BUDGET' | 'POOL_WAIT';

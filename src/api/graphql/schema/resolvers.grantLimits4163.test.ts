@@ -35,7 +35,7 @@ const grant = (values: Record<string, unknown>, over: Record<string, unknown> = 
   user_id: null, worker_id: workerId, action: EDIT, action_values: values, max_uses: 1,
   activated_at: raw(DB_NOW), verification_kind: 'passkey', verified_by: admin.id, issuer_user_id: admin.id, expires_at: null, ...over,
 } as never);
-const edit = (id: string) => runAsActor({ workerId, agentId: null }, () => resolvers.Mutation.updateNode(null, { input: { id, content: 'edited' } }, ctx()));
+const edit = (id: string) => runAsActor({ workerId, agentId: null }, () => resolvers.Mutation.updateNode(null, { input: { ref: id, content: 'edited' } }, ctx()));
 const view = async (id: string) => (await getGrantForWorker(db, { appId, workerId }, id))!;
 const row = (id: string) => db.grant.findUniqueOrThrow({ where: { id } });
 

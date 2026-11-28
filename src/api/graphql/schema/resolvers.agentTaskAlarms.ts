@@ -93,9 +93,9 @@ import {
 // ── Errors and parsing ────────────────────────────────────────────────────
 
 const alarmNotFound = (eventId: string): GraphQLError =>
-  taskError('ALARM_NOT_FOUND', 'Alarm not found.', { eventId });
+  taskError('ALARM_NOT_FOUND', 'Alarm not found.'); // #5225: the caller's id is not relayed
 const workerNotFound = (ref: string): GraphQLError =>
-  taskError('WORKER_NOT_FOUND', 'Worker not found.', { ref });
+  taskError('WORKER_NOT_FOUND', 'Worker not found.'); // #5225: the caller's ref is not relayed
 const badInput = (message: string): GraphQLError => taskError('BAD_USER_INPUT', message);
 const notPermitted = (message: string): GraphQLError => taskError('AVAILABILITY_NOT_PERMITTED', message);
 
@@ -477,7 +477,7 @@ export const agentTaskAlarmMutations = {
     const { app } = participated;
     const actor = withInstruction(participated.actor, instruction);
     requireWritable(ctx, app);
-    await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.', { appRef }), async (tx, txCtx, freshApp) => {
+    await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, freshApp) => {
       if (!(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) {
         throw taskError('APP_MANAGER_REQUIRED', "Only whoever manages the App sets its stall windows.");
       }
@@ -525,7 +525,7 @@ export const agentTaskAlarmMutations = {
     const { app } = participated;
     const actor = withInstruction(participated.actor, instruction);
     requireWritable(ctx, app);
-    await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.', { appRef }), async (tx, txCtx, freshApp) => {
+    await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, freshApp) => {
       if (!(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) {
         throw taskError('APP_MANAGER_REQUIRED', 'Only whoever manages the App sets the roles its saturation alarms wake.');
       }
@@ -564,7 +564,7 @@ export const agentTaskAlarmMutations = {
     const { app } = participated;
     const actor = withInstruction(participated.actor, instruction);
     requireWritable(ctx, app);
-    await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.', { appRef }), async (tx, txCtx, freshApp) => {
+    await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, freshApp) => {
       if (!(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) {
         throw taskError('APP_MANAGER_REQUIRED', 'Only whoever manages the App reports whether it has external tasks.');
       }
@@ -612,7 +612,7 @@ export const agentTaskAlarmMutations = {
     const { app } = participated;
     const actor = withInstruction(participated.actor, instruction);
     requireWritable(ctx, app);
-    await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.', { appRef }), async (tx, txCtx, freshApp) => {
+    await inTaskWriteTx(ctx, app, actor, () => taskError('APP_NOT_FOUND', 'App not found.'), async (tx, txCtx, freshApp) => {
       if (!(await actorManagesApp(txCtx, freshApp, actor, actor.instructed))) {
         throw taskError('APP_MANAGER_REQUIRED', 'Only whoever manages the App sets its role lists.');
       }

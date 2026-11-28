@@ -14,7 +14,8 @@
  * Neither payload contains a URN, so both are GREEN on main: this is a regression pin for the audit's claim, not a fix. If a
  * future payload version binds URN text, one of these goes red and the rename must wait for that kind's own issue.
  */
-import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Role } from '../../generated/prisma/index.js';
 import { db } from '../../integrations/db/client.js';
 import { cleanDb, createDbNode, createDbOrgAndGraph } from '../../test/helpers.js';
 import { insertSoftPasskey, softPasskey } from '../../test/softPasskey.js';
@@ -36,13 +37,24 @@ const NEW_ORG = 'renamed4861.example';
 const exec = (sql: string, ...params: unknown[]) => db.$executeRawUnsafe(sql, ...params);
 
 /**
+ * #5364: every `githubId` in this file comes from this one counter, so no two users can share one (they were three
+ * overlapping `Math.random()` ranges, and a collision failed the insert on `github_id`'s unique index). Unique by
+ * construction within the file; `cleanDb` runs before each test, and this worker's database is its own.
+ */
+type Who = 'admin' | 'req' | 'signer';
+let githubIdSeq = 4_861_000;
+const nextGithubId = (): number => ++githubIdSeq;
+const mkUser = (who: Who, roles: Role[] = []) =>
+  db.user.create({ data: { githubId: nextGithubId(), githubUsername: `rename-${who}-${generateId()}`, roles } });
+
+/**
  * The PRODUCTION rename: the `updateOrganization` resolver (resolvers.mutation.org.ts), which mints the new root principal,
  * records the org's own alias (#1079) and runs `propagateOrgUrnRename` in one transaction. Calling it, not re-implementing
  * it, so the alias row and any other table it touches are part of what the signatures are re-read against.
  */
 async function renameOrg(organizationId: string): Promise<string> {
   const before = (await db.organization.findUniqueOrThrow({ where: { id: organizationId }, select: { urn: true } })).urn;
-  const admin = await db.user.create({ data: { githubId: 4861900 + Math.floor(Math.random() * 90000), githubUsername: `rename-admin-${generateId()}`, roles: ['ADMIN'] } });
+  const admin = await mkUser('admin', ['ADMIN']);
   await resolvers.Mutation.updateOrganization({}, { ref: organizationId, urn: NEW_ORG }, { db, userId: admin.id, roles: ['ADMIN'] } as unknown as Context);
   expect((await db.organization.findUniqueOrThrow({ where: { id: organizationId }, select: { urn: true } })).urn).toBe(NEW_ORG);
   // The old name is kept as an alias (cor:urn:030:01): the audit's claim holds with the alias in place, not only without it.
@@ -67,8 +79,8 @@ afterAll(async () => { await cleanDb(db); await dropTestActions(); });
 
 describe('#4861 a signed node survives the org rename', () => {
   it('reads CURRENT before and after, with its own content quoting the old URN text', async () => {
-    const requester = (await db.user.create({ data: { githubId: 4861100 + Math.floor(Math.random() * 9000), githubUsername: `rename-req-${generateId()}`, roles: [] } })).id;
-    const signerId = (await db.user.create({ data: { githubId: 4862100 + Math.floor(Math.random() * 9000), githubUsername: `rename-signer-${generateId()}`, roles: [] } })).id;
+    const requester = (await mkUser('req')).id;
+    const signerId = (await mkUser('signer')).id;
     const { org, graph } = await createDbOrgAndGraph(db, { orgName: 'rename-org-4861', graphName: 'rename-4861' });
     const oldOrgUrn = (await db.organization.findUniqueOrThrow({ where: { id: org.id }, select: { urn: true } })).urn;
     const memoryId = graph.id;
@@ -147,5 +159,22 @@ describe('#4861 a signed grant survives the org rename', () => {
     expect(urns.length).toBeGreaterThan(0);
     expect(urns.every((u) => u.startsWith(`${NEW_ORG}:`))).toBe(true); // Apps, Agents and Memories alike
     expect(await read()).toMatchObject({ state: 'CURRENT', integrityProblems: 0 });
+  });
+});
+
+describe('#5364 the github ids in this file cannot collide', () => {
+  it('a repeating random source still gives the requester, the signer and the rename admin distinct github ids', async () => {
+    // 0.00247 is a value at which the old three ranges meet: admin 4861900 + floor(222.3) = 4862122 = signer 4862100 + floor(22.23).
+    const spy = vi.spyOn(Math, 'random').mockReturnValue(0.00247);
+    try {
+      const { org } = await createDbOrgAndGraph(db, { orgName: 'rename-org-5364', graphName: 'rename-5364' });
+      const ids = [(await mkUser('req')).githubId, (await mkUser('signer')).githubId];
+      await renameOrg(org.id);
+      const admin = await db.user.findFirstOrThrow({ where: { githubUsername: { startsWith: 'rename-admin-' } }, select: { githubId: true } });
+      ids.push(admin.githubId);
+      expect(new Set(ids).size).toBe(3);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

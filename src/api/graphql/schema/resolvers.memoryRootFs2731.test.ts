@@ -6,7 +6,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { createNode } from '../../../controller/operations/createNode.js';
 import { resolvers, type Context } from './resolvers.js';
 import { withFsProjectionRollback } from '../../../lib/fsProjectionRollback.js';
-import * as locks from '../../../lib/nodeSubtreeLock.js';
+import * as defaults from './resolvers.memoryConfigOrgDefault.js';
 
 // Database atomicity remains; old projection ownership/snapshot restoration is
 // retired rather than ported to a replacement filesystem layout.
@@ -64,16 +64,23 @@ for (const door of ['memory', 'installed', 'app'] as const) describe(`database r
   const create = () => door === 'memory' ? M.createMemory({}, { name: `Root-${door}`, orgRef: org.id }, ctx())
     : door === 'app' ? M.createAppMemory({}, { name: `Root-${door}`, appRef: app.id }, ctx())
     : M.createMemoryInApp({}, { name: `Root-${door}`, appRef: app.id, agentRef: agent.id, memoryClass: 'knowledge' }, ctx());
-  it('root failure rolls back its memory and a successful retry creates one root', async () => {
+  it('creates one memory and no root node, and writes no projection (#3952)', async () => {
     const before = await db.memory.count();
-    vi.spyOn(locks, 'lockLocForWrite').mockRejectedValueOnce(new Error('synthetic root database failure'));
-    await expect(create()).rejects.toThrow('synthetic root database failure');
-    expect(await db.memory.count()).toBe(before);
-    expect(await db.node.count()).toBe(0);
     const made = await create();
     expect(await db.memory.findUniqueOrThrow({ where: { id: made.id } })).toMatchObject({ organizationId: org.id });
     expect(await db.memory.count()).toBe(before + 1);
-    expect(await db.node.count({ where: { memoryId: made.id } })).toBe(1);
+    expect(await db.node.count({ where: { memoryId: made.id } })).toBe(0);
     expect(existsSync(yaml(`Root-${door}`))).toBe(false);
+  });
+  // The failure is injected at the org-default step, which only the memory door runs. The installed door's rollback
+  // (agent grant) and the group owner row are pinned in resolvers.noRootNode3952.test.ts; the app door and a personal
+  // memory write only the memory row, so they have nothing to roll back.
+  it.runIf(door === 'memory')('a later failure rolls its memory back, and a retry creates exactly one', async () => {
+    const before = await db.memory.count();
+    vi.spyOn(defaults, 'applyOrgDefaultsAtCreation').mockRejectedValueOnce(new Error('synthetic database failure'));
+    await expect(create()).rejects.toThrow('synthetic database failure');
+    expect(await db.memory.count()).toBe(before);
+    await create();
+    expect(await db.memory.count()).toBe(before + 1);
   });
 });

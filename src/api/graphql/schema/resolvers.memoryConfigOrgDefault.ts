@@ -104,7 +104,7 @@ export interface OrgDefaultApplication {
 }
 
 /**
- * Apply the org's defaults to a memory just created in `tx`: after its root node, before the transaction commits.
+ * Apply the org's defaults to a memory just created in `tx`: before the transaction commits.
  * Reads templates, references and the org's readable set once each (batched), never one query per rule.
  */
 export async function applyOrgDefaultsAtCreation(

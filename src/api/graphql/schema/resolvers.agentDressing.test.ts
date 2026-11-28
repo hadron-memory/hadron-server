@@ -141,13 +141,15 @@ describe('updateAgent — prompt template and persona role (#1241)', () => {
   });
 });
 
+// #5203 S3 (cor:urn:010:01): the reclaim and the refusals below are the answers to a SUPPLIED slug, so these creates
+// pass `slug`. A slug DERIVED from the name never reclaims or refuses; it iterates (pinned at the end of this block).
 describe('createAgent — tombstone URN reclaim (#974)', () => {
   it("reclaims a soft-deleted agent's URN by hard-deleting the tombstone", async () => {
     const first = await M.createAgent({}, { orgRef: orgA.id, name: 'Recast Agent' }, ctx(adminA.id));
     // The REAL delete path (soft-deletes the agent AND its system memory —
     // the memory tombstone is reclaimed by the same create).
     await M.deleteAgent({}, { ref: first.id }, ctx(adminA.id));
-    const second = await M.createAgent({}, { orgRef: orgA.id, name: 'Recast Agent' }, ctx(adminA.id));
+    const second = await M.createAgent({}, { orgRef: orgA.id, name: 'Recast Agent', slug: 'recast-agent' }, ctx(adminA.id));
     expect(second.urn).toBe(first.urn);
     expect(second.id).not.toBe(first.id);
     // The tombstone is gone — reclaim hard-deletes it (name permanence lives
@@ -167,7 +169,7 @@ describe('createAgent — tombstone URN reclaim (#974)', () => {
     await M.deleteAgent({}, { ref: cast.id }, ctx(adminA.id));
 
     await expectCode(
-      M.createAgent({}, { orgRef: orgA.id, name: 'Cast Agent' }, ctx(adminA.id)),
+      M.createAgent({}, { orgRef: orgA.id, name: 'Cast Agent', slug: 'cast-agent' }, ctx(adminA.id)),
       'AGENT_URN_TAKEN',
     );
     // The tombstone and its casting both survive the refused reclaim.
@@ -178,9 +180,21 @@ describe('createAgent — tombstone URN reclaim (#974)', () => {
   it('a live agent at the URN still refuses AGENT_URN_TAKEN', async () => {
     await M.createAgent({}, { orgRef: orgA.id, name: 'Live Agent' }, ctx(adminA.id));
     await expectCode(
-      M.createAgent({}, { orgRef: orgA.id, name: 'Live Agent' }, ctx(adminA.id)),
+      M.createAgent({}, { orgRef: orgA.id, name: 'Live Agent', slug: 'live-agent' }, ctx(adminA.id)),
       'AGENT_URN_TAKEN',
     );
+  });
+
+  it('a derived slug iterates past a live agent, a deleted one and a cast tombstone, keeping each (#5203 S3)', async () => {
+    const live = await M.createAgent({}, { orgRef: orgA.id, name: 'Iter Agent' }, ctx(adminA.id));
+    expect(live.urn).toBe(`${orgA.urn}:iter-agent`);
+    const second = await M.createAgent({}, { orgRef: orgA.id, name: 'Iter Agent' }, ctx(adminA.id));
+    expect(second.urn).toBe(`${orgA.urn}:iter-agent-2`);
+    await M.deleteAgent({}, { ref: second.id }, ctx(adminA.id));
+    const third = await M.createAgent({}, { orgRef: orgA.id, name: 'Iter Agent' }, ctx(adminA.id));
+    expect(third.urn).toBe(`${orgA.urn}:iter-agent-3`);
+    // The deleted holder is not reclaimed: it stays restorable.
+    expect(await db.agent.findUnique({ where: { id: second.id } })).not.toBeNull();
   });
 });
 
@@ -274,6 +288,6 @@ describe('startSession — coding provenance + agentRef (#928)', () => {
         ctx(outsider.id),
       ),
     // #1944: an Agent the caller can't read answers exactly as an absent one.
-    ).rejects.toThrow(`Agent not found: ${agent.id}`);
+    ).rejects.toThrow(/^Agent not found$/); // #5168: the ref is not quoted back
   });
 });

@@ -43,12 +43,12 @@ it('no-pin writes and recorded-approval pins have no false warning; covered sibl
   await resolvers.Mutation.approveNode(null, { nodeRef: n.id }, ctx());
   expect(await check('{{> target}}')).toEqual([]);
   expect(await check('{{> target rev=1 approved}}')).toEqual([]);
-  await resolvers.Mutation.updateNode(null, { input: { id: n.id, tags: ['metadata'] } }, ctx());
+  await resolvers.Mutation.updateNode(null, { input: { ref: n.id, tags: ['metadata'] } }, ctx());
   expect(await check('{{> target rev=2 approved}}')).toHaveLength(1);
 });
 it('a moved snapshot is concealed unless both current and capture memories are readable', async () => {
   const n = await db.node.create({ data: { id: generateId(), memoryId, loc: 'target', name: 'Target', content: 'text' } });
-  await resolvers.Mutation.updateNode(null, { input: { id: n.id, content: 'new' } }, ctx());
+  await resolvers.Mutation.updateNode(null, { input: { ref: n.id, content: 'new' } }, ctx());
   const foreignOwner = await db.user.create({ data: { githubId: 206304, githubUsername: 'foreign2063', handle: 'foreign2063', roles: [] } });
   const foreign = await db.memory.create({ data: { id: generateId(), name: 'foreign', urn: 'pins2063.example:foreign', class: 'private', userId: foreignOwner.id, ownerUserId: foreignOwner.id } });
   await db.nodeRevision.updateMany({ where: { nodeId: n.id, revNo: 1 }, data: { memoryId: foreign.id } });
@@ -65,7 +65,7 @@ it('GraphQL exposes advice only on committed content writes, never reads/no-op/o
   };
   const selection = '{ id }';
   const created = await execute(`mutation($i:CreateNodeInput!){createNode(input:$i)${selection}}`,
-    { i: { memoryId, loc: 'source', name: 'Source', content: '{{> target rev=1}}' } });
+    { i: { memoryRef: memoryId, loc: 'source', name: 'Source', content: '{{> target rev=1}}' } });
   expect(created.errors).toBeUndefined();
   const n = (created.data as any).createNode;
   expect(created.extensions?.warnings).toEqual([expect.objectContaining({ path: 'createNode', code: 'include.pin.unkept' })]);
@@ -73,15 +73,15 @@ it('GraphQL exposes advice only on committed content writes, never reads/no-op/o
   expect(read.errors).toBeUndefined();
   expect(read.extensions?.warnings).toBeUndefined();
   const omitted = await execute(`mutation($i:UpdateNodeInput!){updateNode(input:$i)${selection}}`,
-    { i: { id: n.id, description: 'changed metadata' } });
+    { i: { ref: n.id, description: 'changed metadata' } });
   expect(omitted.errors).toBeUndefined();
   expect(omitted.extensions?.warnings).toBeUndefined();
   const noop = await execute(`mutation($i:UpdateNodeInput!){updateNode(input:$i)${selection}}`,
-    { i: { id: n.id, content: '{{> target rev=1}}' } });
+    { i: { ref: n.id, content: '{{> target rev=1}}' } });
   expect(noop.errors).toBeUndefined();
   expect(noop.extensions?.warnings).toBeUndefined();
   const refused = await execute(`mutation($i:UpdateNodeInput!){updateNode(input:$i)${selection}}`,
-    { i: { id: n.id, content: '{{> target rev=1}} {{> missing}}' } });
+    { i: { ref: n.id, content: '{{> target rev=1}} {{> missing}}' } });
   expect(refused.errors).toHaveLength(1);
   expect(await db.node.findUniqueOrThrow({ where: { id: n.id } })).toMatchObject({ content: '{{> target rev=1}}' });
   await server.stop();
@@ -114,7 +114,7 @@ it('bulk results carry per-item warnings only after committed content replacemen
   const source = await db.node.create({ data: { id: generateId(), memoryId, loc: 'bulk', name: 'Bulk', content: 'old' } });
   const server = new ApolloServer<Context>({ typeDefs, resolvers, plugins: [taskWarningsPlugin] });
   const query = `mutation($i:SearchReplaceInNodesInput!){searchReplaceInNodes(input:$i){nodesChanged results{nodeId}}}`;
-  const input = { nodeIds: [source.id], oldText: 'old', newText: '{{> target rev=1}}', fields: ['content'] };
+  const input = { nodeRefs: [source.id], oldText: 'old', newText: '{{> target rev=1}}', fields: ['content'] };
   const run = async (dryRun: boolean) => {
     const r = await server.executeOperation({ query, variables: { i: { ...input, dryRun } } }, { contextValue: ctx() });
     if (r.body.kind !== 'single') throw new Error('unexpected response');
@@ -159,7 +159,7 @@ it('a recorded signature suppresses advice, while a covered non-carrier still wa
       mayWrite: maySignInMemory(db),
     }));
     expect(await check('{{> signed-target rev=1 signed}}')).toEqual([]);
-    await resolvers.Mutation.updateNode(null, { input: { id: n.id, tags: ['metadata'] } }, ctx());
+    await resolvers.Mutation.updateNode(null, { input: { ref: n.id, tags: ['metadata'] } }, ctx());
     expect(await check('{{> signed-target rev=2 signed}}')).toHaveLength(1);
   } finally {
     if (oldOrigin === undefined) delete process.env.SIGNING_CEREMONY_ORIGINS; else process.env.SIGNING_CEREMONY_ORIGINS = oldOrigin;

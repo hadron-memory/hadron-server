@@ -141,7 +141,7 @@ const FOLD: Array<[string, (ref: string, c: Context) => Promise<unknown>, () => 
   ['registerHost', (r, c) => M.registerHost({}, { input: { appRef: r, label: 'pin-host', pollIntervalSeconds: 60 } }, c), keyCtx],
   ['createGrant', (r, c) => M.createGrant({}, { input: { appRef: r, action: 'schedule.create', values: {}, holderKind: 'WORKER', holderRef: 'w1', reason: 'pin' } }, c), memberCtx],
   ['appGrants', (r, c) => Q.appGrants({}, { appRef: r }, c), memberCtx],
-  ['appMemoryWriteGrants', (r, c) => Q.appMemoryWriteGrants({}, { appRef: r }, c), memberCtx],
+  // #5404: `appMemoryWriteGrants` left this table (retired: DOOR_RETIRED before any ref resolution; pinned below).
   ['secrets(app owner)', (r, c) => Q.secrets({}, { ownerType: 'app', ownerRef: r }, c), memberCtx],
   ['createAppMemory', (r, c) => M.createAppMemory({}, { appRef: r, name: 'pin mem' }, c), memberCtx],
   ['createTelegramConnection', (r, c) => M.createTelegramConnection({}, { appRef: r, botToken: '123:pin' }, c), memberCtx],
@@ -163,12 +163,7 @@ const FOLD: Array<[string, (ref: string, c: Context) => Promise<unknown>, () => 
   ['worker(ref:, appRef:)', (r, c) => Q.worker({}, { ref: 'zed', appRef: r }, c), memberCtx],
   ['uninstallApp', (r, c) => M.uninstallApp({}, { ref: r }, c), memberCtx],
   ['reinstallApp', (r, c) => M.reinstallApp({}, { ref: r }, c), memberCtx],
-  // adminCtx (#4948): memberCtx is refused at the door's App gate before the MEMORY arm ever
-  // resolves, so the row pinned nothing about the memory ref. The admin passes the gate and the
-  // memory arm's fold is what this row exists to pin. The control ref is MEMORY-shaped: an
-  // app-shaped URN is refused by resolveMemoryRef's kind boundary before any lookup, so the
-  // default control would prove nothing on this row.
-  ['setAppMemoryWriteGrant(memory arm)', (r, c) => M.setAppMemoryWriteGrant({}, { appRef: app.urn, memoryRef: r, prefix: 'pin' }, c), adminCtx, `hrn:mem:${MISSING}`],
+  // #5404: `setAppMemoryWriteGrant(memory arm)` left this table (retired: DOOR_RETIRED before any ref resolution; pinned below).
 ];
 
 /** KEEP doors: the typed contract is deliberate (missing ≠ unreachable on the door) — a malformed
@@ -244,7 +239,7 @@ describe('#4893 keep doors: the typed URN_NOT_QUALIFIED contract stays', () => {
       expect(miss).toMatchObject({ ok: false, code: missCode });
       const got = await answer(call(CANARY));
       expect(got).toMatchObject({ ok: false, code: 'URN_NOT_QUALIFIED' });
-      expect((got as any).message).toContain('CANARY'); // the boundary quotes the caller's value (spec 022) — unchanged
+      expect((got as any).message).not.toContain('CANARY'); // #5168: the boundary no longer quotes the caller's value
     });
   }
 });
@@ -274,10 +269,26 @@ describe('#4893 the fold stays narrow (a database fault is never the unknown-App
     const c = { ...memberCtx(), db: faultyDb() } as Context;
     await expect(Q.agentTasks({}, { appRef: MISSING }, c)).rejects.toThrow('connection terminated');
   });
-  it('appWriteGrant classifies refusals by type, never by words in a fault (#3275)', async () => {
-    const c = { ...memberCtx(), db: faultyDb('URN lookup connection failed') } as Context;
-    await expect(Q.appMemoryWriteGrants({}, { appRef: MISSING }, c)).rejects.toThrow('URN lookup connection failed');
-  });
+});
+
+describe('#5404 the retired write-grant doors answer DOOR_RETIRED before any ref resolution', () => {
+  // Replaces the FOLD rows `appMemoryWriteGrants` and `setAppMemoryWriteGrant(memory arm)` and the #3275 fault-classification
+  // pin: a retired door resolves no ref, so malformed, ambiguous and missing refs (and a faulting database) all get the one answer.
+  const doors: Array<[string, (r: string, c: Context) => Promise<unknown>, () => Context]> = [
+    ['appMemoryWriteGrants', (r, c) => Q.appMemoryWriteGrants({}, { appRef: r }, c), memberCtx],
+    ['setAppMemoryWriteGrant(memory arm)', (r, c) => M.setAppMemoryWriteGrant({}, { appRef: app.urn, memoryRef: r, prefix: 'pin' }, c), adminCtx],
+  ];
+  for (const [door, call, mkCtx] of doors) {
+    it(`${door}: every malformed, ambiguous or missing ref, and a faulting lookup, is the same DOOR_RETIRED`, async () => {
+      const base = await answer(call(MISSING, mkCtx()));
+      expect(base).toMatchObject({ ok: false, code: 'DOOR_RETIRED' });
+      for (const r of [...MALFORMED, AMBIG, `hrn:mem:${MISSING}`, CONTROL_MISS]) {
+        expect(shape(await answer(call(r, mkCtx())))).toEqual(shape(base));
+      }
+      const faulting = { ...mkCtx(), db: resolutionFaultDb() } as Context;
+      expect(shape(await answer(call(MISSING, faulting)))).toEqual(shape(base));
+    });
+  }
 });
 
 describe('#4893 createGrant worker arm: the scoped lookup folds what it can reach (#4948)', () => {

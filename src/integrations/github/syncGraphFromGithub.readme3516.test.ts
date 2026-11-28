@@ -205,7 +205,7 @@ it('takes the complete candidate set before resolving a concurrently moved child
   const moving=db.$transaction(async tx=>{
     await acquireLockSet(tx,[{memoryId:graph.id,loc:'p'},{memoryId:graph.id,loc:'p:README'}]);
     held();await gate;
-    return moveNodeSubtree(tx,{source:f.child,destLoc:'q',editor:{info:'readme3516-controlled-move'}});
+    return moveNodeSubtree(tx,{ ownerLimitCaller: null,source:f.child,destLoc:'q',editor:{info:'readme3516-controlled-move'}});
   },{timeout:15_000});
   await ready;
   const syncing=syncGraphFromGithub(graph);

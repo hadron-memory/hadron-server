@@ -9,6 +9,7 @@
  * Fixture: an org with an Agent `eng` whose system memory holds the `tasks` index (pointed at by `tasksIndexRef`);
  * `admin` (org ADMIN) writes it, `contrib` (org READER) reads org-visible memory but cannot write it, `writer` (CONTRIBUTOR) writes org-visible memory, `stranger` reads nothing.
  */
+import { activeMemoryWriteGrant } from '../../../test/appGrants5404.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphQLError } from 'graphql';
 import { db } from '../../../integrations/db/client.js';
@@ -52,7 +53,7 @@ async function code(p: Promise<unknown>): Promise<{ code: string; message: strin
   }
 }
 const create = (u: { id: string }, loc: string, index: unknown = INDEX(), extra: Record<string, unknown> = {}, mem = sysMem, skill?: unknown) =>
-  M.createTaskNode({}, { input: { memoryId: mem.id, loc, name: loc, content: 'steps', isRunnable: true, ...extra }, ...(index ? { index } : {}), ...(skill ? { skill } : {}) }, as(u));
+  M.createTaskNode({}, { input: { memoryRef: mem.id, loc, name: loc, content: 'steps', isRunnable: true, ...extra }, ...(index ? { index } : {}), ...(skill ? { skill } : {}) }, as(u));
 // loc-scope-ok: this test's two fixture memories only
 const nodesAt = (loc: string) => db.node.findMany({ where: { loc, memoryId: { in: [sysMem.id, otherMem.id] }, deletedAt: null } });
 const edgesFrom = (nodeId: string) => db.edge.findMany({ where: { sourceId: nodeId, deletedAt: null } });
@@ -280,11 +281,11 @@ describe('an App write grant never reaches the index edge (#4864)', () => {
     // is an edge the write carries, so the grant arm must not answer for it.
     const app = await db.app.create({ data: { name: 'Grant App', urn: 'ti-org:grantapp', organizationId: org.id } });
     await db.appMember.create({ data: { appId: app.id, userId: admin.id, role: 'owner' } });
-    await db.appMemoryWriteGrant.create({ data: { appId: app.id, memoryId: otherMem.id, prefix: 'tasks', grantedBy: admin.id } });
+    await activeMemoryWriteGrant(app.id, otherMem.id, { issuerUserId: admin.id, prefix: 'tasks' }); // #5404: signed memory.write
     const run = () => ({ db, ...runAuthContext({ id: generateId(), appId: app.id, userId: null, organizationId: org.id }) }) as never;
     const door = (loc: string, taskIndex?: { agent: string; trigger: string }) =>
       writeNodeCore({ memoryId: otherMem.id, loc, name: loc, isRunnable: true, content: 'x' } as never, run(), 'create',
-        { authoring: attestedAuthoring(null), ownsKind: 'task', governedContext: 'node-write', ...(taskIndex ? { taskIndex } : {}) });
+        { ownerLimit: 'refuse', sizeCeiling: 'check', authoring: attestedAuthoring(null), ownsKind: 'task', governedContext: 'node-write', ...(taskIndex ? { taskIndex } : {}) });
     expect(await code(door('tasks:control'))).toEqual({ code: 'OK', message: '' });
     const before = await totals();
     expect((await code(door('tasks:deploy', INDEX()))).code).toBe('FORBIDDEN');
@@ -312,7 +313,7 @@ describe('the remaining input paths of the extended door (#4864, blind F3)', () 
 
   it('caller edges and the index edge are both written', async () => {
     const note = await db.node.create({ data: { id: generateId(), memoryId: sysMem.id, loc: 'notes:n', name: 'n', content: '' } });
-    const made = await create(admin, 'tasks:deploy', INDEX(), { edges: [{ targetId: note.id, name: 'see also' }] });
+    const made = await create(admin, 'tasks:deploy', INDEX(), { edges: [{ targetRef: note.id, name: 'see also' }] });
     const edges = await edgesFrom(made.id);
     expect(edges.map((e) => e.targetId).sort()).toEqual([indexId, note.id].sort());
   });

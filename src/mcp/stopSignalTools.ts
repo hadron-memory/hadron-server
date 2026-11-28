@@ -23,6 +23,7 @@ import type { StopSignalView } from '../api/graphql/schema/resolvers.stopSignal.
 import { resolveAppRef } from '../lib/entityRef/appRef.js';
 import { stopNames } from '../lib/stopSignals/names.js';
 import { isTrustedRefusal } from '../api/graphql/formatError.js';
+import { refusalText } from '../lib/refEcho.js';
 
 type Row = Record<string, any>;
 type Resolver<A, R> = (parent: unknown, args: A, ctx: Context) => Promise<R>;
@@ -50,7 +51,7 @@ function refusal(e: unknown) {
     const extras = Object.entries(rest).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
     return textResult([`[${String(code ?? 'ERROR').toLowerCase()}] ${e.message}`, ...extras].join('\n'), true);
   }
-  if (e instanceof UrnNotQualifiedError) return textResult(`[bad_user_input] ${e.message}`, true);
+  if (e instanceof UrnNotQualifiedError) return textResult(`[bad_user_input] ${refusalText(e)}`, true);
   throw e;
 }
 
@@ -66,6 +67,8 @@ export function renderSignal(s: StopSignalView, n: Names = NO_NAMES): string {
   const label = n.hostLabel(s.targetHostId);
   const target = s.scope === 'HOST'
     ? `host ${s.targetHostId ?? '?'}${label ? ` (${label})` : ''}`
+    : s.scope === 'APP'
+    ? 'app (every worker)'
     : `${s.scope.toLowerCase()} ${w ? `${w.name} (${w.urn ?? s.targetWorkerId})` : s.targetWorkerId ?? '?'}`;
   const handle = n.user(s.setByUserId);
   const setter = s.setByHostKey ? 'a host key' : handle ? `@${handle}` : `user ${s.setByUserId ?? '?'}`;
@@ -156,8 +159,8 @@ export function registerStopSignalTools(server: McpServer, deps: { db: PrismaCli
   off(
     'hadron_stop_signal_set',
     'Set a STOP SIGNAL on an App (cor:agt:090): PAUSE_DISPATCH stops assignment; PAUSE also stops ticks and stall time; ' +
-      'HALT also tells the worker to save its work and write a hand-off now (typed as an ordinary notice into a verified-empty input; no interrupt key is sent). Scope WORKER (one worker), TEAM (a head and its whole reporting tree) or HOST (the workers a ' +
-      'host registration lists). Whoever manages the App, any level and scope; a host key, a HALT on its own host only. ' +
+      'HALT also tells the worker to save its work and write a hand-off now (typed as an ordinary notice into a verified-empty input; no interrupt key is sent). Scope WORKER (one worker), TEAM (a head and its whole reporting tree), APP (every worker of the App, one added later included, no target) or HOST (the workers a ' +
+      'host registration lists). Whoever manages the App, any level and scope; a host key, a HALT on its own host only (never APP). ' +
       'Never replaces another signal. Refused with STOP_SIGNAL_UNAVAILABLE (R95, #2173/#2169) while a worker it would cover is on a lane no stop-notice consumer ' +
       'has declared fresh (a consumer declares by polling hadron_due_wakes with accepts including STOP), because a stopped worker would not be told; lifting and listing still work.',
     SHAPE_HADRON_STOP_SIGNAL_SET,
@@ -202,8 +205,8 @@ export function registerStopSignalTools(server: McpServer, deps: { db: PrismaCli
 const SHAPE_HADRON_STOP_SIGNAL_SET = {
   appRef,
   level: z.enum(['PAUSE_DISPATCH', 'PAUSE', 'HALT']),
-  scope: z.enum(['WORKER', 'TEAM', 'HOST']),
-  worker: z.string().optional().describe('WORKER / TEAM: the target worker (id, name or URN; a team by its head).'),
+  scope: z.enum(['WORKER', 'TEAM', 'APP', 'HOST']),
+  worker: z.string().optional().describe('WORKER / TEAM: the target worker (id, name or URN; a team by its head). APP: omit it.'),
   host: z.string().optional().describe('HOST: the host id. A host key may omit it.'),
   until: z.string().optional().describe('ISO time it ends on its own; later than now. Omitted: until lifted.'),
   session: SESSION_WRITE,

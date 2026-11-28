@@ -77,7 +77,8 @@ describe('operation usage lifecycle', () => {
     expect(sizes).toEqual([500, 500, 1]);
     expect(overlapped).toBe(false);
     expect(deleted).toContain('node');
-    expect(deleted.at(-1)).toBe('usageEvent');
+    // #1069: usage events clear last; #5021: then usage_events is truncated with the price rows it references.
+    expect(deleted.slice(-2)).toEqual(['usageEvent', 'TRUNCATE usage_events, ai_model_prices']);
   });
 
   it('drains writes added during a drain while keeping unrelated clients independent', async () => {

@@ -51,9 +51,9 @@ const M = resolvers.Mutation as unknown as Record<string, (p: unknown, a: unknow
 const mcp = () => createTestableMcpServer({ userId: writer.id, roles: [], clientId: `user:${writer.id}` });
 const urn = (loc: string) => `hrn:node:${memoryUrn}:${loc}`;
 const create = (loc: string, content: string) =>
-  M.createNode(null, { input: { memoryId, loc, name: loc, abstract: loc, content } }, as());
+  M.createNode(null, { input: { memoryRef: memoryId, loc, name: loc, abstract: loc, content } }, as());
 const update = (loc: string, content: string, extra: Record<string, unknown> = {}) =>
-  M.updateNode(null, { input: { memoryId, loc, content, ...extra } }, as());
+  M.updateNode(null, { input: { memoryRef: memoryId, loc, content, ...extra } }, as());
 const seed = (loc: string, content: string, mem = memoryId) =>
   db.node.create({ data: { id: generateId(), memoryId: mem, loc, name: loc, content } });
 const refusal = async (p: Promise<unknown>) => {
@@ -218,7 +218,7 @@ describe('only added or changed tags are checked (R110)', () => {
     await db.node.create({ data: {
       id: generateId(), memoryId: encMem.id, loc: 'inc', name: 'inc', content: encryptNodeFields({ content: `E ${secret()}` }, info).content,
     } });
-    const up = (content: string) => M.updateNode(null, { input: { memoryId: encMem.id, loc: 'inc', content } }, as());
+    const up = (content: string) => M.updateNode(null, { input: { memoryRef: encMem.id, loc: 'inc', content } }, as());
     expect(await code(up(`E ${secret()} more`))).toBe('NO_ERROR');
     expect(await code(up(`E {{> hrn:node:${foreignUrn}:secret rev=2}}`))).toBe('INCLUDE_TARGET_UNAVAILABLE');
     const row = await db.node.findFirstOrThrow({ where: { memoryId: encMem.id, loc: 'inc' } });
@@ -249,7 +249,7 @@ describe('every principal writer runs the check', () => {
   it('batch replace, node merge-into and restore-revision refuse an added unreadable tag and keep an unchanged one', async () => {
     await create('r', 'swap-me');
     const replaced = await refusal(M.searchReplaceInNodes(null, { input: {
-      oldText: 'swap-me', newText: secret(), memoryIds: [memoryId], fields: ['content'],
+      oldText: 'swap-me', newText: secret(), memoryRefs: [memoryId], fields: ['content'],
     } }, as()));
     expect(replaced.code).toBe('INCLUDE_TARGET_UNAVAILABLE');
     expect(await contentOf('r')).toBe('swap-me');
@@ -270,14 +270,12 @@ describe('every principal writer runs the check', () => {
     expect(await contentOf('v')).toBe('v2');
   });
 
-  it('git sync and the root-node seam are the only callers without the check (source guard)', async () => {
+  it('git sync is the only caller without the check (the root-node seam is gone, #3952) (source guard)', async () => {
     const { execSync } = await import('child_process');
     const importers = execSync(
       "git grep -l \"operations/createNode\" -- 'src/**/*.ts' ':!src/**/*.test.ts'", { encoding: 'utf8' },
     ).trim().split('\n').sort();
     expect(importers).toEqual([
-      'src/api/graphql/schema/resolvers.mutation.appMemory.ts',
-      'src/api/graphql/schema/resolvers.mutation.memory.ts',
       'src/controller/controller.ts',
     ]);
     const systemCallers = execSync(

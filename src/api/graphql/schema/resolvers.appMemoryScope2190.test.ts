@@ -404,7 +404,7 @@ describe('#2190 — viewerCanWrite is the viewer\'s createNode gate, not the Age
       for (const row of await scopeAll(who)) {
         let gateAdmitted = true;
         try {
-          await (resolvers.Mutation as any).createNode({}, { input: { memoryId: row.memoryId, loc: `probe:${n}-${who}`, name: 'probe' } }, ctx(who));
+          await (resolvers.Mutation as any).createNode({}, { input: { memoryRef: row.memoryId, loc: `probe:${n}-${who}`, name: 'probe' } }, ctx(who));
         } catch (err) {
           // #4890 fixture: an encrypted memory's node creation needs a session
           // key this bare resolver context cannot hold, so createNode refuses

@@ -8,6 +8,7 @@ import { ctx, M, NEW_PROC, PROC, setUpResetFixture, type ResetFixture } from '..
 import { resolvers, type Context } from './resolvers.js';
 import { typeDefs } from './typeDefs.js';
 import { formatGraphQLError } from '../formatError.js';
+import { joinHostForKey } from '../../../test/agentTeamHost.js';
 
 vi.mock('../../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn(async () => {}) }));
 vi.mock('../../../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -187,6 +188,7 @@ it.each(['person', 'plain-key', 'session-bound', 'revoked', 'other-app', 'not-co
   if (kind === 'other-app') {
     const app = await db.app.create({ data: { organizationId: f.orgId, name: 'Other App', urn: `other-${generateId()}.example:team` } });
     const key = await db.appKey.create({ data: { appId: app.id, keyHash: generateId(), keyPreview: 'synthetic' } });
+    await joinHostForKey(db, key.id, 'orca1');
     await M.grantAppKeyScope({}, { id: key.id, scope: 'host:operate', hostId: 'orca1' }, ctx(f.manager.id));
     appRef = app.id;
     context = { db, appId: app.id, appKeyId: key.id, roles: [] };
