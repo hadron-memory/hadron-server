@@ -764,7 +764,7 @@ export const agentMutations = {
 
     updateAgent: async (
       _: unknown,
-      { ref, name, urn, description, systemMemoryRef, visibility, listedOnMarketplace, type, surfaces, personaRole, usesTasks, resetContextAfterTask, lifecycle, contextCap, registerDefaults, memberRoles }: { ref: string; name?: string; urn?: string; description?: string; systemMemoryRef?: string | null; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; lifecycle?: 'LONG_LIVED' | 'SHORT_LIVED' | null; contextCap?: number | null; registerDefaults?: { mentionOnly?: boolean | null } | null; memberRoles?: string[] | null },
+      { ref, name, urn, description, systemMemoryRef, visibility, listedOnMarketplace, type, surfaces, personaRole, usesTasks, resetContextAfterTask, lifecycle, contextCap, registerDefaults, memberRoles, defaultChatHome }: { ref: string; name?: string; urn?: string; description?: string; systemMemoryRef?: string | null; visibility?: string; listedOnMarketplace?: boolean; type?: 'ASSISTANT' | 'CHATBOT'; surfaces?: string[]; personaRole?: string | null; usesTasks?: boolean | null; resetContextAfterTask?: boolean | null; lifecycle?: 'LONG_LIVED' | 'SHORT_LIVED' | null; contextCap?: number | null; registerDefaults?: { mentionOnly?: boolean | null } | null; memberRoles?: string[] | null; defaultChatHome?: 'APP_SHARED' | 'PERSONAL' | 'PRIVATE' | null },
       ctx: Context,
     ) => {
       // #929 review: normalize persona dressing (blank-after-trim clears).
@@ -1182,6 +1182,9 @@ export const agentMutations = {
           // #4225 (S4b of #4229): the same gate and lock as usesTasks. Omitted leaves it; an explicit null clears it (no
           // cap). Lowering or removing it cancels nothing in flight: a reset's claim re-reads it (SETTING_OFF).
           ...(contextCap === null ? { contextCap: null } : contextCap !== undefined ? { contextCap: parseContextCap(contextCap) } : {}),
+          // #5027 (cor:acl:030:01): the same gate and lock as usesTasks. Omitted leaves it; an explicit null clears it
+          // (today's behaviour). The enum is checked by the schema, so no other value reaches here.
+          ...(defaultChatHome !== undefined ? { defaultChatHome } : {}),
           // Spec 049 Phase 5: the install-row defaults — a scalar declaration,
           // stored as given; null clears to the platform defaults.
           ...(mergedPolicy !== undefined ? { installationPolicy: mergedPolicy } : {}),

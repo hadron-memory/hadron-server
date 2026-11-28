@@ -51,9 +51,20 @@ export function debitEnabled(): boolean {
 }
 
 /** FR-006: markup applied to platform-key cost when debiting; default 0%. */
+// #5216 (item 2): the recorded markup is an Int4 column, so a value whose basis points exceed it must not reach the insert
+// (it would drop the unit). It falls back to 0, like junk, and warns once per process without echoing the value.
+const MARKUP_BP_MAX = 2147483647;
+let markupEnvWarned = false;
 function markupPercent(): number {
-  const raw = Number(process.env.CREDIT_MARKUP_PERCENT);
-  return Number.isFinite(raw) && raw >= 0 ? raw : 0;
+  const rawText = process.env.CREDIT_MARKUP_PERCENT;
+  const raw = Number(rawText);
+  if (Number.isFinite(raw) && raw >= 0 && Math.round(raw * 100) <= MARKUP_BP_MAX) return raw;
+  // Unset or empty is the plain default; only a set, unusable value is a misconfiguration worth a line.
+  if (rawText !== undefined && rawText.trim() !== '' && !markupEnvWarned) {
+    markupEnvWarned = true;
+    console.warn('credit_markup_percent_env_invalid');
+  }
+  return 0;
 }
 
 // ── Price lookup (FR-002) ────────────────────────────────────────────────
@@ -302,14 +313,26 @@ export async function recordLlmUsage(
         appRunId: params.appRunId ?? null,
         createdBy: params.createdBy ?? null,
     };
-    const event = params.appRunId && cost != null
-      ? await db.$transaction(async (tx) => {
+    const insert = () => params.appRunId && cost != null
+      ? db.$transaction(async (tx) => {
           const created = await tx.usageEvent.create({ data });
           // A run minted before the column keeps NULL (unknown): `not: null` skips it.
           await tx.appRun.updateMany({ where: { id: params.appRunId!, costMicroCents: { not: null } }, data: { costMicroCents: { increment: cost } } });
           return created;
         })
-      : await db.usageEvent.create({ data });
+      : db.usageEvent.create({ data });
+    let event: Awaited<ReturnType<typeof insert>>;
+    try {
+      event = await insert();
+    } catch (err) {
+      // #5216 (item 1): the run row was hard-deleted, so its foreign key refuses the insert. The unit is still real spend
+      // (cor:dmo:170:05/:06): record it once more without the run, which is the state the run's SET NULL key would give it.
+      // Only a violation on `app_run_id` retries; any other key still drops the unit as before (known gap, #5246).
+      const field = err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2003' ? String(err.meta?.field_name ?? err.meta?.constraint ?? '') : '';
+      if (!params.appRunId || !/app_run_id/.test(field)) throw err;
+      data.appRunId = null;
+      event = await db.usageEvent.create({ data });
+    }
     if (charged) {
       try {
         await debitCredits(db, {

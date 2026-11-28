@@ -35,6 +35,7 @@ import { findInstallMemory, resolveInstallTarget } from './installMemory.js';
 import { listableInstallMemoryIds } from '../../../lib/auth/installMemory.js';
 import { refNamesNothing } from '../../../lib/entityRef/refNamesNothing.js';
 import { unauthenticatedError } from '../../../lib/refusals.js';
+import { groupMemberMemoryWhere } from '../../../lib/auth/groupMemberMemory.js';
 import { attachableMemoriesPage } from './resolvers.mutation.appMemory.js';
 
 /** Compose a node URN, tolerating a memory urn the flat v2 shape can't express. */
@@ -669,12 +670,13 @@ export const memoryQueries = {
             // #1208 / cor:acl:010:01 — group records list only through
             // MemoryMember (reader/writer/owner), mirroring the shared read
             // gate exactly: NOT nested under orgIds for ordinary calls (a
-            // cross-org MemoryMember lists theirs), `appId: null` so an
-            // app-scoped group row's metadata stays App-internal (#653,
+            // cross-org MemoryMember lists theirs), an App-scoped group row
+            // included since #5027 (Holger R1: its MemoryMembers read it,
             // record-side parity with the node gate), per-user holdings and
             // user-owned rows excluded (#758). MemoryMember rows hard-delete
             // (FR-038), so `some` is liveness.
-            { class: 'group' as any, appId: null, userMemoryOfAgentId: null, ownerUserId: null, ...(groupOrgBound ? { organizationId: groupOrgBound } : {}), memberships: { some: { userId: ctx.userId } } },
+            // #5027 (Holger R1): the shared group predicate; a group made in an App lists for its MemoryMembers too.
+            groupMemberMemoryWhere(ctx.userId, { restrictToOrgId: groupOrgBound }),
             // GROUP excluded (#3781): a group-subscription row is API-invalid
             // state (createMemorySubscription admits PUBLIC only; group
             // visibility is CHECK-forced to GROUP) — never a listing grant.

@@ -89,6 +89,7 @@ import {
   appendRouteEntry,
   rethrowAiConfigTyped,
   loadReadableMemoryRecord,
+  resolveMemoryRefConcealed,
 } from './resolvers.helpers.js';
 import { normalizeChatAiConfigChoice } from '../../../lib/chatbotAiConfig.js';
 import { assertNoMintedSpecRemoval } from '../../../lib/mintedSpecPermanence.js';
@@ -105,6 +106,11 @@ import {
   entryStartMessageFor, validateEntryCondition, type EntryStartReason,
 } from '../../../lib/edge-conditions/entryCondition.js';
 import { sessionKeyCache } from '../../../lib/sessionKeyCache.js';
+import {
+  chatHomeInvalid, chatScopeLabel, findAppUserChatHome, judgeChatHome, provisionAppUserChatHome,
+  type ChatHomeDefault, type JudgedChatHome,
+} from './chatHome.js';
+import { refusedAppUserMemoryPrincipal } from './appUserMemoryEligibility.js';
 import { loadChatScript, type ChatScript, type ScriptRule } from '../../../lib/chatScript.js';
 import { conversationStageOrder } from '../../../lib/chatRouting/nextStage.js';
 
@@ -251,6 +257,7 @@ export const chatMutations = {
         userId,
         conversationName,
         scope,
+        memoryRef,
         isTestRun,
         llmModel,
         aiConfigChoice,
@@ -260,7 +267,9 @@ export const chatMutations = {
         userId?: string;
         conversationName?: string;
         // Spec 017: chosen at chat creation, immutable afterward.
-        scope?: 'private' | 'shared';
+        scope?: 'private' | 'shared' | null;
+        // #5027 (cor:acl:030:01): the memory the chat is saved in.
+        memoryRef?: string | null;
         // Spec 019: skip cross-cutting side-effects when the call comes
         // from the Tester. Defaults to false; see typeDefs for the
         // full rationale.
@@ -281,9 +290,9 @@ export const chatMutations = {
       // Validate before provisioning memory, nodes or a subscription. This input grants nothing.
       const reportedModel = clientReportedChatModel(llmModel);
 
-      // Spec 017: default per FR-003. The GraphQL schema also defaults
-      // scope to `private`; the resolver default is a defensive belt.
-      const chatScope: 'private' | 'shared' = scope ?? 'private';
+      // Spec 017 / #5027: the label is decided below, once the Agent's default home is known. With neither memoryRef,
+      // scope nor a default it is today's `private`.
+      let chatScope: 'private' | 'shared' = scope ?? 'private';
 
       // #5394 (hrn:node:hadronmemory.com:specs:cor:cht:010:02): the App that supplies the chatbot and keeps the chat is the
       // one the call identifies, never one found by searching; judged before the Agent is resolved or read.
@@ -365,6 +374,15 @@ export const chatMutations = {
       const systemMemoryId = (agent as any).systemMemoryId as string | null;
       if (!systemMemoryId) throw new Error('Agent has no system memory configured');
 
+      // #5027 (cor:acl:030:01, D-2026-11-26-008): which home decides. memoryRef first; else an explicit scope (today's
+      // paths); else the Agent's default; else today's `private`. A null default is byte-identical to today.
+      const agentDefaultHome = (agent as { defaultChatHome?: ChatHomeDefault | null }).defaultChatHome ?? null;
+      let classDefault: 'personal' | 'private' | null = null;
+      if (memoryRef == null && scope == null && agentDefaultHome) {
+        if (agentDefaultHome === 'APP_SHARED') chatScope = 'shared';
+        else classDefault = agentDefaultHome === 'PERSONAL' ? 'personal' : 'private';
+      }
+
       // ── Target memory selection ──────────────────────────────────────
       // The chat (and its future messages + extracted data) get stored
       // in a user-scoped memory. Four auth paths:
@@ -385,8 +403,67 @@ export const chatMutations = {
           { OR: [{ organizationId: { not: null } }, { members: { some: { userId: principal.userId } } }] },
         ] } : null;
       };
-      type StartTarget = { appId: string | null; targetMemoryId: string | null; sharedAppId: string | null; ensureTarget: ((client: Context['db']) => Promise<string>) | null };
+      // `named`: a home judged by #5027's gate (memoryRef, or an Agent default's existing memory); re-judged in the
+      // admission transaction, and its encryption answered before any write.
+      type StartTarget = { appId: string | null; targetMemoryId: string | null; sharedAppId: string | null; ensureTarget: ((client: Context['db']) => Promise<string>) | null; named?: boolean };
+      const namedTarget = (home: JudgedChatHome): StartTarget => ({
+        appId: home.appId, targetMemoryId: home.id, sharedAppId: chatScopeLabel(home.class) === 'shared' ? home.appId : null,
+        ensureTarget: null, named: true,
+      });
       const selectStartTarget = async (): Promise<StartTarget> => {
+      if (memoryRef != null) {
+        // #5027 Ask 2 and 4: resolve, then the home gate. A scope that contradicts the home's label is judged only after
+        // the gate, so it never discloses the class of a memory the caller cannot use.
+        const memoryId = await resolveMemoryRefConcealed(ctx, memoryRef, chatHomeInvalid);
+        const home = await judgeChatHome(ctx, memoryId, resolvedAgentId);
+        // #5394 x #5027: the chat runs under the identified App, so its home is a memory of that App. Another App's
+        // memory is the same one refusal as every other unusable home, judged after the gate (it names nothing).
+        if (home.appId !== chatAppId) throw chatHomeInvalid();
+        const label = chatScopeLabel(home.class);
+        if (scope != null && scope !== label) {
+          throw new GraphQLError('scope contradicts the class of the named memory; omit it.', { extensions: { code: 'BAD_USER_INPUT' } });
+        }
+        chatScope = label;
+        return namedTarget(home);
+      }
+      if (classDefault) {
+        // #5027 Ask 3: the caller's own memory of the default's class in this App. #5394: the App is the identified one
+        // (the App key's own, or the signed-in caller's appRef), never searched for; a signed-in caller must take part in
+        // it and be servable under its licence by the same rule today's per-user home uses.
+        chatScope = 'private';
+        const ownerId = effectiveUserId !== 'anonymous' ? effectiveUserId : null;
+        let homeAppId: string | null = null;
+        if (ctx.appId) {
+          homeAppId = (await activeAppInstallLicenseIdsForAgent(ctx.db, resolvedAgentId, [chatAppId])).has(chatAppId) ? chatAppId : null;
+        } else if (ctx.userId) {
+          const candidateWhere = await coldAppWhere(ctx.db, ctx);
+          const app = candidateWhere ? await ctx.db.app.findFirst({
+            where: { AND: [candidateWhere, { id: chatAppId }] }, select: { id: true, organizationId: true, ownerUserId: true },
+          }) : null;
+          if (app
+            && (await activeAppInstallLicenseIdsForAgent(ctx.db, resolvedAgentId, [app.id])).has(app.id)
+            && await personalOrgAgentServeAllowed(ctx.db, app, resolvedAgentId, ctx.userId)) homeAppId = app.id;
+        }
+        if (!homeAppId || !ownerId) throw chatHomeInvalid();
+        const existing = await findAppUserChatHome(ctx.db, homeAppId, ownerId, classDefault);
+        if (existing) {
+          const home = await judgeChatHome(ctx, existing, resolvedAgentId);
+          if (home.appId !== chatAppId) throw chatHomeInvalid();
+          return namedTarget(home);
+        }
+        // Only the signed-in person acting as themselves creates it (cor:dmo:060:20, person only); a user-owned App's
+        // personal/private memories are not built yet (#5186).
+        if (refusedAppUserMemoryPrincipal(ctx) || ownerId !== ctx.userId) throw chatHomeInvalid();
+        const homeApp = await ctx.db.app.findUnique({ where: { id: homeAppId }, select: { organizationId: true } });
+        if (!homeApp?.organizationId) throw chatHomeInvalid();
+        const klass = classDefault;
+        return {
+          appId: homeAppId, targetMemoryId: null, sharedAppId: null,
+          ensureTarget: (client) => provisionAppUserChatHome(client as unknown as Prisma.TransactionClient, {
+            appId: homeAppId!, userId: ownerId, agentId: resolvedAgentId, klass,
+          }),
+        };
+      }
       let targetMemoryId: string | null = null;
       let prospectiveAppId: string | null = null;
       let sharedAppId: string | null = null;
@@ -637,6 +714,11 @@ export const chatMutations = {
               const home = await txCtx.db.memory.findUnique({ where: { id: target.targetMemoryId }, select: { appId: true } });
               if (!home || home.appId !== target.appId) throw new AgentNotFoundError(agentRef);
             }
+            // #5027: a judged home is judged again after the anchor wait, by the same gate and with the same refusal.
+            if (target.named && target.targetMemoryId) {
+              const home = await judgeChatHome(txCtx, target.targetMemoryId, resolvedAgentId);
+              if (chatScopeLabel(home.class) !== chatScope) throw chatHomeInvalid();
+            }
             if (target.appId) {
               const app = await txCtx.db.app.findUnique({ where: { id: target.appId }, select: { organizationId: true, ownerUserId: true } });
               const needed = [`app:${target.appId}`, ...(app?.organizationId ? [`org:${app.organizationId}`] : []), ...(app?.ownerUserId ? [`user:${app.ownerUserId}`] : [])];
@@ -644,7 +726,13 @@ export const chatMutations = {
             }
             // Selecting a new App home is also a grant: PUBLIC reach cannot
             // preserve stale App participation after an anchor wait.
-            if (target.sharedAppId && txCtx.userId) {
+            // #5027 (BLIND F1 on #5391, Xan's gate answer #154355): a judged home also requires the caller's AppMember
+            // row in the home's App, judged here after the anchor wait, so a group MemoryMember who is not in the App
+            // cannot start a chat there. Proposed for Holger: selecting an App home is also a grant. One home refusal.
+            if (target.named && target.appId && txCtx.userId) {
+              const member = await txCtx.db.appMember.findUnique({ where: { appId_userId: { appId: target.appId, userId: txCtx.userId } } });
+              if (!member) throw chatHomeInvalid();
+            } else if (target.sharedAppId && txCtx.userId) {
               const member = await txCtx.db.appMember.findUnique({ where: { appId_userId: { appId: target.sharedAppId, userId: txCtx.userId } } });
               if (!member) throw new AgentNotFoundError(agentRef);
             } else if (target.ensureTarget && target.appId && txCtx.userId) {
@@ -745,6 +833,13 @@ export const chatMutations = {
               return { prepare, holds };
             };
 
+            // #5027 Ask 4: an encrypted judged home is allowed; with no cached key the start answers B1's refusal, after
+            // the home gate (so it tells only a caller who may use the memory) and before anything is written.
+            if (target.named && target.targetMemoryId) {
+              const enc = await txCtx.db.memory.findUnique({ where: { id: target.targetMemoryId }, select: { isEncrypted: true } });
+              if (enc?.isEncrypted && !sessionKeyCache.getByMemoryId(target.targetMemoryId)) throw entryFailed('MEMORY_ENCRYPTED_NO_KEY');
+            }
+
             // ── Conversation selection ───────────────────────────────────────
             let convName: string;
             if (conversationName) {
@@ -830,7 +925,7 @@ export const chatMutations = {
             let systemMessage = promptContent;
             if (promptContent.includes('{{')) {
               const access =
-                chatScope === 'shared'
+                chatScope === 'shared' && sharedAppId && txCtx.userId
                   ? chatScopeAccessFilter(
                       {
                         scope: 'shared',
@@ -974,7 +1069,8 @@ export const chatMutations = {
                 createdBy: txCtx.userId ?? null,
               },
             });
-            await tx.chatRootCounter.create({data:{chatRootNodeId:chatNodeId}});
+            // #5027 Ask 6: the chat records its Agent, the one the turn lookup and myChats read first.
+            await tx.chatRootCounter.create({data:{chatRootNodeId:chatNodeId,agentId:resolvedAgentId}});
             await tx.chatRootEngineState.create({ data: { chatRootNodeId: chatNodeId, state: storedState.data as InputJsonValue } });
             // #2047: the chat's record, written with the chat so neither exists without the other (R37).
             if (chatServed) {
@@ -1080,7 +1176,7 @@ export const chatMutations = {
         : await normalizeChatAiConfigChoice(ctx.db, memory.appId ?? null, aiConfigChoice).catch(rethrowAiConfigTyped);
       // #4076: one shared lookup (resolve, deleted = none, licence). Personal/legacy turns already refused a
       // deleted Agent through the serve gate before any write (#3654); keep that refusal. App-class chats retain their empty result.
-      const { agent, deletedAgentId } = await resolveChatHomeAgent(ctx.db, memory);
+      const { agent, deletedAgentId } = await resolveChatHomeAgent(ctx.db, memory, undefined, chatNode.id);
       if (memory.class !== 'app' && deletedAgentId) throw new AgentNotFoundError(deletedAgentId);
       // #4070: an App-less home the caller can no longer reach is refused here, before the pinned revision is read.
       await refuseUnreachableChatHomeAgent(ctx.db, memory, agent, ctx);
@@ -1712,7 +1808,7 @@ export const chatMutations = {
       // #4076/#4043: share main's resolve/deleted/licence lookup BEFORE any pinned script or stage read. #4070: the response passes
       // the request principal so an App-less home re-checks the caller's CURRENT reach in the same lookup.
       const turnMemory = await ctx.db.memory.findUnique({ where: { id: chatNode.memoryId } });
-      const turnAgent = turnMemory ? (await resolveChatHomeAgent(ctx.db, turnMemory, ctx)).agent as { systemMemoryId?: string | null } | null : null;
+      const turnAgent = turnMemory ? (await resolveChatHomeAgent(ctx.db, turnMemory, ctx, chatNode.id)).agent as { systemMemoryId?: string | null } | null : null;
       const sysMemId = turnAgent?.systemMemoryId;
       if (sysMemId) script = await loadChatScript(ctx.db, sysMemId, (chatData.startedWithRevision as string | null) ?? null);
       const stageOrder = script ? await conversationStageOrder(script, origin.conversationName ?? null) : null;

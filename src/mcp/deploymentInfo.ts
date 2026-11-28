@@ -357,15 +357,24 @@ import { serverInfoFieldPresence } from '../lib/signing/surface.js';
 // pure key holding the new App-key scope `grant:read` (ADDITIVE: the closed scope list gains it; a client that validates scopes against the
 // old list cannot give it). A person, an impersonation, a session-bound key and a run carrying a user id gain nothing. #5398's own-memory
 // read (0.53.0) is neither an attachment nor a grant and is unchanged. (0.53.0 is #5398 and 0.54.0 is #5394, both merged first.)
+// 0.56.0 — BREAKING (behaviour) + ADDITIVE, #5027 (cor:acl:030:01, R1-R4, Holger 2026-11-27): a chat lives in a memory the caller
+// names. ADDITIVE: `startChat(memoryRef:)` (an id or URN of an app, group, personal or private memory of the Agent's App that the caller
+// can read and write as themselves); `Agent.defaultChatHome` (APP_SHARED, PERSONAL or PRIVATE, set through `updateAgent` by whoever
+// manages the Agent) decides when memoryRef is omitted; `Chat.homeMemoryClass` and `Chat.homeMemoryUrn` (the `hrn:mem:` form, as
+// `Memory.urn`) on every chat read. `Chat.scope` is kept and deprecated, now a label derived from the home's class. BREAKING: a home
+// that fails any step, including a caller with no AppMember row in the home's App (a group MemoryMember outside the App), is refused
+// with the one `CHAT_HOME_INVALID` and writes nothing; only the person themselves creates a missing personal or private default home
+// (an App key, a run or a worker session is refused). A start with neither memoryRef nor a default behaves as before.
+// (0.54.0 is #5407 and 0.55.0 is #5411, both merged first.)
 // 0.59.0 — ADDITIVE (#5452, cor:api:090:02, cor:api:090:05): an explicit way to read `system` nodes. New optional
 // `NodeFilter.includeSystemNodes: Boolean` on `findNodes`, the same argument on `Query.memoryLocSegments`, and the same parameter on
 // MCP `hadron_find_nodes` (and on `hadron_list_nodes`, where it is accepted and changes nothing: that tree never hid system nodes).
 // `true` lifts `system`, and only `system`, from the default node-type exclusion; `chat-message`, comments, the memory-class SYSTEM
 // default, access, soft-deleted rows and inheritance are untouched, and an explicit `nodeType` / `nodeTypes` decides alone. No default
-// changes: `false`, `null` and omitted are the answers of 0.55.0. `appNodes` / `appNodesPage` refuse either boolean with BAD_USER_INPUT
+// changes: `false`, `null` and omitted are the answers of 0.56.0. `appNodes` / `appNodesPage` refuse either boolean with BAD_USER_INPUT
 // (a new refusal on a new field only). A client keys on this version before sending the field: an older server refuses an unknown
-// input field over GraphQL and silently drops an unknown MCP argument (hadron-portal#2695, hadron-cli#3328). (0.56.0, 0.57.0 and
-// 0.58.0 are claimed by the open #5391, #5441 and #5447.)
+// input field over GraphQL and silently drops an unknown MCP argument (hadron-portal#2695, hadron-cli#3328). (0.56.0 is #5027,
+// merged first; the open #5441 and #5447 both claim 0.57.0, so one of them takes 0.58.0.)
 export const HADRON_SERVER_VERSION = '0.59.0';
 
 /**
