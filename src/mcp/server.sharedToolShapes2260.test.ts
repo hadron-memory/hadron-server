@@ -128,8 +128,10 @@ describe('#5474: the two SDK 2.x tool-surface deltas, pinned structurally', () =
       await client.close();
       await server.close();
     }
-    const listed = received.find((m) => Array.isArray((m as { result?: { tools?: unknown } }).result?.tools)) as { result: { tools: Array<Record<string, any>> } } | undefined;
+    const listed = received.find((m) => Array.isArray((m as { result?: { tools?: unknown } }).result?.tools)) as { result: { tools: Array<Record<string, any>>; nextCursor?: string } } | undefined;
     if (!listed) throw new Error('no tools/list result was received');
+    // Only one page is read: if the SDK ever paginates tools/list, these pins would cover page 1 alone, so refuse that.
+    if (listed.result.nextCursor !== undefined) throw new Error('tools/list was paginated: read every page before pinning the surface');
     return listed.result.tools;
   }
 
