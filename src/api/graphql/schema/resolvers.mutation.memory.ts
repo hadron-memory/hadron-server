@@ -1,6 +1,5 @@
 import { encryptChatEngineStateWithKey, buildEngineStateIncompleteError } from '../../../lib/chatRootEngineState.js';
 // memoryMutations — extracted from resolvers.ts Mutation (split step 2). No behavior change.
-import { softDeleteMemoryAssets } from '../../../lib/asset/memoryDelete.js';
 import { requireOwnerHeadroom } from '../../../lib/ownerLimits/gate.js';
 import { ownerLimitCaller } from '../../../lib/ownerLimits/nodes.js';
 import { assertStorableText } from '../../../lib/unstorableTextInput.js';
@@ -121,8 +120,7 @@ import {
 import { GraphQLError } from 'graphql';
 import { withAuthorizedMemoryTx } from './authorizedTx.js';
 // Spec 049 §8.5 — the memory-level lock Channel creation shares with deleteMemory.
-import { lockMemoryForChannelChange } from '../../../lib/channels.js';
-import { assertNoMintedCorpusRemoval, reclaimTombstonedMemory, tombstoneReclaimableBy } from '../../../lib/mintedSpecPermanence.js';
+import { reclaimTombstonedMemory, tombstoneReclaimableBy } from '../../../lib/mintedSpecPermanence.js';
 import { questionError, memoryHoldsQuestionLog } from '../../../lib/questions/index.js';
 import { type InputJsonValue } from '../../../generated/prisma/runtime/library.js';
 import { validateMemorySchema, MemorySchemaError } from '../../../lib/memorySchema.js';
@@ -173,7 +171,8 @@ import {
 } from './resolvers.helpers.js';
 import { requireOrgAction } from '../../../lib/auth/orgAction.js';
 import { isInstallMemoryRow } from '../../../lib/auth/installMemory.js';
-import { installDeleteAllowed, lockInstallAuthorityFirst } from './installMemory.js';
+import { installDeleteAllowed } from './installMemory.js';
+import { deleteMemoryInTx } from './memoryDelete.js';
 import { LIVE_ORG_MEMBERSHIP } from '../../../lib/auth/liveOrgMembership.js';
 import { refuseBillingMemberRole } from '../../../lib/auth/billingRole.js';
 import { forbiddenError } from '../../../lib/refusals.js';
@@ -1429,61 +1428,10 @@ export const memoryMutations = {
       if (memory.class === 'system' && !isInstallMemoryRow(memory)) {
         throw new Error('Cannot delete an agent system memory directly. Delete the owning agent instead.');
       }
-      await ctx.db.$transaction(async (tx) => {
-        // #2044: an install memory's authority before the memory row lock below.
-        await lockInstallAuthorityFirst(tx, ctx, resolvedId);
-        // Spec 049 §8.5: a memory hosting a live Channel is not deleted around
-        // the Channel — delete the Channel through its own operation first.
-        // Checked and tombstoned under the memory-level lock Channel creation
-        // also takes (`lockMemoryForChannelChange`), so a Channel cannot land
-        // between the check and the tombstone (Copilot on PR #1165, round 2).
-        await lockMemoryForChannelChange(tx, resolvedId);
-        // A transfer can commit after the first authorization and before this
-        // transaction starts. Lock and recheck the current owner before the
-        // tombstone write; the pre-transfer caller must not delete the new
-        // tenant's memory after waiting on the row.
-        await tx.$queryRaw`SELECT id FROM memories WHERE id = ${resolvedId} FOR UPDATE`;
-        const current = await tx.memory.findUniqueOrThrow({ where: { id: resolvedId } });
-        await authorizeDelete({ ...ctx, db: tx } as Context, current);
-        if (current.class === 'system' && !isInstallMemoryRow(current)) {
-          throw new Error('Cannot delete an agent system memory directly. Delete the owning agent instead.');
-        }
-        const hosted = await tx.channel.findFirst({
-          where: { memoryId: resolvedId, deletedAt: null },
-          select: { id: true, name: true, loc: true },
-        });
-        if (hosted) {
-          throw new GraphQLError(
-            `This memory hosts Channel "${hosted.name}" (${hosted.loc}); delete the Channel first (deleteChannel).`,
-            { extensions: { code: 'MEMORY_HOSTS_CHANNEL', channelId: hosted.id } },
-          );
-        }
-        // Spec 013 FR-014: idempotency. A re-delete on an already-soft-deleted
-        // memory returns true without overwriting the original deletedAt. The
-        // conditional updateMany closes the read-then-write race so deletedAt is
-        // set once. Secrets are org/user-owned only (#696), so there are no
-        // memory-scoped secrets to sweep here anymore.
-        //
-        // #1468 — deleting a mint-stamped corpus removes every spec in it.
-        // FOR UPDATE, not the update's own NO KEY UPDATE (Codex on #1475):
-        // it conflicts with the FK KEY SHARE every node insert or move-in
-        // takes and with the FOR SHARE a write takes when it marks a spec
-        // (lockMintedSpecUnmarks), so no spec can appear between the scan
-        // below and the tombstone. The guard's FOR SHARE re-enters. A
-        // re-delete removes nothing, so it stays idempotent and unguarded.
-        const [row] = await tx.$queryRaw<Array<{ deleted_at: Date | null }>>`
-          SELECT deleted_at FROM memories WHERE id = ${resolvedId} FOR UPDATE`;
-        if (row && row.deleted_at === null) {
-          await assertNoMintedCorpusRemoval(tx, resolvedId, 'delete the corpus', { includeTombstones: false });
-        }
-        const deletedAt = new Date();
-        const { count } = await tx.memory.updateMany({
-          where: { id: resolvedId, deletedAt: null },
-          data: { deletedAt },
-        });
-        // #5124: the memory's files go with it, at the same instant, so the janitor reclaims them. A re-delete touches nothing.
-        if (count === 1) await softDeleteMemoryAssets(tx, resolvedId, deletedAt);
-      });
+      // #5394: the transactional half is shared with the hand-run deletion script, so both take exactly the same path.
+      await ctx.db.$transaction((tx) =>
+        deleteMemoryInTx(tx, ctx, resolvedId, (lockedTx, current) => authorizeDelete({ ...ctx, db: lockedTx } as Context, current)),
+      );
       return true;
     },
 
