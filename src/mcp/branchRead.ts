@@ -6,7 +6,7 @@
  *
  * Computed per call, never cached across calls: a revoked or expired grant holds from the caller's next call.
  */
-import type { PrismaClient } from '@prisma/client';
+import type { PrismaClient } from '../generated/prisma/index.js';
 import type { AuthContext } from '../middleware/auth.js';
 import { grantReadReachDetailFor } from '../lib/grants/readGrant.js';
 import { NO_BRANCHES, branchOnly, type BranchScopes } from '../lib/grants/branchRead.js';
