@@ -3,6 +3,7 @@ import type { Prisma } from '../../generated/prisma/index.js';
 import type { Context } from '../../api/graphql/schema/resolvers.helpers.js';
 import { canReadMemory, filterReadableMemoryIds } from '../../mcp/access-control.js';
 import { findEffectiveNodeIdByLoc, systemMemoryChain } from '../effectiveSystemMemory.js';
+import { isBootPromptItselfRole } from '../bootPrompt.js';
 import { locateTeamAgent } from '../../api/graphql/schema/resolvers.worker.js';
 
 export function registerTaskLoc(data: unknown, code: string): string | null {
@@ -100,9 +101,12 @@ export class RegisterData {
   }
 }
 
-/** Not inherited through a chain: a comment, or a boot prompt (the filter `readEntry` applied in SQL before #2950). */
+/**
+ * Not inherited through a chain: a comment, or a boot prompt (the filter `readEntry` applied in SQL before #2950).
+ * #5453: a boot prompt ITSELF. A rule (`boot-prompt.rule`) is inherited, as it was under its old role.
+ */
 export function inheritable(row: Pick<EntryRow, 'nodeType' | 'role'>): boolean {
-  return row.nodeType !== 'comment' && (row.role === null || (row.role !== 'boot-prompt' && !row.role.startsWith('boot-prompt.')));
+  return row.nodeType !== 'comment' && !isBootPromptItselfRole(row.role);
 }
 
 /**

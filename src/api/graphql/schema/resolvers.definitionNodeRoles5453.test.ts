@@ -173,6 +173,39 @@ describe('#5453 guard A by role: one pin per generic door', () => {
     expect((await db.node.findUniqueOrThrow({ where: { id: plain.id } })).role).toBeNull();
   });
 
+  it('door RESTORE (undelete): restoreNode of a retired compiled node is refused and it stays retired', async () => {
+    const c = await compiled();
+    await db.node.update({ where: { id: c.id }, data: { deletedAt: new Date() } });
+    expect(await codeOf((resolvers.Mutation as any).restoreNode(null, { nodeRef: c.id }, ctx()))).toBe('BOOT_PROMPT_COMPILED_WRITE');
+    expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).deletedAt).not.toBeNull();
+  });
+
+  it('door DELETE (subtree): deleting a parent with its descendants is refused while a compiled node is under it', async () => {
+    const c = await compiled();
+    const parent = await mk(memory.id, 'boot');
+    expect(await codeOf((resolvers.Mutation as any).deleteNode(null, { nodeRef: parent.id, recursive: true }, ctx()))).toBe('BOOT_PROMPT_COMPILED_WRITE');
+    expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).deletedAt).toBeNull();
+    expect((await db.node.findUniqueOrThrow({ where: { id: parent.id } })).deletedAt).toBeNull();
+  });
+
+  it('door UPDATE (edges): an edge from a compiled node is not created, changed or removed by a generic write', async () => {
+    const c = await compiled();
+    const other = await mk(memory.id, 'notes:target');
+    const kept = await db.edge.create({ data: { id: generateId(), memoryId: memory.id, loc: 'boot:compiled->notes:target', name: 'compiled-from', sourceId: c.id, targetId: other.id } as never });
+    const M = resolvers.Mutation as any;
+    expect(await codeOf(M.createEdge(null, { sourceRef: c.id, targetRef: other.id, name: 'cites' }, ctx()))).toBe('BOOT_PROMPT_COMPILED_WRITE');
+    expect(await codeOf(M.updateEdge(null, { edgeRef: kept.id, description: 'changed' }, ctx()))).toBe('BOOT_PROMPT_COMPILED_WRITE');
+    expect(await codeOf(M.deleteEdge(null, { edgeRef: kept.id }, ctx()))).toBe('BOOT_PROMPT_COMPILED_WRITE');
+    expect(await db.edge.findMany({ where: { sourceId: c.id }, select: { id: true, name: true, deletedAt: true } })).toEqual([{ id: kept.id, name: 'compiled-from', deletedAt: null }]);
+  });
+
+  it('door CREATE (MCP parent): hadron_create_parent_node at a compiled node\'s address is refused', async () => {
+    const c = await compiled();
+    const out = await mcp().callToolText('hadron_create_parent_node', { urn: urn('boot:compiled'), name: 'Hijack' }).catch((e: Error) => e.message);
+    expect(String(out)).toContain('BOOT_PROMPT_COMPILED_WRITE');
+    expect((await db.node.findUniqueOrThrow({ where: { id: c.id } })).name).toBe('boot:compiled');
+  });
+
   it('door CLONE: a whole-memory copy carries the source and the rule, never the compiled node', async () => {
     await compiled();
     await mk(memory.id, 'boot:source', { nodeType: 'system', role: SOURCE });

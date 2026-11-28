@@ -14,7 +14,7 @@ import { ensureAgentOrgGrant } from '../../../controller/operations/ensureAgentO
 import { lockAuthorityAnchors } from '../../../lib/auth/authorityAnchors.js';
 import { hasBatchGrant } from '../../../lib/grants/bootPromptGrant.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../../lib/workerSignature.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
+import { BOOT_PROMPT_COMPILED_ROLE, BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
 import type { Context } from './resolvers.helpers.js';
 import { compileBootPrompt } from './compileBootPrompt.js';
 import { resolvers } from './resolvers.js';
@@ -41,7 +41,7 @@ const M = resolvers.Mutation as unknown as Record<string, (...a: unknown[]) => P
 const source = (memoryId: string, loc: string, content = 'You are {{worker.name}}.') =>
   db.node.create({ data: { id: generateId(), memoryId, loc, name: loc, content, role: 'boot-prompt' } });
 const compiled = (memoryId: string, loc: string) => withCompileWrite(() => db.node.create({
-  data: { id: generateId(), memoryId, loc, name: 'Compiled', content: 'old', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
+  data: { id: generateId(), memoryId, loc, name: 'Compiled', content: 'old', role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE },
 }));
 const grant = (nodes: string | string[], over: Record<string, unknown> = {}) => insertGrantUnguarded({ appId, userId: admin.id } as unknown as World, {
   user_id: null, worker_id: workerId, action: BATCH, action_values: { compiledNode: nodes }, activated_at: raw(DB_NOW),
@@ -250,7 +250,7 @@ describe('the batch gate before and inside the transaction (Riana F2/F4, Anne F4
     const loc = `boot:workers:${workerId}:compiled`;
     const swap = async (tx: any) => {
       await tx.node.delete({ where: { id: c.id } });
-      await withCompileWrite(() => tx.node.create({ data: { id: generateId(), memoryId: installId, loc, name: 'Compiled', content: 'swapped', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE } }));
+      await withCompileWrite(() => tx.node.create({ data: { id: generateId(), memoryId: installId, loc, name: 'Compiled', content: 'swapped', role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE } }));
     };
     const code = await codeOf(asWorker(() => compileBootPrompt(ctx(), { kind: 'WORKER', workerId }, { seams: { beforeAssemble: swap } } as never)));
     expect(code).toBe('BOOT_PROMPT_COMPILE_NOT_PERMITTED');

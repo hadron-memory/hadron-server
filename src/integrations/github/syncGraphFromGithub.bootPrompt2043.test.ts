@@ -6,7 +6,7 @@ import { db } from '../db/client.js';
 import { cleanDb, createDbOrgAndGraph, makeTmpDir } from '../../test/helpers.js';
 import { generateId } from '../../lib/id.js';
 import { runAsActor } from '../../lib/requestActor.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../lib/bootPrompt.js';
+import { BOOT_PROMPT_COMPILED_ROLE, BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../lib/bootPrompt.js';
 import { WORKER_SIGNATURE_DEFAULTS } from '../../lib/workerSignature.js';
 import { syncGraphFromGithub, type MemoryWithOrg } from './syncGraphFromGithub.js';
 
@@ -46,13 +46,54 @@ describe('git sync and boot prompts (#2043)', () => {
   it('a mirrored file at a compiled node is skipped and the node kept', async () => {
     const c = await withCompileWrite(() => db.node.create({ data: {
       id: generateId(), memoryId: graph.id, loc: 'compiled', name: 'Compiled', content: 'compiled text',
-      role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE,
+      role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE,
     } }));
     mirror('compiled', `id: ${c.id}\nname: Hijacked`, 'forged text');
     expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
     expect(await db.node.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({
-      name: 'Compiled', content: 'compiled text', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE,
+      name: 'Compiled', content: 'compiled text', nodeType: BOOT_PROMPT_NODE_TYPE, role: BOOT_PROMPT_COMPILED_ROLE,
     });
+  });
+
+  // #5453 — the compiled mark is the role now, so each arm of the skip is its own row class.
+  it('#5453: a file that would re-role or retype a compiled node is skipped, and the role is not overwritten', async () => {
+    const c = await withCompileWrite(() => db.node.create({ data: {
+      id: generateId(), memoryId: graph.id, loc: 'compiled', name: 'Compiled', content: 'compiled text',
+      role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE,
+    } }));
+    mirror('compiled', `id: ${c.id}\nname: Hijacked\nrole: boot-prompt.source\ntype: info`, 'forged text');
+    const result = await syncGraphFromGithub(graph);
+    expect(result.error).toBeUndefined();
+    expect(await db.node.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({
+      name: 'Compiled', content: 'compiled text', nodeType: BOOT_PROMPT_NODE_TYPE, role: BOOT_PROMPT_COMPILED_ROLE,
+    });
+  });
+
+  it.each([
+    ['the compiled role', 'role: boot-prompt.compiled\ntype: system'],
+    ['the retired node type', 'role: boot-prompt\ntype: compiled-boot-prompt'],
+  ])('#5453: a file that declares %s creates no node (only a compile writes a compiled prompt)', async (_name, frontmatter) => {
+    mirror('forged', `name: Forged\n${frontmatter}`, 'forged compiled text');
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    expect(await db.node.count({ where: { memoryId: graph.id, loc: 'forged' } })).toBe(0);
+    expect(await db.node.count({ where: { memoryId: graph.id, role: BOOT_PROMPT_COMPILED_ROLE } })).toBe(0);
+  });
+
+  it('#5453: a source file that still carries the bare role and type info is written as it is (the tolerated legacy form)', async () => {
+    mirror('boot-source', 'name: Source\nrole: boot-prompt\ntype: info', 'You are a worker.');
+    expect((await syncGraphFromGithub(graph)).error).toBeUndefined();
+    expect(await db.node.findFirstOrThrow({ where: { memoryId: graph.id, loc: 'boot-source' } })).toMatchObject({ role: 'boot-prompt' });
+  });
+
+  it('#5453 PR A: a worker session\'s sync writes a rule (boot-prompt.rule), as it wrote a boot-prompt-rule one', async () => {
+    const app = await db.app.create({ data: { id: generateId(), name: 'App', urn: 'test-org:app', organizationId: graph.organizationId! } });
+    const agent = await db.agent.create({ data: { id: generateId(), name: 'Agent', urn: 'test-org:agent', organizationId: graph.organizationId! } });
+    await db.appAgent.create({ data: { appId: app.id, agentId: agent.id } });
+    const worker = await db.worker.create({ data: { ...WORKER_SIGNATURE_DEFAULTS, id: generateId(), appId: app.id, agentId: agent.id, name: 'Iris', slug: 'iris' } });
+    mirror('rule', 'name: Rule\nrole: boot-prompt.rule\ntype: system', 'Post in the channel.');
+    const result = await runAsActor({ workerId: worker.id, agentId: null }, () => syncGraphFromGithub(graph));
+    expect(result.error).toBeUndefined();
+    expect(await db.node.findFirstOrThrow({ where: { memoryId: graph.id, loc: 'rule' } })).toMatchObject({ role: 'boot-prompt.rule' });
   });
 
   it('a worker session\'s sync that would write a boot-prompt node is refused', async () => {
@@ -72,7 +113,7 @@ describe('git sync and boot prompts (#2043)', () => {
   it('repo-wins cleanup keeps a compiled node whose file is gone, and prunes an ordinary repo row (control)', async () => {
     const compiledRow = await withCompileWrite(() => db.node.create({ data: {
       id: generateId(), memoryId: graph.id, loc: 'compiled', name: 'Compiled', content: 'compiled text',
-      role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE, ownerRepo: 'test/repo',
+      role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE, ownerRepo: 'test/repo',
     } }));
     const ordinary = await db.node.create({ data: { id: generateId(), memoryId: graph.id, loc: 'gone', name: 'Gone', content: 'x', ownerRepo: 'test/repo' } });
     mirror('other', 'name: Other', 'present');

@@ -38,7 +38,7 @@ import { splitNodeUrn } from '@hadron-memory/urn-lib-js';
 import { isLifecycleActive } from '@hadron-memory/access-control';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { agentBaseChain } from '../agentBase.js';
-import { isBootPromptRole } from '../bootPrompt.js';
+import { isBootPromptItselfRole } from '../bootPrompt.js';
 import { IncludeSyntaxError, locateIncludeTags, type IncludeTag } from '../includes/parseIncludeTags.js';
 import {
   effectiveIncludeSettings,
@@ -287,14 +287,16 @@ export async function assembleBootPrompt(
       if (!found && rows.some((r) => r.deletedAt)) sawTombstone = true;
       const row = rows.find((r) => !r.deletedAt);
       if (!row) continue;
-      // A base's boot prompt is never inherited (R8); only the child's own and the install's count.
+      // A base's boot prompt is never inherited (R8); only the child's own and the install's count. #5453: that means
+      // a base's source and compiled node (and the bare role), never a base's RULE. A rule is in the family now, and
+      // derived Agents include their base's rules by loc: the family test here would skip them and stop every such compile.
       const isBase = installFirst ? i >= 2 : i >= 1;
-      if (isBase && isBootPromptRole(row.role)) continue;
+      if (isBase && isBootPromptItselfRole(row.role)) continue;
       if (!found) {
         found = { node: row };
         // Only an install node can replace; anything else ends the lookup at its first hit.
         if (!(installFirst && i === 0)) break;
-      } else if (!isBootPromptRole(row.role)) {
+      } else if (!isBootPromptItselfRole(row.role)) {
         // The Agent-chain node the install node shadows: the nearest one that is not a boot prompt.
         found.replacesNodeId = row.id;
         break;

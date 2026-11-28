@@ -1,4 +1,4 @@
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertBootPromptWriteAllowed, bootPromptCompiledWriteError, isBootPromptRole } from '../../lib/bootPrompt.js';
+import { RETIRED_COMPILED_BOOT_PROMPT_NODE_TYPE, assertBootPromptWriteAllowed, bootPromptCompiledWriteError, isBootPromptRole } from '../../lib/bootPrompt.js';
 import { assertIncludesWritable, syncDerivedIncludesEdges } from '../../lib/includes/writeIncludes.js';
 import type { Prisma } from '../../generated/prisma/index.js';
 import type { Node } from '../../index.d.js';
@@ -75,9 +75,10 @@ const createNodeAsSystem = async (
     if (prior && (!existing || existing.loc !== loc || existing.memoryId !== node.memoryId)) {
       throw new Error(`createNode: the node at "${loc}" moved during the write; retry.`);
     }
-    // #2043 — defensive: no boot-prompt role or compiled marker reaches this
-    // legacy path today (memory-root creation only); a future caller must not reopen it.
-    if (isBootPromptRole((node as { role?: string | null }).role) || (node as { nodeType?: string | null }).nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE) {
+    // #2043 — defensive: no boot-prompt role reaches this legacy path today (memory-root creation only); a future
+    // caller must not reopen it. #5453: the compiled marker is a role in that family, so the family test covers it;
+    // the retired node type is refused beside it so it never reaches the database CHECK.
+    if (isBootPromptRole((node as { role?: string | null }).role) || (node as { nodeType?: string | null }).nodeType === RETIRED_COMPILED_BOOT_PROMPT_NODE_TYPE) {
       throw bootPromptCompiledWriteError('create', 'produces');
     }
     assertBootPromptWriteAllowed(existing, {}, 'update');

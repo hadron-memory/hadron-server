@@ -1,5 +1,6 @@
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../../generated/prisma/index.js';
+import { isBootPromptSourceRole } from '../bootPrompt.js';
 
 /** Internal identities discovered and authorized by the compile coordinator, never public input. */
 export type CompileSourceTarget =
@@ -44,8 +45,9 @@ export async function sourceForCompile(
     });
     // R83: tombstoned App sources count as absent even if their old role is invalid.
     if (!row || row.deletedAt) return null;
-    const bootRole = row.role === 'boot-prompt' || row.role?.startsWith('boot-prompt.');
-    if (!bootRole || row.nodeType === 'compiled-boot-prompt') {
+    // #5453 Ask 3: a source by role. In the family, and neither compiled nor a rule; the bare `boot-prompt` a mirrored
+    // source may still carry passes. The node type decides nothing.
+    if (!isBootPromptSourceRole(row.role)) {
       throw new GraphQLError('The boot prompt source is invalid.', {
         extensions: { code: 'BOOT_PROMPT_SOURCE_INVALID' },
       });

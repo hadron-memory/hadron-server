@@ -2,7 +2,7 @@ import { ENGINE_KEYS } from '../../lib/chatRootEngineState.js';
 import { softDeleteMemoryAssets } from '../../lib/asset/memoryDelete.js';
 import { resetEmbeddingObligations, stampEmbeddingObligation } from '../../services/embedding/obligation.js';
 import { memoryIsVectorIndexed } from '../../lib/embedding/indexing.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptMergeCollisions, assertNoBootPromptRows, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
+import { NOT_COMPILED_BOOT_PROMPT_WHERE, assertNoBootPromptMergeCollisions, assertNoBootPromptRows, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
 import { resyncDerivedIncludesForNodes } from '../../lib/includes/writeIncludes.js';
 import { assertRoleWritersForNodes, type RoleWriterPrincipal } from '../../lib/nodeRoleWriters.js';
 import type { Prisma, PrismaClient } from '../../generated/prisma/index.js';
@@ -262,7 +262,7 @@ export async function mergeMemoryGraph(
     const committed = progress.relocatedCount + progress.foldedCount + progress.edgesMovedCount + progress.edgesDroppedCount;
     if (committed === 0) throw error;
     const remainingSourceNodes = await db.node
-      .count({ where: { memoryId: args.sourceMemoryId, deletedAt: null, nodeType: { notIn: [COMMENT_NODE_TYPE, COMPILED_BOOT_PROMPT_NODE_TYPE] } } })
+      .count({ where: { memoryId: args.sourceMemoryId, deletedAt: null, nodeType: { not: COMMENT_NODE_TYPE }, AND: [NOT_COMPILED_BOOT_PROMPT_WHERE] } })
       .catch(() => null);
     throw withPartialMerge(error, {
       applied: true,
@@ -434,7 +434,7 @@ async function runMerge(
     let count = 0;
     for (let cursor: string | undefined; ; ) {
       const page = await db.node.findMany({
-        where: { memoryId: sourceMemoryId, deletedAt: null, nodeType: { notIn: [COMMENT_NODE_TYPE, COMPILED_BOOT_PROMPT_NODE_TYPE] }, ...(cursor ? { id: { gt: cursor } } : {}) },
+        where: { memoryId: sourceMemoryId, deletedAt: null, nodeType: { not: COMMENT_NODE_TYPE }, AND: [NOT_COMPILED_BOOT_PROMPT_WHERE], ...(cursor ? { id: { gt: cursor } } : {}) },
         select: { id: true, loc: true },
         orderBy: { id: 'asc' },
         take: classifyPage,
@@ -498,7 +498,7 @@ async function runMerge(
     const page = await db.node.findMany({
       // #1664 — comments never relocate on their own: each moves in its
       // target's transaction (carryThreadsInTx).
-      where: { memoryId: sourceMemoryId, deletedAt: null, nodeType: { notIn: [COMMENT_NODE_TYPE, COMPILED_BOOT_PROMPT_NODE_TYPE] }, ...(cursor ? { id: { gt: cursor } } : {}) },
+      where: { memoryId: sourceMemoryId, deletedAt: null, nodeType: { not: COMMENT_NODE_TYPE }, AND: [NOT_COMPILED_BOOT_PROMPT_WHERE], ...(cursor ? { id: { gt: cursor } } : {}) },
       select: { id: true, loc: true },
       orderBy: { id: 'asc' },
       take: classifyPage,

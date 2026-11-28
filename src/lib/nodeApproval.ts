@@ -5,7 +5,7 @@ import { computeApprovalHash, type ApprovalHashFields } from './approvalHash.js'
 import type { EncryptionKey } from './crypto.js';
 import { decryptNodeFieldsWithKey } from './nodeCrypto.js';
 import { ensureCurrentNodeRevisionInTransaction, RECONCILE_EDITOR_INFO, type SnapshotEditor } from './nodeRevisionSnapshot.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, boundWorkerId, isBootPromptRole } from './bootPrompt.js';
+import { boundWorkerId, isBootPromptRole, isCompiledBootPromptRole } from './bootPrompt.js';
 import { findBatchGrant } from './grants/bootPromptGrant.js';
 import { BOOT_PROMPT_APPROVAL_MESSAGES, type BootPromptApprovalGate, type BootPromptApprovalRefusalCode } from './bootPromptApproval.js';
 
@@ -191,7 +191,7 @@ export async function approveNodeInTransaction(
       // #3823 (ruling 0267, cor:agt:040:18 r9, R30's one exception): a worker session approves a COMPILED prompt only under a live
       // batch grant that names it. The approval is recorded as the worker's, never as its holder's, and it never signs.
       const workerId = boundWorkerId();
-      const batchGrantId = gate.refusal === 'BOOT_PROMPT_WORKER_SESSION_REFUSED' && workerId && opts.workerSessionMayUseBatch === true && row.node_type === COMPILED_BOOT_PROMPT_NODE_TYPE
+      const batchGrantId = gate.refusal === 'BOOT_PROMPT_WORKER_SESSION_REFUSED' && workerId && opts.workerSessionMayUseBatch === true && isCompiledBootPromptRole(row.role)
         ? await findBatchGrant(tx, workerId, { id: row.id, memoryId: row.memory_id, loc: row.loc }, true)
         : null;
       if (!batchGrantId) throw new NodeApprovalRefusal(gate.refusal, BOOT_PROMPT_APPROVAL_MESSAGES[gate.refusal], { op: 'approve' });

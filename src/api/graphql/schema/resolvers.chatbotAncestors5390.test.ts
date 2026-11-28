@@ -67,7 +67,7 @@ describe('#5390 which parents a loc needs', () => {
 });
 
 describe('#5390 GraphQL createNode (the portal\'s Conversation Editor and wizard path)', () => {
-  it('a conversation, a stage and a prompt leave no loc without its parent, and the parents are empty info nodes', async () => {
+  it('a conversation, a stage and a prompt leave no loc without its parent, and the parents are empty system nodes with no role (#5453)', async () => {
     const a = await bareAgent('ky');
     await create(a.memoryId, 'conversations:welcome', { data: { stageOrder: ['greet'] } });
     await create(a.memoryId, 'conversations:welcome:greet', { data: { promptRef: 'prompts:welcome:greet' } });
@@ -75,7 +75,7 @@ describe('#5390 GraphQL createNode (the portal\'s Conversation Editor and wizard
     expect(await liveLocs(a.memoryId)).toEqual(['conversations', 'conversations:welcome', 'conversations:welcome:greet', 'prompts', 'prompts:welcome', 'prompts:welcome:greet']);
     for (const loc of ['conversations', 'prompts', 'prompts:welcome']) {
       const n = await nodeAt(a.memoryId, loc);
-      expect([n!.nodeType, n!.content, n!.data]).toEqual(['info', null, null]);
+      expect([n!.nodeType, n!.role, n!.content, n!.data]).toEqual(['system', null, null, null]);
     }
     expect((await nodeAt(a.memoryId, 'conversations'))!.name).toBe('Conversations');
     expect((await nodeAt(a.memoryId, 'prompts'))!.name).toBe('Prompts');
@@ -193,7 +193,10 @@ describe('#5390 skeleton and retrofit', () => {
   it('a new Agent starts with `conversations` and `prompts`', async () => {
     const a = await resolvers.Mutation.createAgent({}, { orgRef: orgId, name: 'fresh', visibility: 'ORGANIZATION' }, { db, roles: ['ADMIN'], userId } as never) as unknown as { systemMemoryId: string };
     const n = await nodeAt(a.systemMemoryId, 'conversations');
-    expect([n!.name, n!.nodeType]).toEqual(['Conversations', 'info']);
+    // #5453 Ask 8: the skeleton writes the definition parents as `system`; `processes` and `tasks` are not in the ruled set.
+    expect([n!.name, n!.nodeType, n!.role]).toEqual(['Conversations', 'system', null]);
+    for (const loc of ['boot', 'boot:rules', 'prompts']) expect((await nodeAt(a.systemMemoryId, loc))!.nodeType, loc).toBe('system');
+    for (const loc of ['processes', 'tasks']) expect((await nodeAt(a.systemMemoryId, loc))!.nodeType, loc).toBe('info');
     expect((await nodeAt(a.systemMemoryId, 'prompts'))!.name).toBe('Prompts');
   });
 

@@ -191,7 +191,7 @@ describe('item 2: a comment anchor is refused as hadron_delete_edge refuses it',
 
 describe('item 3: the missing cases', () => {
   it('a compiled boot-prompt source: removeEdges and addEdges are refused, and nothing is written', async () => {
-    const boot = await node('boot:compiled', 'Compiled', { nodeType: 'compiled-boot-prompt', role: 'boot-prompt' });
+    const boot = await node('boot:compiled', 'Compiled', { nodeType: 'system', role: 'boot-prompt.compiled' });
     const be = await edgeFrom(boot, t1, 'rel');
     const viaDelete = await call('hadron_delete_edge', { edgeRef: be.id });
     expect(viaDelete).toMatch(/boot/i);

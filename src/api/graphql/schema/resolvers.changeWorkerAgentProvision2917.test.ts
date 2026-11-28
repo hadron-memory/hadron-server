@@ -39,7 +39,7 @@ const side = async () => ({
 async function includeFrom(target: any, from: any[]) {
   const t = await db.agent.findUniqueOrThrow({ where: { id: target.id } });
   const source = await db.node.create({ data: { id: generateId(), memoryId: t.systemMemoryId!, loc: `boot:source:${generateId()}`, name: 'src', content: 'src', role: 'boot-prompt' } });
-  const compiled = await db.node.create({ data: { id: generateId(), memoryId: t.systemMemoryId!, loc: `boot:compiled:${generateId()}`, name: 'c', content: 'compiled', role: 'boot-prompt', nodeType: 'compiled-boot-prompt' } });
+  const compiled = await db.node.create({ data: { id: generateId(), memoryId: t.systemMemoryId!, loc: `boot:compiled:${generateId()}`, name: 'c', content: 'compiled', role: 'boot-prompt.compiled', nodeType: 'system' } });
   const occ = (order: number, nodeId: string, kind: string, parent: number | null, depth: number) =>
     ({ order, depth, parent, kind, nodeId, revNo: 1, hash: sha256Hex(nodeId), selection: { rev: null, approved: false, signed: false } });
   const occs = [occ(0, source.id, 'source', null, 0)];

@@ -8,7 +8,7 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb } from '../test/helpers.js';
 import { generateId } from '../lib/id.js';
 import { computeApprovalHash } from '../lib/approvalHash.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../lib/bootPrompt.js';
+import { BOOT_PROMPT_COMPILED_ROLE, BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../lib/bootPrompt.js';
 import { sha256Hex, type CompiledProvenance } from '../lib/bootCompile/provenance.js';
 
 vi.mock('../lib/bus/index.js', () => ({ getBusClient: vi.fn(async () => null) }));
@@ -50,7 +50,7 @@ const provenance = (): CompiledProvenance => ({
   occurrences: [{ order: 0, depth: 0, parent: null, kind: 'source', nodeId: 'src', revNo: 1, hash: sha256Hex('src'), selection: { rev: null, approved: true, signed: false } }],
 });
 async function compiledPointer(content: string) {
-  const node = await withCompileWrite(() => db.node.create({ data: { id: generateId(), memoryId, loc: 'boot:compiled', name: 'compiled', content, role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE } }));
+  const node = await withCompileWrite(() => db.node.create({ data: { id: generateId(), memoryId, loc: 'boot:compiled', name: 'compiled', content, role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE } }));
   await db.compiledPromptRevision.create({ data: { compiledNodeId: node.id, compiledRevNo: 1, contentHash: sha256Hex(content), targetKind: 'AGENT', targetAgentId: agentId, provenance: provenance() as never, occurrenceCount: 1 } });
   await db.node.update({ where: { id: node.id }, data: { approvedRevNo: 1, approvedAt: new Date(), approvedByInfo: 't', approvalHash: computeApprovalHash({ title: 'compiled', abstract: null, content }) } });
   await db.agent.update({ where: { id: agentId }, data: { bootPromptNodeId: node.id, bootPromptUrn: `u:${node.id}` } });

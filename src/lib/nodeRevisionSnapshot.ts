@@ -23,6 +23,7 @@ import type { PrismaClient } from '../generated/prisma/index.js';
 import { generateId } from './id.js';
 import { clearNodeAuthorship } from './nodeAuthorship.js';
 import { normalizeRole } from './enforceNodeSchema.js';
+import { modernBootPromptKind } from './bootPrompt.js';
 import { isQuestionFamilyRole } from './questions/index.js';
 import { computeApprovalHash } from './approvalHash.js';
 import { newestApprovedRevisionOf } from './nodeApproval.js';
@@ -659,9 +660,13 @@ export function restorableNodeFields(revision: {
     tags: (revision.tags ?? []) as string[],
   };
   if (revision.nodeType == null) return base;
+  // #5453: a revision captured before the definition-node migration holds a source as `info` / `boot-prompt`, a rule
+  // as `info` / `boot-prompt-rule` and a compiled prompt under its retired node type. History rows are left as they
+  // were captured; a restore writes today's kind, so no restore brings the retired type or the bare role back.
+  const kind = modernBootPromptKind({ nodeType: revision.nodeType, role: revision.role });
   return {
     ...base,
-    nodeType: revision.nodeType,
+    nodeType: kind.nodeType,
     objectType: revision.objectType,
     isLink: revision.isLink ?? false,
     properties: revision.properties,
@@ -676,7 +681,7 @@ export function restorableNodeFields(revision: {
     // #1219: a historical '' (stored before the normalization) is the one
     // exception — restoring it RAW would resurrect a shape no write path can
     // produce anymore, so it restores as what it always meant: no role.
-    role: normalizeRole(revision.role) ?? null,
+    role: normalizeRole(kind.role) ?? null,
     llmModel: revision.llmModel,
     aiAgent: revision.aiAgent,
     authorshipKind: revision.authorshipKind,

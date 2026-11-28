@@ -220,7 +220,7 @@ describe('#1337 clone carries the rulebook', () => {
 
   it('a node type the clone does not copy becomes null, and an existing but empty config is carried as an empty config', async () => {
     const comment = generateId();
-    await db.node.create({ data: { id: comment, memoryId: srcId, loc: 'boot:compiled', name: 'compiled', nodeType: 'compiled-boot-prompt', role: 'boot-prompt' } as never });
+    await db.node.create({ data: { id: comment, memoryId: srcId, loc: 'boot:compiled', name: 'compiled', nodeType: 'system', role: 'boot-prompt.compiled' } as never });
     const config = await db.memoryConfig.create({ data: { id: generateId(), memoryId: srcId } });
     await db.nodeRoleRule.create({ data: { id: generateId(), configId: config.id, role: 'ext', authorTaskId: comment, authorTaskRequired: true } });
     const res = await clone();

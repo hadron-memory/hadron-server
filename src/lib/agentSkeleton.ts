@@ -23,27 +23,31 @@
  * - NEVER OVERWRITE. A loc that has any row in the memory, live or tombstoned, is left alone: its name and
  *   content are not touched, and a tombstone is not revived (the (loc, memory) key is unique anyway).
  * - `tasksIndexRef` / `processesIndexRef` are never read or written here (cor:dmo:050:15, :16).
+ * - TYPE `system` for the four parents that hold an Agent's definition nodes (#5453 Ask 8, Holger 2026-11-27):
+ *   `boot`, `boot:rules`, `conversations`, `prompts`, the same set the #5453 migration retypes. Until then every
+ *   skeleton node was `info` (no type passed) while the portal wrote the same locs as `system`. `processes` and
+ *   `tasks` are not in the ruled set and stay `info`, here and in the migration.
  */
 
 import type { Prisma, PrismaClient } from '../generated/prisma/index.js';
 import { generateId } from './id.js';
 import { findEffectiveNodeIdByLoc } from './effectiveSystemMemory.js';
-import { seedChatbotContainers } from './chatbotAncestors.js';
+import { DEFINITION_PARENT_NODE_TYPE, seedChatbotContainers } from './chatbotAncestors.js';
 
 type Db = Prisma.TransactionClient | PrismaClient;
 
-/** One skeleton parent. */
-export type SkeletonNode = { loc: string; name: string; description: string };
+/** One skeleton parent. `nodeType` absent means the default (`info`). */
+export type SkeletonNode = { loc: string; name: string; description: string; nodeType?: 'system' };
 
 /** The skeleton, parents before children. */
 export const AGENT_SKELETON: readonly SkeletonNode[] = [
-  { loc: 'boot', name: 'Boot Instructions', description: 'Parent of the Agent\'s boot prompt source, its compiled prompt and the rules a boot prompt includes.' },
-  { loc: 'boot:rules', name: 'Boot Prompt Rules', description: 'Parent of the rule nodes a boot prompt includes with an include tag.' },
+  { loc: 'boot', name: 'Boot Instructions', description: 'Parent of the Agent\'s boot prompt source, its compiled prompt and the rules a boot prompt includes.', nodeType: DEFINITION_PARENT_NODE_TYPE },
+  { loc: 'boot:rules', name: 'Boot Prompt Rules', description: 'Parent of the rule nodes a boot prompt includes with an include tag.', nodeType: DEFINITION_PARENT_NODE_TYPE },
   { loc: 'processes', name: 'Processes', description: 'Parent of the Agent\'s processes.' },
   { loc: 'tasks', name: 'Tasks', description: 'Parent of the Agent\'s tasks.' },
   // #5390 — the same names and descriptions a conversation or prompt write gives these parents (chatbotAncestors.ts).
-  { loc: 'conversations', name: 'Conversations', description: 'Parent of the Agent\'s conversations.' },
-  { loc: 'prompts', name: 'Prompts', description: 'Parent of the Agent\'s prompt templates, one parent per conversation.' },
+  { loc: 'conversations', name: 'Conversations', description: 'Parent of the Agent\'s conversations.', nodeType: DEFINITION_PARENT_NODE_TYPE },
+  { loc: 'prompts', name: 'Prompts', description: 'Parent of the Agent\'s prompt templates, one parent per conversation.', nodeType: DEFINITION_PARENT_NODE_TYPE },
 ];
 
 /**
@@ -62,7 +66,7 @@ export async function seedAgentSkeleton(db: Db, memoryId: string, createdBy: str
     const tomb = await db.node.findFirst({ where: { memoryId, loc: node.loc }, select: { id: true } });
     if (tomb) continue;
     await db.node.create({
-      data: { id: generateId(), memoryId, loc: node.loc, name: node.name, description: node.description, createdBy },
+      data: { id: generateId(), memoryId, loc: node.loc, name: node.name, description: node.description, createdBy, ...(node.nodeType ? { nodeType: node.nodeType } : {}) },
     });
     created.push(node.loc);
   }

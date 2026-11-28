@@ -7,24 +7,27 @@ import {
   ORDINARY_NODE_TYPES_TEXT,
   PLATFORM_DEFINED_NODE_TYPES,
 } from './nodeTypes.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE } from './bootPrompt.js';
+import { BOOT_PROMPT_NODE_TYPE, RETIRED_COMPILED_BOOT_PROMPT_NODE_TYPE } from './bootPrompt.js';
 
 const read = (p: string) => readFileSync(new URL(p, import.meta.url), 'utf8');
 
 describe('#909 slice (a): one canonical node-type list', () => {
-  it('names the eight ordinary values and the four platform kinds', () => {
+  it('names the eight ordinary values and the two platform kinds (#5453: compiled-boot-prompt and task left)', () => {
     expect([...ORDINARY_NODE_TYPES]).toEqual([
       'abstract', 'chat', 'data', 'info', 'prompt', 'record', 'reference', 'system',
     ]);
-    expect([...PLATFORM_DEFINED_NODE_TYPES]).toEqual(['task', 'comment', 'chat-message', 'compiled-boot-prompt']);
-    expect(NODE_TYPES).toHaveLength(12);
+    expect([...PLATFORM_DEFINED_NODE_TYPES]).toEqual(['comment', 'chat-message']);
+    expect(NODE_TYPES).toHaveLength(10);
     expect(new Set(NODE_TYPES).size).toBe(NODE_TYPES.length);
   });
 
   it('agrees with the schema default and the boot-prompt kind', () => {
     expect(DEFAULT_NODE_TYPE).toBe('info');
     expect(read('../../prisma/schema.prisma')).toContain('nodeType            String              @default("info")');
-    expect(NODE_TYPES).toContain(COMPILED_BOOT_PROMPT_NODE_TYPE);
+    // #5453: a boot-prompt node is an ordinary `system` node; the type a compiled prompt used to carry is not in the vocabulary.
+    expect(ORDINARY_NODE_TYPES).toContain(BOOT_PROMPT_NODE_TYPE);
+    expect(NODE_TYPES as readonly string[]).not.toContain(RETIRED_COMPILED_BOOT_PROMPT_NODE_TYPE);
+    expect(NODE_TYPES as readonly string[]).not.toContain('task');
     expect(ORDINARY_NODE_TYPES_TEXT).toContain('info (default)');
   });
 

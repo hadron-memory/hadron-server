@@ -330,7 +330,7 @@ it('#3476 licensed DERIVED compile still succeeds through the unchanged compile 
   const agent = await db.agent.findUniqueOrThrow({ where: { id: target.id } });
   await db.node.create({ data: { memoryId: agent.systemMemoryId!, loc: 'boot:source', name: 'Source', content: 'Compile control', role: 'boot-prompt' } });
   const compiled = await compileBootPrompt(ctx(), { kind: 'APP_AGENT', appId: app.id, agentId: target.id });
-  expect(await db.node.findUniqueOrThrow({ where: { id: compiled.nodeId } })).toMatchObject({ content: 'Compile control', nodeType: 'compiled-boot-prompt' });
+  expect(await db.node.findUniqueOrThrow({ where: { id: compiled.nodeId } })).toMatchObject({ content: 'Compile control', nodeType: 'system', role: 'boot-prompt.compiled' });
 });
 
 it('#3476 physical ROW compile still reports a retired target after permission', async () => {

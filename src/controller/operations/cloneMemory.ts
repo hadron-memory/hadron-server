@@ -1,5 +1,5 @@
 import { lockMemoriesForChannelChange } from '../../lib/channels.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
+import { NOT_COMPILED_BOOT_PROMPT_WHERE, assertNoBootPromptRowsForWorkerSession } from '../../lib/bootPrompt.js';
 import { assertCopiedIncludesWritable, resyncDerivedIncludesForNodes, type ReadableMemoryIds } from '../../lib/includes/writeIncludes.js';
 import type { PrismaClient } from '../../generated/prisma/index.js';
 import { COMMENT_NODE_TYPE } from '../../lib/comments/index.js';
@@ -196,10 +196,11 @@ export async function cloneMemoryGraph(
 /** The source nodes a clone copies. */
 function copyableNodeWhere(memoryId: string): Prisma.NodeWhereInput {
   return {
-    memoryId, deletedAt: null, nodeType: { notIn: [COMMENT_NODE_TYPE, COMPILED_BOOT_PROMPT_NODE_TYPE] },
+    memoryId, deletedAt: null, nodeType: { not: COMMENT_NODE_TYPE },
     // #1641 §3.2 — nor questions or their logs: a copy would mint questions
     // no question operation wrote, under codes that belong to the source log.
-    AND: [NOT_QUESTION_FAMILY_WHERE],
+    // #2043 / #5453 — nor a compiled boot prompt (by role): only a compile writes one.
+    AND: [NOT_QUESTION_FAMILY_WHERE, NOT_COMPILED_BOOT_PROMPT_WHERE],
   };
 }
 

@@ -7,7 +7,7 @@ import { OWNER_LIMIT_NO_NUMBER_MESSAGE, OwnerLimitReachedError } from '../../lib
 import { GitCommandError } from './execGit.js';
 import { syncFailureText } from './syncErrorText.js';
 import { stampEmbeddingObligation } from '../../services/embedding/obligation.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRows, assertNoWorkerSessionBootPromptWrite, boundWorkerId, withSyncCaller } from '../../lib/bootPrompt.js';
+import { NOT_COMPILED_BOOT_PROMPT_WHERE, RETIRED_COMPILED_BOOT_PROMPT_NODE_TYPE, assertNoBootPromptRows, assertNoWorkerSessionBootPromptWrite, boundWorkerId, isCompiledBootPrompt, isCompiledBootPromptRole, withSyncCaller } from '../../lib/bootPrompt.js';
 import { currentActor } from '../../lib/requestActor.js';
 import { assertIncludesWritable, prospectiveNodeId, includeRefusalCode, storedIncludeTags, syncDerivedIncludesEdges } from '../../lib/includes/writeIncludes.js';
 import { runAsSystem } from '../../lib/requestActor.js';
@@ -1174,7 +1174,10 @@ const syncGraphFromGithubAsSystem = async (
           // a file landing on one is skipped and the node kept. A worker session's
           // sync that would create or change any boot-prompt node is refused whole
           // (cor:agt:040:11); the server's own webhook/startup syncs carry no worker.
-          if (prior?.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE || node.nodeType === COMPILED_BOOT_PROMPT_NODE_TYPE) {
+          // #5453 — compiled by ROLE: the live row's, or the role the file declares. A file that still
+          // declares the retired node type is skipped the same way, so it never reaches the CHECK.
+          if (isCompiledBootPrompt(prior) || isCompiledBootPromptRole(governedSignalsFromMirror(node).role)
+            || node.nodeType === RETIRED_COMPILED_BOOT_PROMPT_NODE_TYPE) {
             reportEntries.push({ kind: 'protected', loc, code: 'PROTECTED_BOOT_PROMPT' });
             console.warn(`[syncGraphFromGithub] "${graphName}": skipped ${loc} — it is a compiled boot prompt, written only by a compile`);
             if (prior) protectedRowIds.add(prior.id);
@@ -1556,8 +1559,8 @@ const syncGraphFromGithubAsSystem = async (
             : {}),
           ...unreadableLocFilter,
           // #2043 — repo-wins cleanup never removes a compiled boot prompt, file or no file:
-          // only a compile (or a deliberate delete) removes one.
-          nodeType: { not: COMPILED_BOOT_PROMPT_NODE_TYPE },
+          // only a compile (or a deliberate delete) removes one. #5453: by role (NULL-safe).
+          AND: [NOT_COMPILED_BOOT_PROMPT_WHERE],
         };
         const pruned = await tx.node.findMany({ where: cleanupWhere, select: { id: true, loc: true } });
         // #2043 (cor:agt:040:11) — nor does a worker session's sync delete a boot-prompt source.

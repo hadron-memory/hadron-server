@@ -146,7 +146,7 @@ describe.each(spellings)('one reference in the caller\'s own memory, by %s', (by
   it('mergeNodes: other compiled boot prompt source', async () => {
     const f = await fixture();
     const special = await f.mkNode(f.held, f.writer.id, 'special');
-    await db.node.update({ where: { id: special.id }, data: { nodeType: 'compiled-boot-prompt', role: 'boot-prompt' } });
+    await db.node.update({ where: { id: special.id }, data: { nodeType: 'system', role: 'boot-prompt.compiled' } });
     expect(await answer(merge(userCtx(f.neighbour.id), special[by], f.mine[by]))).toEqual(sourceMissing);
   });
 });

@@ -15,7 +15,7 @@ import { cleanDb } from '../../../test/helpers.js';
 import { insertSoftPasskey, softPasskey } from '../../../test/softPasskey.js';
 import { generateId } from '../../../lib/id.js';
 import { computeApprovalHash } from '../../../lib/approvalHash.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
+import { BOOT_PROMPT_COMPILED_ROLE, BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
 import { sha256Hex, type CompiledProvenance } from '../../../lib/bootCompile/provenance.js';
 import { NEWEST_APPROVED_REVISION_SCAN_BATCHES, NEWEST_APPROVED_REVISION_SCAN_CAP, newestApprovedAndSignedRevisionForServe } from '../../../lib/nodeApproval.js';
 import { lazyRevisionSignatureStatus } from '../../../lib/signing/revisionSignatureCounts.js';
@@ -74,7 +74,7 @@ async function seedInstalls(count: number, from = 0, appId: string = app.id) {
   await db.agent.createMany({ data: ids.map((x) => ({ id: x.agentId, name: `a${x.i}`, urn: `${org.urn}:a${x.i}-${x.tag}`, organizationId: org.id, systemMemoryId: x.memoryId })) as never });
   await withCompileWrite(() => db.node.createMany({
     data: ids.map((x) => ({
-      id: x.nodeId, memoryId: x.memoryId, loc: `boot:${x.nodeId}`, name: 'compiled', content: x.content, role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE,
+      id: x.nodeId, memoryId: x.memoryId, loc: `boot:${x.nodeId}`, name: 'compiled', content: x.content, role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE,
     })) as never,
   }));
   // approval cannot be set at insert; every seeded node holds the same text, so one update approves them all
@@ -92,7 +92,7 @@ async function mkAgent(name: string) {
   return { agentId, memoryId };
 }
 async function compiled(memoryId: string, agentId: string, content: string, approve = true) {
-  const node = await withCompileWrite(() => db.node.create({ data: { id: generateId(), memoryId, loc: `boot:${generateId()}`, name: 'compiled', content, role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE } }));
+  const node = await withCompileWrite(() => db.node.create({ data: { id: generateId(), memoryId, loc: `boot:${generateId()}`, name: 'compiled', content, role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE } }));
   await db.compiledPromptRevision.create({ data: { compiledNodeId: node.id, compiledRevNo: 1, contentHash: sha256Hex(content), targetKind: 'AGENT', targetAgentId: agentId, provenance: prov() as never, occurrenceCount: 1 } });
   if (approve) await approveLive(node.id);
   return node.id as string;
@@ -196,7 +196,7 @@ describe('#4016 the set-wise preview equals the per-target serve, row for row', 
     await installPointer(memGone.agentId, await compiled(memGone.memoryId, memGone.agentId, 'mg'));
     await db.memory.update({ where: { id: memGone.memoryId }, data: { deletedAt: new Date() } });
     const noCompile = await mkAgent('noCompile');
-    const bare = await withCompileWrite(() => db.node.create({ data: { id: generateId(), memoryId: noCompile.memoryId, loc: `boot:${generateId()}`, name: 'compiled', content: 'x', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE } }));
+    const bare = await withCompileWrite(() => db.node.create({ data: { id: generateId(), memoryId: noCompile.memoryId, loc: `boot:${generateId()}`, name: 'compiled', content: 'x', role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE } }));
     await approveLive(bare.id);
     await installPointer(noCompile.agentId, bare.id);
     // a compile record whose provenance does not parse: the serve throws, so the preview must throw the same thing
@@ -226,7 +226,7 @@ describe('#4016 the set-wise preview equals the per-target serve, row for row', 
 
   it('a compile record that does not parse is thrown exactly as the per-target serve throws it, never a silent row', async () => {
     const bad = await mkAgent('bad');
-    const node = (await withCompileWrite(() => db.node.create({ data: { id: generateId(), memoryId: bad.memoryId, loc: `boot:${generateId()}`, name: 'compiled', content: 'bad', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE } }))).id as string;
+    const node = (await withCompileWrite(() => db.node.create({ data: { id: generateId(), memoryId: bad.memoryId, loc: `boot:${generateId()}`, name: 'compiled', content: 'bad', role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE } }))).id as string;
     await db.compiledPromptRevision.create({ data: { compiledNodeId: node, compiledRevNo: 1, contentHash: sha256Hex('bad'), targetKind: 'AGENT', targetAgentId: bad.agentId, provenance: prov() as never, occurrenceCount: 7 } });
     await approveLive(node);
     await installPointer(bad.agentId, node);

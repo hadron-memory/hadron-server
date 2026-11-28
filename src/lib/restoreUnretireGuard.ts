@@ -18,7 +18,7 @@
  */
 import { GraphQLError } from 'graphql';
 import type { Prisma } from '../generated/prisma/index.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE } from './bootPrompt.js';
+import { BOOT_PROMPT_COMPILED_ROLE } from './bootPrompt.js';
 
 export const SUPERSEDED_TAG = 'superseded';
 export const RESTORE_WOULD_UNRETIRE_SPEC = 'RESTORE_WOULD_UNRETIRE_SPEC';
@@ -66,7 +66,7 @@ export async function assertRestoreKeepsRetirement(
     SELECT id, loc, tags, minted_at AS "mintedAt" FROM nodes
     WHERE memory_id = ${args.memoryId}
       AND loc = ANY(${[...snapshotTags.keys()]}::text[])
-      AND node_type <> ${COMPILED_BOOT_PROMPT_NODE_TYPE}
+      AND role IS DISTINCT FROM ${BOOT_PROMPT_COMPILED_ROLE}
     ORDER BY id FOR NO KEY UPDATE`;
   const offending = rows
     .filter((r) => r.mintedAt !== null && (r.tags ?? []).includes(SUPERSEDED_TAG) && !snapshotTags.get(r.loc)!.includes(SUPERSEDED_TAG))

@@ -318,7 +318,7 @@ describe('#3587 snapshot-side tag match', () => {
 
 describe('#3587 compiled boot prompt carve-out', () => {
   it('a minted, retired compiled boot prompt is not a retirement the guard judges: restoring a snapshot that lacks the tag succeeds and leaves the row byte-identical (cor:agt:040:12)', async () => {
-    await mk('specs:cb', { nodeType: 'compiled-boot-prompt', role: 'boot-prompt', ...mintedFields });
+    await mk('specs:cb', { nodeType: 'system', role: 'boot-prompt.compiled', ...mintedFields });
     const rev = await save();
     await db.node.updateMany({ where: { memoryId, loc: 'specs:cb' }, data: { tags: ['superseded'] } });
     const before = await rowOf('specs:cb');

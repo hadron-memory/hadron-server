@@ -27,7 +27,7 @@ beforeEach(async () => {
   agentId = (await db.agent.create({ data: { name: 'Agent', urn: 'provenance:agent', organizationId: org.id, systemMemoryId: memoryId } })).id;
   sourceId = (await db.node.create({ data: { memoryId, loc: 'source', name: 'Secret source name', content: 'source text' } })).id;
   nodeId = (await withCompileWrite(() => db.node.create({ data: {
-    memoryId, loc: 'boot:compiled', name: 'Compiled', nodeType: 'compiled-boot-prompt', role: 'boot-prompt', content: 'compiled', revSeq: 2,
+    memoryId, loc: 'boot:compiled', name: 'Compiled', nodeType: 'system', role: 'boot-prompt.compiled', content: 'compiled', revSeq: 2,
   } }))).id;
   ctx = { db, userId: user.id, roles: ['READER'] } as Context;
   await record(1, 1);

@@ -5,7 +5,7 @@ import { typeDefs } from './typeDefs.js';
 import { db } from '../../../integrations/db/client.js';
 import { cleanDb, createDbAgentImport, createDbAgentOrgGrant } from '../../../test/helpers.js';
 import { generateId } from '../../../lib/id.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
+import { BOOT_PROMPT_COMPILED_ROLE, BOOT_PROMPT_NODE_TYPE, withCompileWrite } from '../../../lib/bootPrompt.js';
 import { resolveAppInstallation } from '../../../lib/appInstallations.js';
 import { resolvers, type Context } from './resolvers.js';
 
@@ -70,7 +70,7 @@ async function fixture(kind: 'ROW' | 'DERIVED') {
   const memory = await db.memory.create({ data: { organizationId: org.id, class: 'system', appId: app.id,
     installOfAgentId: agent.id, isInstallMemory: true, name: 'Install', urn: `${org.urn}:install` } });
   const node = await withCompileWrite(() => db.node.create({ data: { memoryId: memory.id, loc: 'boot:compiled',
-    name: 'Compiled', content: 'compiled', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE } }));
+    name: 'Compiled', content: 'compiled', role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE } }));
   return { app, agent, parent, memory, node, ctx: { db, userId: user.id, roles: ['READER'] } as Context };
 }
 

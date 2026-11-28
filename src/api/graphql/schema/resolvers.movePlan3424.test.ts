@@ -81,7 +81,7 @@ describe('planNodeMove #3424', () => {
 
   it.each([
         ['info', 'question', 'QUESTION_CONTAINED'],
-    ['compiled-boot-prompt', 'boot-prompt', 'BOOT_PROMPT_COMPILED_WRITE'],
+    ['system', 'boot-prompt.compiled', 'BOOT_PROMPT_COMPILED_WRITE'],
   ])('uses the real refusal for governed %s/%s', async (nodeType, role, code) => {
     const root = await createDbNode(db, { memoryId: memory.id, loc: 'a' });
     await db.node.update({ where: { id: root.id }, data: { nodeType: nodeType!, role } });

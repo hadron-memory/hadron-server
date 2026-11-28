@@ -14,7 +14,7 @@ import { db } from '../integrations/db/client.js';
 import { cleanDb, createDbAppAgent, createDbAppMember, createDbAppWithKey } from '../test/helpers.js';
 import { generateId } from './id.js';
 import { requestActorStorage, runAsActor, publishAmbiguousActor, emptyActor } from './requestActor.js';
-import { COMPILED_BOOT_PROMPT_NODE_TYPE, withCompileWrite } from './bootPrompt.js';
+import { BOOT_PROMPT_COMPILED_ROLE, BOOT_PROMPT_NODE_TYPE, withCompileWrite } from './bootPrompt.js';
 import {
   BOOT_PROMPT_POINTER_CODES,
   loadBootPromptPointerOwner,
@@ -42,7 +42,7 @@ const user = (name: string) => db.user.create({ data: { id: generateId(), name }
 const sysMemory = (org: string, name: string, extra: Record<string, unknown> = {}) =>
   db.memory.create({ data: { id: generateId(), class: 'system', name, urn: `${org === orgId ? 'bp-org' : 'bp-other'}:${name}`, organizationId: org, ...extra } });
 const compiledIn = (memoryId: string, loc = 'boot:compiled') => withCompileWrite(() => db.node.create({
-  data: { id: generateId(), memoryId, loc, name: 'Compiled', content: 'You are {{worker.name}}.', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
+  data: { id: generateId(), memoryId, loc, name: 'Compiled', content: 'You are {{worker.name}}.', role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE },
 }));
 
 async function fixture() {
@@ -262,7 +262,7 @@ describe('#2045 target checks, after the gate', () => {
     const f = await fixture();
     await expect(db.$transaction(async (tx: Prisma.TransactionClient) => {
       const node = await withCompileWrite(() => tx.node.create({
-        data: { id: generateId(), memoryId: f.install1.id, loc: 'boot:new', name: 'New', content: 'x', role: 'boot-prompt', nodeType: COMPILED_BOOT_PROMPT_NODE_TYPE },
+        data: { id: generateId(), memoryId: f.install1.id, loc: 'boot:new', name: 'New', content: 'x', role: BOOT_PROMPT_COMPILED_ROLE, nodeType: BOOT_PROMPT_NODE_TYPE },
       }));
       const owner = (await loadBootPromptPointerOwner(tx, f.targets.APP_AGENT))!;
       const txCtx = { ...ctxOf(f.member.id), db: tx } as Context;
