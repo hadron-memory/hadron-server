@@ -19,11 +19,11 @@ const untilRoom = () => new Promise<void>((r) => setTimeout(r, rateWindowWaitMs(
 vi.mock('../../integrations/github/writeNodeToGit.js', () => ({ writeNodeToGit: vi.fn().mockResolvedValue(undefined) }));
 
 describe('#5486 SEC10 P2-1: a leading option that selects the basic or extended syntax is refused', () => {
-  it.each([String.raw`(?b)\(a\)[\]\1`, String.raw`(?bi)\(a\)[\]\1`, '(?e)a', '(?ie)a', '***:(?b)a', '(?i)(?b)a'])('refuses %s', (p) => {
+  it.each([String.raw`(?b)\(a\)[\]\1`, String.raw`(?bi)\(a\)[\]\1`, '(?e)a', '(?ie)a', '(?x)(a)#[\n\\1]', '(?ix)(a)#[\n\\1]', '***:(?x)(a)#[\n\\1]', '(?x)a b', '***:(?b)a', '(?i)(?b)a'])('refuses %s', (p) => {
     expect(selectsNonAreSyntax(p)).toBe(true);
-    expect(() => assertRegexPatternAllowed(p)).toThrow(/basic or extended/);
+    expect(() => assertRegexPatternAllowed(p)).toThrow(/basic, extended or expanded/);
   });
-  it.each(['(?i)abc', '(?x)a b', '***:(?i)a', 'a(?b)', 'abc', '(?q)a.b', '(?s)(?i)x'])('allows %s', (p) => expect(selectsNonAreSyntax(p)).toBe(false));
+  it.each(['(?i)abc', '***:(?i)a', 'a(?b)', 'abc', '(?q)a.b', '(?s)(?i)x'])('allows %s', (p) => expect(selectsNonAreSyntax(p)).toBe(false));
 });
 
 describe('#5486 hasRegexBackreference (a scanner, not a substring test)', () => {

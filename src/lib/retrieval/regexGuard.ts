@@ -12,8 +12,8 @@
  * (`\\1`) is a literal backslash then `1`, and a bracket expression (`[\1]`, `[[:digit:]\1]`) holds no backreference.
  * An escape `\` + `1`-`9` outside a bracket expression is a backreference in the engine's ARE syntax (and, in the
  * `(?b)` basic syntax, `\1`-`\9` likewise), and a two-digit form (`\10`) begins with such a digit, so it is caught by
- * the same rule. Where the engine might read an escape as a literal instead (a `(?q)` literal pattern, a `#` comment in
- * `(?x)`), refusing is the conservative side.
+ * the same rule. Where the engine might read an escape as a literal instead (a `(?q)` literal pattern), refusing is the
+ * conservative side; the options that change how the scanner must read the pattern (`b`, `e`, `x`) are refused up front.
  */
 import { GraphQLError } from 'graphql';
 
@@ -23,15 +23,18 @@ export const REGEX_PATTERN_MAX_CHARS = 200;
  * #5486 SEC10 P2-1: the scanner reads brackets by the ARE rule (a backslash escapes inside brackets). A leading embedded
  * option `(?b)` (basic) or `(?e)` (extended) switches the engine to a syntax where a backslash in a bracket is an ordinary
  * character, so the scanner and the engine would disagree on where a bracket ends and a later backreference would pass.
- * Embedded options are only valid at the start of the pattern (after an optional `***:` director), so that is the only place
- * looked at; a pattern that selects `b` or `e` is refused, which keeps the scanner's ARE assumption true.
+ * `(?x)` (expanded) is the same class: a `#` then runs to the next newline, so a `[` inside that comment opens no bracket
+ * while the scanner would read it as one and skip a later backreference (SEC10 P2-2). Embedded options are only valid at the
+ * start of the pattern (after an optional `***:` director), so that is the only place looked at; a pattern that selects `b`,
+ * `e` or `x` is refused, which keeps the scanner's assumptions (ARE rule, no comments) true. The other options (`i`, `c`, `n`,
+ * `p`, `w`, `s`, `m`, `t`) do not change bracket or escape parsing, and `q` (literal) only makes the scanner over-refuse.
  */
 export function selectsNonAreSyntax(pattern: string): boolean {
   let rest = pattern.startsWith('***:') ? pattern.slice(4) : pattern;
   for (;;) {
     const m = /^\(\?([A-Za-z]*)\)/.exec(rest);
     if (!m) return false;
-    if (/[be]/.test(m[1]!)) return true;
+    if (/[bex]/.test(m[1]!)) return true;
     rest = rest.slice(m[0].length);
   }
 }
@@ -86,7 +89,7 @@ export function assertRegexPatternAllowed(pattern: string): void {
       { extensions: { code: 'BAD_USER_INPUT' } });
   }
   if (selectsNonAreSyntax(pattern)) {
-    throw new GraphQLError('A regex pattern may not select the basic or extended syntax. Remove the leading option.',
+    throw new GraphQLError('A regex pattern may not select the basic, extended or expanded syntax. Remove the leading option.',
       { extensions: { code: 'BAD_USER_INPUT' } });
   }
   if (hasRegexBackreference(pattern)) {
