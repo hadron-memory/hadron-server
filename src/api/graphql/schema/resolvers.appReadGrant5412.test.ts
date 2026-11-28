@@ -169,6 +169,17 @@ describe('a stored row the creation door would refuse reaches nothing', () => {
     }
   });
 
+  it('a branch that is not a well-formed loc, and a key the judge does not know, make the row inert', async () => {
+    const s = await schedule();
+    const r = await run('SCHEDULE', s.id);
+    for (const bad of [{ branch: 'bad loc' }, { branch: ':docs' }, { branch: 'docs:' }, { branch: 'a'.repeat(5000) }, { prefix: 'docs' }, { future: 'x' }, { automation: s.id, future: 'x' }]) {
+      const m = await alicesMemory();
+      await activeGrant({ memory: m.id, ...bad });
+      expect({ bad, key: await reachFor(keyAuth(), m.id), run: await reachFor(runAuth(r.id), m.id) }).toEqual({ bad, key: NONE, run: NONE });
+      expect({ bad, branches: [...(await grantReadReachDetailFor(db, keyAuth())).branches.keys()] }).toEqual({ bad, branches: [] });
+    }
+  });
+
   it('a branch beside form (a) or a list reaches nothing', async () => {
     const m = await alicesMemory();
     const admin = (await db.user.create({ data: { id: generateId(), handle: `adm-${generateId().slice(-6)}` } as never })).id;
@@ -197,3 +208,60 @@ describe('no optional key: exactly S1', () => {
     expect(await reachFor(keyAuth(bare), m.id)).toEqual(NONE);
   });
 });
+
+/**
+ * The security seat's requirement (c): a key only ever narrows. For every #5321 shape (one memory, a list, the organization) and
+ * every key (valid, unknown or malformed), the grant WITH the key reaches no more than the same grant without it, for a key holding
+ * grant:read, a run of the named schedule and a manual run: whole > part (branch) > nothing.
+ */
+describe('the differential, both ways: a key never widens', () => {
+  it('reach(with key) <= reach(without key) for every shape, key and principal', async () => {
+    const admin = (await db.user.create({ data: { id: generateId(), handle: `adm-${generateId().slice(-6)}` } as never })).id;
+    await db.orgMember.create({ data: { organizationId: org.id, userId: admin, role: 'ADMIN' } });
+    const variant = async (shape: 'one' | 'list' | 'org', extra: (sid: string) => Record<string, unknown>) => {
+      const a = await db.app.create({ data: { id: generateId(), organizationId: org.id, name: 'V', urn: `${org.urn}:v-${generateId().slice(-8)}` } as never });
+      const k = (await db.appKey.create({ data: { appId: a.id, keyHash: generateId(), keyPreview: 'kv' } })).id;
+      await db.$executeRawUnsafe(`INSERT INTO app_key_scopes (id, app_key_id, scope, granted_by_user_id) VALUES ($1, $2, 'grant:read', $3)`, generateId(), k, alice);
+      const sch = await db.agentSchedule.create({ data: { id: generateId(), organizationId: org.id, appId: a.id, name: 'S', cron: '* * * * *', entryNodeUrn: ENTRY } });
+      const mkRun = async (triggerKind: 'SCHEDULE' | 'MANUAL', triggerId: string | null) =>
+        (await db.appRun.create({ data: { id: generateId(), organizationId: org.id, appId: a.id, agentId: await testRunAgentId(db, org.id, a.id), triggerKind, triggerId, entryNodeUrn: ENTRY } })).id;
+      const target = shape === 'org'
+        ? await db.memory.create({ data: { id: generateId(), name: 'k', urn: `${org.urn}:k-${generateId().slice(-8)}`, class: 'knowledge', visibility: 'ORGANIZATION', organizationId: org.id } as never })
+        : await alicesMemory();
+      const memory = shape === 'one' ? target.id : shape === 'list' ? [target.id] : org.id;
+      await insertGrantUnguarded(world(a.id), {
+        user_id: null, grantee_app_id: a.id, issuer_user_id: shape === 'org' ? admin : alice, action: 'memory.read', action_values: { memory, ...extra(sch.id) },
+        activated_at: raw(DB_NOW), verification_kind: 'PASSKEY', verified_by: shape === 'org' ? admin : alice,
+      } as never);
+      const auths: AuthContext[] = [
+        { appId: a.id, appKeyId: k, roles: [], clientId: `app:${a.id}` } as AuthContext,
+        { appId: a.id, roles: [], clientId: `run:${await mkRun('SCHEDULE', sch.id)}` } as AuthContext,
+        { appId: a.id, roles: [], clientId: `run:${await mkRun('MANUAL', null)}` } as AuthContext,
+      ];
+      const out: number[] = [];
+      for (const auth of auths) {
+        const r = await reachFor(auth, target.id);
+        expect(r.mcp).toBe(r.graphql);
+        const d = await grantReadReachDetailFor(db, auth);
+        out.push(r.mcp ? 2 : d.branches.has(target.id) ? 1 : 0);
+      }
+      return out;
+    };
+    const extras: Array<[string, (sid: string) => Record<string, unknown>]> = [
+      ['branch', () => ({ branch: 'docs' })], ['automation', (sid) => ({ automation: sid })], ['both', (sid) => ({ branch: 'docs', automation: sid })],
+      ['unknown', () => ({ future: 'x' })], ['bad-branch', () => ({ branch: 'bad loc' })], ['bad-automation', () => ({ automation: '' })],
+      ['other-automation', () => ({ automation: generateId() })],
+    ];
+    let baselinePositive = 0;
+    for (const shape of ['one', 'list', 'org'] as const) {
+      const without = await variant(shape, () => ({}));
+      baselinePositive += without.filter((x) => x > 0).length;
+      for (const [label, extra] of extras) {
+        const withKey = await variant(shape, extra);
+        withKey.forEach((x, i) => expect({ shape, label, principal: i, narrower: x <= without[i] }).toEqual({ shape, label, principal: i, narrower: true }));
+      }
+    }
+    expect(baselinePositive).toBeGreaterThan(0); // the control: the grants without a key do reach something
+  }, 120_000);
+});
+

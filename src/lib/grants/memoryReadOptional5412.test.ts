@@ -38,6 +38,7 @@ async function userKb(owner: string) {
 }
 
 beforeEach(async () => {
+  vi.stubEnv('MEMORY_READ_GRANT_OPTIONS_ENABLED', 'true'); // the creation switch (the security seat's must-fix); its own describe below
   await cleanDb(db);
   w = await seedWorld();
   await upsertPlatformActions(db);
@@ -136,6 +137,23 @@ describe('creation: the absent-key form (cor:acl:140:09)', () => {
     expect(await code(create({ branch: 'docs' }))).toBe('GRANT_VALUES_INVALID');
     expect(await code(create({}))).toBe('GRANT_VALUES_INVALID');
     expect(await db.grant.count({ where: { action: 'memory.read' } })).toBe(0);
+  });
+});
+
+describe('the creation switch (deploy order: an older judge reads only `memory`)', () => {
+  it('only the exact value `true` admits branch or automation; off, they are the one refusal and an S1 grant is unaffected', async () => {
+    const s = await schedule();
+    for (const off of [undefined, '', '1', 'TRUE', ' true', 'yes', 'false']) {
+      if (off === undefined) vi.stubEnv('MEMORY_READ_GRANT_OPTIONS_ENABLED', undefined as never); else vi.stubEnv('MEMORY_READ_GRANT_OPTIONS_ENABLED', off);
+      for (const values of [{ memory: kb.id, branch: 'docs' }, { memory: kb.id, automation: s.id }, { memory: w.orgId, automation: s.id }]) {
+        expect({ off, values, code: await code(create(values)) }).toEqual({ off, values, code: 'GRANT_VALUES_INVALID' });
+      }
+      expect(await db.grant.count({ where: { action: 'memory.read' } })).toBe(0);
+    }
+    const plain = await create({ memory: kb.id });
+    expect((await db.grant.findUniqueOrThrow({ where: { id: plain } })).values).toEqual({ memory: kb.id });
+    vi.stubEnv('MEMORY_READ_GRANT_OPTIONS_ENABLED', 'true');
+    expect(await code(create({ memory: kb.id, branch: 'docs' }))).toBe('OK');
   });
 });
 

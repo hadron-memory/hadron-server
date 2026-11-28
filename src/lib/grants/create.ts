@@ -47,10 +47,8 @@ import { generateId } from '../id.js';
 import { autoDeleteLimitRefusal } from '../secrets/autoDelete.js';
 import { isModelReadableKind } from '../secrets.js';
 import { grantTermsBytes, GrantTermsError, type GrantHolderKind } from './terms.js';
-import { MEMORY_READ_ACTION, READ_GRANT_TARGET_SELECT, memoryReadTargetRefusal } from './readGrant.js';
+import { MEMORY_READ_ACTION, READ_GRANT_TARGET_SELECT, isWellFormedLoc, memoryReadGrantOptionsEnabled, memoryReadTargetRefusal } from './readGrant.js';
 import { MEMORY_WRITE_ACTION, WHOLE_MEMORY, WRITE_GRANT_TARGET_SELECT, memoryWriteTargetRefusal } from './writeGrant.js';
-import { InvalidLocError, validateLoc } from '../validateLoc.js';
-import { LOC_MAX_TOTAL_LENGTH } from '../validateLocOrThrow.js';
 
 export type GrantCreateCode =
   | 'GRANT_REQUESTER_NOT_WORKER'
@@ -146,12 +144,6 @@ function valueMatchesType(type: string, value: unknown): boolean {
   if (type !== 'node-ref') return false;
   const one = (v: unknown) => v === '*' || (typeof v === 'string' && NODE_ID_RE.test(v));
   return Array.isArray(value) ? value.every(one) : one(value);
-}
-
-/** A loc as a write would accept it: well-formed atoms and the total-length cap. */
-function isWellFormedLoc(value: unknown): boolean {
-  if (typeof value !== 'string' || value === '' || value.length > LOC_MAX_TOTAL_LENGTH) return false;
-  try { validateLoc(value); return true; } catch (e) { if (e instanceof InvalidLocError) return false; throw e; }
 }
 
 /** #5321, #5404: the memory-grant actions, held only by the grant's own App (cor:acl:140:02). */
@@ -340,6 +332,11 @@ export async function createPendingGrant(tx: Prisma.TransactionClient, args: Cre
   // two (a missing, deleted or other-App trigger is the same refusal as a malformed id: no existence oracle). Both re-judged at every read.
   if (action.name === MEMORY_READ_ACTION) {
     const vals = values as Record<string, unknown>;
+    // The security seat's deploy-order must-fix: until the switch is on, a restricted grant is refused with the one answer, so no
+    // row an older judge would read as the whole memory exists while such a judge may still serve.
+    if ((has('branch') || has('automation')) && !memoryReadGrantOptionsEnabled()) {
+      throw new GrantCreateRefusal('GRANT_VALUES_INVALID', 'keys differ from the declared parameters');
+    }
     if (has('branch')) {
       const app = await tx.app.findFirst({ where: { id: appId, deletedAt: null }, select: { organizationId: true } });
       if (typeof vals.memory !== 'string' || (app?.organizationId != null && vals.memory === app.organizationId)) {

@@ -32,6 +32,8 @@ import { isUserHolding } from '../auth/userHolding.js';
 import { RUN_CLIENT_PREFIX } from '../auth/runPrincipal.js';
 import { rootTriggerOfRun } from '../automation/rootTrigger.js';
 import { grantCoversLoc } from './writeGrant.js';
+import { InvalidLocError, validateLoc } from '../validateLoc.js';
+import { LOC_MAX_TOTAL_LENGTH } from '../validateLocOrThrow.js';
 
 export const MEMORY_READ_ACTION = 'memory.read';
 /** The App key scope a pure key needs before a `memory.read` grant held by its App reaches it. */
@@ -96,19 +98,37 @@ export async function memoryReadTargetRefusal(db: Db, appId: string, memory: Rea
 interface ReadGrantRow { action_values: unknown; issuer_user_id: string | null }
 
 /**
- * #5412 (cor:acl:140:02, the two Proposed optional parameters; cor:acl:140:09, the absent-key form): a grant row's optional terms. A
- * missing key restricts nothing. A key that is present but holds anything other than one non-empty string (the creation door admits
- * nothing else) makes the row reach NOTHING: a malformed restriction is never read as no restriction.
+ * #5412: the switch that lets the creation door accept `memory.read`'s optional `branch` and `automation` (the security seat's
+ * deploy-order must-fix). Read on every call; ONLY the exact value `true` turns it on. It stays off until every instance serving the
+ * database runs a build whose read judge knows the two keys: an older judge reads only `memory` and would read a restricted grant as
+ * the whole memory. The judge below honours the keys whatever the switch says.
+ */
+export function memoryReadGrantOptionsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.MEMORY_READ_GRANT_OPTIONS_ENABLED === 'true';
+}
+
+/** A loc as a write would accept it: well-formed atoms and the total-length cap (#5404 creation, #5412 creation and read). */
+export function isWellFormedLoc(value: unknown): boolean {
+  if (typeof value !== 'string' || value === '' || value.length > LOC_MAX_TOTAL_LENGTH) return false;
+  try { validateLoc(value); return true; } catch (e) { if (e instanceof InvalidLocError) return false; throw e; }
+}
+
+/** The keys a `memory.read` grant's values may carry (#5412). A row with any other key is inert. */
+const MEMORY_READ_KEYS: ReadonlySet<string> = new Set(['memory', 'branch', 'automation']);
+
+/**
+ * #5412 (cor:acl:140:02, the two Proposed optional parameters; cor:acl:140:09, the absent-key form): a grant row's optional terms, or
+ * null when the row must reach NOTHING. A missing key restricts nothing. A key that is present but holds anything other than one
+ * value the creation door admits (a `branch` that is a well-formed loc, an `automation` that is one non-empty string other than the
+ * wildcard), and any key this judge does not know, make the row inert: a malformed or unknown restriction is never read as none.
  */
 function optionalTerms(values: unknown): { branch: string | null; automation: string | null } | null {
-  const v = (values ?? {}) as Record<string, unknown>;
-  const one = (k: string): string | null | undefined => {
-    if (!Object.prototype.hasOwnProperty.call(v, k)) return null;
-    const x = v[k];
-    return typeof x === 'string' && x !== '' && x !== '*' ? x : undefined;
-  };
-  const branch = one('branch');
-  const automation = one('automation');
+  if (!values || typeof values !== 'object' || Array.isArray(values)) return null;
+  const v = values as Record<string, unknown>;
+  if (!Object.keys(v).every((k) => MEMORY_READ_KEYS.has(k))) return null;
+  const has = (k: string) => Object.prototype.hasOwnProperty.call(v, k);
+  const branch = has('branch') ? (isWellFormedLoc(v.branch) ? (v.branch as string) : undefined) : null;
+  const automation = has('automation') ? (typeof v.automation === 'string' && v.automation !== '' && v.automation !== '*' ? v.automation : undefined) : null;
   if (branch === undefined || automation === undefined) return null;
   return { branch, automation };
 }
