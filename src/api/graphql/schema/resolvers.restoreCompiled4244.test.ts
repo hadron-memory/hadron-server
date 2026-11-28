@@ -278,3 +278,24 @@ describe('#5453: a snapshot published before the definition-node migration', () 
     expect(await db.node.count({ where: { memoryId: systemMemory.id, loc: COMPILED } })).toBe(0);
   });
 });
+
+describe('#5485: a snapshot published before the task role family', () => {
+  it('restores a task and a process as today\'s kind: no `task` type and no `role-task` role is written back', async () => {
+    await mk('tasks:deploy', { nodeType: 'system', role: 'task', isRunnable: true, content: 'task body' });
+    await mk('processes:release', { nodeType: 'system', role: 'process', content: 'process body' });
+    const rev = await save();
+    // The capture as it was before #5485: the client-written type and role.
+    const target = await node(rev.revisionLoc);
+    const data = target.data as any;
+    for (const n of data.snapshot.nodes as Array<Record<string, unknown>>) {
+      if (n.loc === 'tasks:deploy') { n.nodeType = 'task'; n.role = 'role-task'; }
+      if (n.loc === 'processes:release') { n.nodeType = 'info'; n.role = 'process'; }
+    }
+    await db.node.update({ where: { id: target.id }, data: { data } });
+    await db.node.deleteMany({ where: { memoryId: systemMemory.id, loc: { in: ['tasks:deploy', 'processes:release'] } } });
+    await restore(rev.revisionLoc);
+    expect(await node('tasks:deploy')).toMatchObject({ nodeType: 'system', role: 'task.role', isRunnable: true, content: 'task body', deletedAt: null });
+    expect(await node('processes:release')).toMatchObject({ nodeType: 'system', role: 'process', content: 'process body', deletedAt: null });
+    expect(await db.node.count({ where: { memoryId: systemMemory.id, OR: [{ nodeType: 'task' }, { role: 'role-task' }] } })).toBe(0);
+  });
+});
