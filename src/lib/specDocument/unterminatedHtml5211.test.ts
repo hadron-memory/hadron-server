@@ -248,6 +248,7 @@ describe('#5265 rebuild on items 2, 4 and 9: the bodies main keeps', () => {
     expect(losers(body)).toEqual(['commonmark.js', 'markdown-it']);
     expect(escapeUnterminatedHtml(body)).toBe('-<!<pre>\n<div/&lt;xmp>');
     expect(losers(escapeUnterminatedHtml(body))).toEqual([]);
+    expect(escapeUnterminatedHtml(escapeUnterminatedHtml(body))).toBe(escapeUnterminatedHtml(body));
   });
 });
 
