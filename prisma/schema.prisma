@@ -1372,19 +1372,19 @@ enum NodeContentValidationReporterKind {
 /// Three fields say what kind of node it is, and they are independent:
 /// - `nodeType` is the platform's kind. It is a free string, not an enum, so that third-party agents and Apps can
 ///   add their own values; the platform gives no special treatment to values it does not know. The database
-///   refuses one value only, a kind retired by #5453 (see `chk_nodes_compiled_boot_prompt_kind`). The canonical
-///   values for ordinary nodes:
+///   refuses one value only, a kind retired by #5453 (see `chk_nodes_compiled_boot_prompt_kind`). The node type
+///   "prompt" is retired too (Holger, 2026-11-28): nothing writes it and the migration made every such node `system`;
+///   a prompt is a `system` node whose role is `prompt.*`. The canonical values for ordinary nodes:
 ///   - `abstract`: agent-generated summaries (chat summaries, topic abstracts); retrieval flows search them first.
 ///   - `chat`: chat sessions and messages.
 ///   - `data`: the structured payload is the artifact; there is no human-written body.
 ///   - `info` (the default): reference content such as articles, guides and extracted facts.
-///   - `prompt`: system prompt content for an LLM call.
 ///   - `record`: stored data that is mostly appended to, such as user profiles and event logs.
 ///   - `reference`: pointers to external sources or to other memories, such as papers, URLs and asset references.
 ///   - `system`: an agent's internal configuration, such as conversation designs, stages and topics; usually in
 ///     an Agent's system memory and hidden from end-user search. Every node that defines an Agent is `system`,
 ///     and its `role` names the kind (#5453): a boot prompt's source, compiled prompt and included rules
-///     (`boot-prompt.source`, `boot-prompt.compiled`, `boot-prompt.rule`), and a chatbot's conversations, stages
+///     (`prompt.boot.source`, `prompt.boot.compiled`, `prompt.boot.rule`), and a chatbot's conversations, stages
 ///     and prompt templates (`chatbot.conversation`, `chatbot.stage`, `chatbot.prompt`).
 ///   `comment` is reserved by the platform for governed feedback (see CommentMeta). The platform also writes
 ///   `chat-message`. The one list of every value the platform names is
@@ -1519,7 +1519,7 @@ model Node {
   /// anything; the platform reads a small CLOSED subset and ignores the rest.
   ///
   /// THREE KIND-ISH FIELDS, and the distinction is what readers get wrong:
-  ///   - `nodeType`   — the PLATFORM-kind axis (info/task/prompt/…), load-bearing
+  ///   - `nodeType`   — the PLATFORM-kind axis (info/system/…), load-bearing
   ///                    for retrieval and rendering. NOT this field.
   ///   - `objectType` — the COLLECTION discriminator (#725): which domain object
   ///                    this is an instance of, schema-validated. NOT this field.
@@ -2467,7 +2467,7 @@ model Agent {
   name                  String
   description           String?
   /// #2045 (S8, hrn:node:hadronmemory.com:specs:cor:agt:040:07) — this Agent's boot-prompt POINTER: the id of a
-  /// compiled boot-prompt node (`role = 'boot-prompt.compiled'`, #5453), never its
+  /// compiled boot-prompt node (`role = 'prompt.boot.compiled'`, #5453), never its
   /// source. NO foreign key: nodes are hard-deleted on some paths (deleteNode
   /// hard/subtree, memory merge, git-sync cleanup), and SET NULL would turn a
   /// deleted target (R27) into "no pointer" (R26) while RESTRICT would block
@@ -4656,7 +4656,7 @@ model AppAgent {
   updatedAt        DateTime? @updatedAt @map("updated_at")
   updatedBy        String?   @map("updated_by")
   /// #2045 (S8, hrn:node:hadronmemory.com:specs:cor:agt:040:07) — the install's boot-prompt POINTER: the id of a
-  /// compiled boot-prompt node (`role = 'boot-prompt.compiled'`, #5453), never its
+  /// compiled boot-prompt node (`role = 'prompt.boot.compiled'`, #5453), never its
   /// source. NO foreign key: nodes are hard-deleted on some paths (deleteNode
   /// hard/subtree, memory merge, git-sync cleanup), and SET NULL would turn a
   /// deleted target (R27) into "no pointer" (R26) while RESTRICT would block
@@ -4755,7 +4755,7 @@ model Worker {
   /// Per-worker commit trailer template, delivered through S4 (hrn:node:hadronmemory.com:specs:cor:agt:040:04).
   trailer           String
   /// #2045 (S8, hrn:node:hadronmemory.com:specs:cor:agt:040:07) — this worker's boot-prompt POINTER: the id of a
-  /// compiled boot-prompt node (`role = 'boot-prompt.compiled'`, #5453), never its
+  /// compiled boot-prompt node (`role = 'prompt.boot.compiled'`, #5453), never its
   /// source. NO foreign key: nodes are hard-deleted on some paths (deleteNode
   /// hard/subtree, memory merge, git-sync cleanup), and SET NULL would turn a
   /// deleted target (R27) into "no pointer" (R26) while RESTRICT would block

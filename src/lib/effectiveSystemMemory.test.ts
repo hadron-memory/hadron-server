@@ -109,7 +109,7 @@ describe('boot prompts are never inherited (ruling 2)', () => {
     const backend = await agent('backend-engineer', engineer);
     const go = await agent('go-engineer', backend);
     const farPrompt = await node(engineer, 'prompts:boot', { role: 'boot-prompt' });
-    const midPrompt = await node(backend, 'prompts:boot', { role: 'boot-prompt.compiled', nodeType: 'system' });
+    const midPrompt = await node(backend, 'prompts:boot', { role: 'prompt.boot.compiled', nodeType: 'system' });
     const farOther = await node(engineer, 'notes:x');
     await node(backend, 'notes:x', { role: 'boot-prompt' });
     const got = await inherited(go);
@@ -123,36 +123,36 @@ describe('boot prompts are never inherited (ruling 2)', () => {
 
   // #5453: a rule joined the boot-prompt family and is still inherited, as it was under `boot-prompt-rule`.
   // "Never inherited" means the boot prompt itself: a source, a compiled node, the bare role, an unknown sub-kind.
-  it('#5453: a base\'s rule (boot-prompt.rule) IS passed down, by every read of the effective memory', async () => {
+  it('#5453: a base\'s rule (prompt.boot.rule) IS passed down, by every read of the effective memory', async () => {
     const engineer = await agent('engineer');
     const backend = await agent('backend-engineer', engineer);
     const go = await agent('go-engineer', backend);
-    const rule = await node(engineer, 'boot:rules:core', { role: 'boot-prompt.rule', nodeType: 'system' });
-    const source = await node(engineer, 'boot:source', { role: 'boot-prompt.source', nodeType: 'system' });
+    const rule = await node(engineer, 'boot:rules:core', { role: 'prompt.boot.rule', nodeType: 'system' });
+    const source = await node(engineer, 'boot:source', { role: 'prompt.boot.source', nodeType: 'system' });
     const unknown = await node(engineer, 'boot:coordinator', { role: 'boot-prompt.coordinator' });
     const got = await inherited(go);
     expect(got.get(rule)).toBe(engineer.id);
     expect(got.has(source)).toBe(false);
     expect(got.has(unknown)).toBe(false);
-    expect((await descendantMemoriesInheriting(db, { id: rule, memoryId: engineer.mem, loc: 'boot:rules:core', role: 'boot-prompt.rule' })).sort())
+    expect((await descendantMemoriesInheriting(db, { id: rule, memoryId: engineer.mem, loc: 'boot:rules:core', role: 'prompt.boot.rule' })).sort())
       .toEqual([backend.mem, go.mem].sort());
-    expect(await descendantMemoriesInheriting(db, { id: source, memoryId: engineer.mem, loc: 'boot:source', role: 'boot-prompt.source' })).toEqual([]);
+    expect(await descendantMemoriesInheriting(db, { id: source, memoryId: engineer.mem, loc: 'boot:source', role: 'prompt.boot.source' })).toEqual([]);
     // The batch lookup, the re-check a listing runs on rows it already fetched, and the single-row re-check agree.
     const batch = await findEffectiveNodeIdsByLoc(db, [{ memoryId: go.mem, inheritRoot: false }], 'boot:rules:core');
     expect(batch.get(`${go.mem}:false`)?.id).toBe(rule);
     expect((await findEffectiveNodeIdsByLoc(db, [{ memoryId: go.mem, inheritRoot: false }], 'boot:source')).get(`${go.mem}:false`)).toBeNull();
     const scope = await effectiveScope(db, [go.mem]);
     const kept = await retainEffective(db, [
-      { id: rule, memoryId: engineer.mem, role: 'boot-prompt.rule' },
-      { id: source, memoryId: engineer.mem, role: 'boot-prompt.source' },
+      { id: rule, memoryId: engineer.mem, role: 'prompt.boot.rule' },
+      { id: source, memoryId: engineer.mem, role: 'prompt.boot.source' },
     ], scope);
     expect(kept.map((r) => r.id)).toEqual([rule]);
     // A nearer Agent's own rule at the same loc wins: it is a candidate, so it overrides the base's for everyone below it.
-    const nearRule = await node(backend, 'boot:rules:core', { role: 'boot-prompt.rule', nodeType: 'system' });
+    const nearRule = await node(backend, 'boot:rules:core', { role: 'prompt.boot.rule', nodeType: 'system' });
     const again = await inherited(go);
     expect(again.get(nearRule)).toBe(backend.id);
     expect(again.has(rule)).toBe(false);
-    expect(await descendantMemoriesInheriting(db, { id: rule, memoryId: engineer.mem, loc: 'boot:rules:core', role: 'boot-prompt.rule' })).toEqual([]);
+    expect(await descendantMemoriesInheriting(db, { id: rule, memoryId: engineer.mem, loc: 'boot:rules:core', role: 'prompt.boot.rule' })).toEqual([]);
   });
 
   it('a child\'s own node at a base boot prompt\'s loc is simply the child\'s', async () => {

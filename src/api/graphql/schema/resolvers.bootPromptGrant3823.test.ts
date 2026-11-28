@@ -237,7 +237,7 @@ describe('the grant is the boundary (#3823 refusals that must hold)', () => {
   });
 
   it('a compiled node is never written by a generic edit, grant or not', async () => {
-    const c = await db.node.create({ data: { id: generateId(), memoryId: installMemoryId, loc: `boot:workers:${workerId}:compiled`, name: 'C', content: 'c', role: 'boot-prompt.compiled', nodeType: 'system' } });
+    const c = await db.node.create({ data: { id: generateId(), memoryId: installMemoryId, loc: `boot:workers:${workerId}:compiled`, name: 'C', content: 'c', role: 'prompt.boot.compiled', nodeType: 'system' } });
     await grant(c.id);
     expect(await codeOf(edit(c.id))).toBe('BOOT_PROMPT_COMPILED_WRITE');
   });
@@ -413,8 +413,8 @@ describe('isGrantableEdit, directly (each condition alone defeats the lift)', ()
     expect(isGrantableEdit(prior, { ...ok, memoryId: 'm2' })).toBe(false);
     expect(isGrantableEdit(prior, { ...ok, role: 'notes' })).toBe(false);
     expect(isGrantableEdit(prior, { ...ok, nodeType: 'task' })).toBe(false);
-    expect(isGrantableEdit({ ...prior, role: 'boot-prompt.compiled' }, { ...ok, role: undefined })).toBe(false); // compiled, by role (#5453)
-    expect(isGrantableEdit({ ...prior, role: 'boot-prompt.rule' }, { ...ok, role: undefined })).toBe(false);     // a rule is not a source
+    expect(isGrantableEdit({ ...prior, role: 'prompt.boot.compiled' }, { ...ok, role: undefined })).toBe(false); // compiled, by role (#5453)
+    expect(isGrantableEdit({ ...prior, role: 'prompt.boot.rule' }, { ...ok, role: undefined })).toBe(false);     // a rule is not a source
     expect(isGrantableEdit({ ...prior, role: 'notes' }, ok)).toBe(false);
     expect(isGrantableEdit(null, ok)).toBe(false);
   });

@@ -267,10 +267,11 @@ describe('#2043 S6 — an outside approval ends when its node enters the placed 
     expect(await db.nodeRevision.count({ where: { nodeId, approvalHash: { not: null } } })).toBe(0);
   };
 
-  it('the migration carries prisma/boot-prompt-approval-invariants.sql verbatim', () => {
+  it('the definition-node-roles migration carries prisma/boot-prompt-approval-invariants.sql verbatim', () => {
     const root = fileURLToPath(new URL('../../../../prisma/', import.meta.url));
     const guard = readFileSync(join(root, 'boot-prompt-approval-invariants.sql'), 'utf8');
-    const migration = readFileSync(join(root, 'migrations/20261022010100_boot_prompt_approval_entry/migration.sql'), 'utf8');
+    // #5453: the invariants were re-keyed to the boot-prompt kinds, and that migration carries the new text (last).
+    const migration = readFileSync(join(root, 'migrations/20261128010000_definition_node_roles/migration.sql'), 'utf8');
     expect(migration.endsWith(guard)).toBe(true);
   });
 

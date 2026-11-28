@@ -217,7 +217,7 @@ export async function assertMayWriteBootPromptPointer(
  *  1. the ref parses (a node id or a fully-qualified node URN), else `BAD_USER_INPUT`;
  *  2. it names a LIVE node in a live memory the caller may read, else
  *     `BOOT_PROMPT_POINTER_NOT_FOUND` (an unreadable node answers exactly like a missing one);
- *  3. the node is compiled (role `boot-prompt.compiled`, #5453), else `BOOT_PROMPT_POINTER_NOT_COMPILED`: a source,
+ *  3. the node is compiled (role `prompt.boot.compiled`, #5453), else `BOOT_PROMPT_POINTER_NOT_COMPILED`: a source,
  *     a rule and a node outside the family all answer this;
  *  4. (retired by #5453) the role is the compiled mark now, so check 3 covers what `BOOT_PROMPT_POINTER_WRONG_ROLE`
  *     guarded. Nothing returns that code any more; it stays in the list so a client that names it still compiles;
@@ -251,7 +251,7 @@ export async function validateBootPromptPointer(
     select: { id: true, loc: true, memoryId: true, nodeType: true, role: true, memory: { select: { urn: true } } },
   });
   if (!node || !(await canReadMemory(node.memoryId))) throw notFound();
-  // #5453: the compiled node is told apart by its role (`boot-prompt.compiled`, exact). A source, a rule and a node
+  // #5453: the compiled node is told apart by its role (`prompt.boot.compiled`, exact). A source, a rule and a node
   // outside the family are all "not compiled"; the former second refusal (a compiled type without the role) has no
   // row it could mean now that the role IS the mark.
   if (!isCompiledBootPrompt(node)) {
