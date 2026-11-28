@@ -95,8 +95,9 @@ export async function listChatAiConfigChoices(db: Db, appId: string): Promise<Ch
  * #4042: the tool-choice decision of the config a chat turn would use, resolved in the turn's own order — the chat's
  * stored choice, else `App.chatbotAiConfigId` ({@link pinnedConfigFor}), else the well-known `default` walk
  * App -> Agent -> Org -> Host — and judged by the ONE predicate (`chatToolChoiceFor`, cor:dmo:050:10). Null only when
- * nothing resolves (the turn would raise `NoAiConfigAvailableError`; the walk itself closes the organization and
- * platform levels to a person's App, #5075, so there is no separate refusal here). Returns the decision only: no id, name,
+ * nothing resolves (the turn would raise `NoAiConfigAvailableError`; the walk itself closes the organization level to a
+ * person's App, #5075, and opens the platform level to it only while charging and the credit gate are on, #5025, so there
+ * is no separate refusal here). Returns the decision only: no id, name,
  * provider, model or key.
  */
 export async function effectiveChatToolChoice(
